@@ -340,28 +340,30 @@ def _build_user_message(
 
 
 def _call_ai(system_prompt: str, user_message: str) -> str:
-    """Call the OpenRouter LLM API (runs the async client in a fresh event loop)."""
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-    model = os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3")
+    """Call the LLM API (runs the async client in a fresh event loop)."""
+    api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
+    base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    model = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
 
-    if not openrouter_key:
-        logger.warning("[research] OPENROUTER_API_KEY not set — returning empty response")
+    if not api_key:
+        logger.warning("[research] LLM_API_KEY not set — returning empty response")
         return ""
 
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(_async_do_call(openrouter_key, model, system_prompt, user_message))
+        return loop.run_until_complete(_async_do_call(api_key, base_url, model, system_prompt, user_message))
     finally:
         loop.close()
 
 
 async def _async_do_call(
-    openrouter_key: str,
+    api_key: str,
+    base_url: str,
     model: str,
     system_prompt: str,
     user_message: str,
 ) -> str:
-    """Async POST to the OpenRouter chat-completions endpoint.
+    """Async POST to the chat-completions endpoint.
 
     On a 402 that includes an affordability hint ("can only afford N tokens"),
     retries ONCE with max_tokens shrunk to the affordable budget. During the
@@ -373,9 +375,11 @@ async def _async_do_call(
     """
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
 
+        # 8192 gives reasoning models room to think AND output JSON without truncating.
         async def _post(max_toks: int):
+            url = base_url.rstrip("/") + "/chat/completions"
             return await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                url,
                 json={
                     "model": model,
                     "messages": [
@@ -383,19 +387,13 @@ async def _async_do_call(
                         {"role": "user", "content": user_message},
                     ],
                     "stream": False,
-                    # Output is a verdict JSON + 2-3 sentences (~150-300 visible
-                    # tokens). 512 was fine for non-reasoning models, but REASONING
-                    # models (qwen3.x-plus/max, etc.) emit ~1.5-2k hidden reasoning
-                    # tokens that can count against max_tokens and truncate the JSON
-                    # (qwen3.7-max did exactly this live). 2048 leaves room for
-                    # reasoning + JSON; non-reasoning models ignore the extra.
                     "max_tokens": max_toks,
                     "temperature": 0.1,
                 },
-                headers={"Authorization": f"Bearer {openrouter_key}"},
+                headers={"Authorization": f"Bearer {api_key}"},
             )
 
-        resp = await _post(2048)
+        resp = await _post(8192)
         if resp.status_code == 402:
             # "...You requested up to 2048 tokens, but can only afford 842..."
             m = re.search(r"can only afford (\d+)", resp.text or "")
@@ -411,7 +409,9 @@ async def _async_do_call(
             data = resp.json()
             choices = data.get("choices", [])
             if choices:
-                return choices[0].get("message", {}).get("content", "")
+                msg = choices[0].get("message", {})
+                text = msg.get("content") or msg.get("reasoning") or ""
+                return text
             logger.error("[research] LLM returned 200 but no choices — empty response")
             return ""
         # LOUD failure. A non-200 (esp. 402 Payment Required = out of OpenRouter
@@ -434,6 +434,9 @@ def parse_verdict(
     """Parse the AI response: JSON on the last line, with a regex fallback."""
     if not ai_text:
         ai_text = ""
+
+    logger = logging.getLogger("hermes_trader.agents.research")
+    logger.info(f"[parse_verdict] {coin} raw AI text (last 800 chars):\n{ai_text[-800:]}" if len(ai_text) > 800 else f"[parse_verdict] {coin} raw AI text:\n{ai_text}")
 
     verdict = "PASS"
     confidence = 0.0

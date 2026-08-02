@@ -40,10 +40,17 @@ _parser.add_argument("--env", default="prod")
 _parser.add_argument("--daemon", action="store_true")
 _args, _unknown = _parser.parse_known_args()
 
+# Log to both stdout and a file on the shared mount
+LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "log.txt")
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(name)s:%(message)s'
+    format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, mode='a'),
+    ]
 )
+logger = logging.getLogger(__name__)
 
 from hermes_trader.agents.perception import scan_once
 from hermes_trader.agents.ta_filter import analyze_perception

@@ -110,3 +110,4 @@ backtest-trades.csv
 *.bak-*
 *.bak2-*
 *.bak3-*
+log.txt

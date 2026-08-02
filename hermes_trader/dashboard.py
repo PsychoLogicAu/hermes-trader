@@ -2285,9 +2285,11 @@ def register_routes(app: FastAPI) -> None:
         # ── LLM fallback (Nous Hermes via OpenRouter) ─────────────────────
         try:
             import httpx
-            key = os.environ.get("OPENROUTER_API_KEY", "")
-            if not key:
-                return JSONResponse({"response": "Hermes chat unavailable: OPENROUTER_API_KEY not set", "kind": "error"})
+            api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
+            base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+            model = os.environ.get("LLM_MODEL", "x-ai/grok-4.3")
+            if not api_key:
+                return JSONResponse({"response": "Hermes chat unavailable: LLM_API_KEY not set", "kind": "error"})
 
             # Real trades come from memory (the 100-entry trade ring buffer);
             # the feed supplies recent DSL exits + ta_skips so "why did X close"
@@ -2378,10 +2380,11 @@ def register_routes(app: FastAPI) -> None:
             # Catalog: https://openrouter.ai/models
             chat_model = os.environ.get("HERMES_CHAT_MODEL", "x-ai/grok-4.3")
             async def _call():
+                url = base_url.rstrip("/") + "/chat/completions"
                 async with httpx.AsyncClient(timeout=20.0) as client:
                     r = await client.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        url,
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                         json={
                             "model": chat_model,
                             "messages": [
@@ -2396,7 +2399,8 @@ def register_routes(app: FastAPI) -> None:
                     return r.json()
             # We're inside FastAPI's event loop here, so just await directly.
             data = await _call()
-            content = data["choices"][0]["message"]["content"].strip()
+            msg = data["choices"][0]["message"]
+            content = (msg.get("content") or msg.get("reasoning") or "").strip()
             return JSONResponse({"response": content, "kind": "chat", "model": chat_model})
         except Exception as e:
             return JSONResponse({"response": f"chat error: {e}", "kind": "error"})

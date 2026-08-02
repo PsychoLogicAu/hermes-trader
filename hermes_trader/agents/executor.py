@@ -512,6 +512,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
 
     def _read_state() -> tuple[dict, float, float]:
         st = fetch_account_state(user, include_hip3=True) or {}
+        logger.info(f"[executor] raw account state: equity={st.get('equity')!r} available={st.get('available')!r} spot_usdc={st.get('spot_usdc')!r}")
         deq = st.get("dex_equity") or {}
         dav = st.get("dex_available") or {}
         if _target_dex:
@@ -520,6 +521,16 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         else:
             eq = float(deq.get("", st.get("equity")) or 0)
             av = float(dav.get("", st.get("available")) or 0)
+
+        # For unified accounts: spot USDC is shared margin for perps.
+        # If perp equity is 0 but we have spot USDC, treat it as available.
+        spot_usdc = float(st.get("spot_usdc", 0) or 0)
+        if eq == 0.0 and spot_usdc > 0:
+            logger.info(f"[executor] Unified account detected — using spot_usdc={spot_usdc:.2f} as equity")
+            eq = spot_usdc
+            av = max(av, spot_usdc)
+
+        logger.info(f"[executor] resolved equity={eq:.2f} available={av:.2f} target_dex={_target_dex or 'main'}")
         return st, eq, av
 
     state, equity, available = _read_state()

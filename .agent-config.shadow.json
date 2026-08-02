@@ -28,13 +28,6 @@
   ],
   "hip3_dex_allowlist": [],
   "hip3_dex_blocklist": [],
-  "scan": {
-    "minCompositeScore": 25,
-    "candleInterval": "5m",
-    "candleCount": 100,
-    "cacheTtlMs": 50000,
-    "cacheTtlMs1h": 600000
-  },
   "dsl_exit": {
     "max_loss_pct": 0.35,
     "max_loss_roe_pct": 2.5,
@@ -95,11 +88,10 @@
   "trend_surface_enabled": true,
   "runner_entry_gate": {
     "enabled": true,
-    "allow_shorts": true,
-    "bypass_sidestep_overrides": false,
+    "allow_shorts": false,
+    "bypass_sidestep_overrides": true,
     "min_confidence": 0.7,
     "min_composite": 30.0,
-    "bypass_late_trend_chase": true,
     "min_hip3_composite": 50.0,
     "min_short_confidence": 0.72,
     "min_short_composite": 25.0,
