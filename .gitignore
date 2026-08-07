@@ -111,3 +111,6 @@ backtest-trades.csv
 *.bak2-*
 *.bak3-*
 log.txt
+
+# Hermes trader logs (datestamped, rotated, unlimited)
+trader-logs/
