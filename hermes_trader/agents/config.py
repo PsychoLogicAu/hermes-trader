@@ -53,6 +53,26 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         # every 10 scans, keeping the per-cycle weight budget intact.
         "cacheTtlMs1h": 600_000,
     },
+    # GATE CONFIGURATION — runtime overrideable (env vars, hotpatch, or MCP)
+    "gates": {
+        # Liquidity — skips markets below 24h notional volume
+        "min_market_volume_usd": 5_000_000,
+        "min_hip3_volume_usd": 500_000,
+        # Short-side liquidity — thin markets squeeze shorts 17x harder (data from 72h segmentation)
+        "min_short_volume_usd": 0,  # 0 = off; 5M+ recommended if shorts bleed on thin book
+        # Position management — concurrent and correlation limits
+        "max_concurrent": 3,
+        "max_crypto_long_correlated": 2,
+        # Risk caps — notional, daily, equity exposure
+        "max_trade_notional_usd": 300,      # per-trade hard cap
+        "max_daily_loss_usd": -100,         # PnL <= this kills the engine
+        "max_total_notional_pct": 1.0,      # total notional as % of equity
+        # Regime discipline — counter-trend bar (0.70-0.80 calibrated from 2026-06-06 bleed)
+        "counter_regime_min_conf": 0.7,
+        # Daily giveback lock — once day peaks, no new entries if PnL retraces > halt_pct
+        "daily_giveback_halt_pct": 0.0,
+        "daily_giveback_min_peak_usd": 20.0,
+    },
 }
 
 

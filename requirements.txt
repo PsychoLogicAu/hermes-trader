@@ -1,0 +1,12 @@
+# Core trading engine
+python-dotenv>=1.0.0
+requests>=2.31.0
+aiohttp>=3.9.0
+httpx>=0.27.0
+pydantic>=2.0.0
+rich>=13.7.0
+pyfiglet>=1.0.2
+certifi>=2023.5.0
+eth-account>=0.8.0
+hyperliquid-python-sdk>=0.24.0
+httpcore>=1.0.0

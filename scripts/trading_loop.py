@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import logging
+import logging.handlers
 
 # Load .env.local (CWD-relative, matches skill restart command).
 env_path = '.env.local'
@@ -40,14 +41,27 @@ _parser.add_argument("--env", default="prod")
 _parser.add_argument("--daemon", action="store_true")
 _args, _unknown = _parser.parse_known_args()
 
-# Log to both stdout and a file on the shared mount
-LOG_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "log.txt")
+# Log to both stdout and a file on the shared mount (./trader-logs)
+LOG_DIR = "/app/log"
+LOG_FILE = os.path.join(LOG_DIR, "trader.log")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Daily rotation with datestamped filenames: trader.log, trader.log.2026-08-06, ...
+# backupCount=0 → never deletes old files (unlimited audit trail)
+log_handler = logging.handlers.TimedRotatingFileHandler(
+    LOG_FILE, when='D', interval=1, backupCount=0
+)
+log_handler.suffix = "%Y-%m-%d"
+log_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, mode='a'),
+        log_handler,
     ]
 )
 logger = logging.getLogger(__name__)

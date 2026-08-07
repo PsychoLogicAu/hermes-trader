@@ -259,7 +259,7 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
     total_margin_used = float(margin_summary.get("totalMarginUsed", "0"))
 
     raw_balances = spot.get("balances", []) or []
-    spot_balances = [b for b in raw_balances if b.get("coin", "") in ("USDC", "USDT", "USD")]
+    spot_balances = [b for b in raw_balances if b.get("coin", "") in ("USDC", "USDT", "USDT0", "USDE", "USDH", "USD")]
     spot_usdc = sum(float(b.get("total", "0") or 0) for b in spot_balances)
 
     raw_positions = perp.get("assetPositions", []) or []
@@ -268,7 +268,7 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
         if float(p.get("position", {}).get("szi", "0")) != 0
     ]
 
-    equity = perp_equity
+    equity = perp_equity + spot_usdc  # Unified mode: spot USDC backs perp margin
     # Free initial margin = what HL's UI shows as "Available to Trade" and
     # what HL checks before accepting new orders. `withdrawable` is a
     # different (much tighter) number — the spot-bridgeable amount — and

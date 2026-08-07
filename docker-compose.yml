@@ -1,0 +1,13 @@
+services:
+  hermes-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-trader
+    volumes:
+      - .env.local:/app/.env.local:ro
+      - .agent-config.json:/app/.agent-config.json:ro
+      - ./trader-logs:/app/log:rw
+    env_file:
+      - .env.local
+    restart: unless-stopped

@@ -75,8 +75,11 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "  'earnings', 'Fed' or 'SEC'. Only a THIS-COIN-specific catastrophe is negative.",
         "",
         "HARD RULES:",
-        "1. SL/TP JSON must be sensible and nonzero, but execution owns the live bracket:",
-        "   backup SL defaults to 1.5× ATR and TP scale-out defaults to 1.0× ATR.",
+        "1. SL/TP JSON must be sensible and nonzero; execution owns the bracket. Use volatility buffers"
+        "tailored to the trend strength: for confirmed 4h/1d trend-aligned moves, use 2.0–2.5× ATR"
+        "for stops (noise-floor distance). Use 1.5× ATR only on weak setups or low volume."
+        "TP scale-out: 1.2–1.5× ATR is preferred. Treat the stop as a noise floor — not a precise"
+        "trigger — to avoid being wick-out on strong rippers.",
         "2. Never output entryPx without stopPx and tpPx — incomplete orders are rejected.",
         "3. If already in a position on this coin → CLOSE if the structure has flipped against it,",
         "   else HOLD (just output PASS — the position keeps running).",
@@ -90,6 +93,12 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "   Shorting a downtrend is just as good a trade as longing an uptrend — weight them equally.",
         "   If the higher-TF trend is clean AND the composite score cleared scanning (>=25), this is NOT",
         "   a marginal setup — take the trade. The execution gate requires 0.70, so meet it when the trend is clear.",
+        "   CRITICAL: The execution gate also requires a FRESH breakout or momentum burst structure at entry time.",
+        "   If the trend is clean but no breakout/structure triggers have fired recently, this is a late-trend",
+        "   continuation setup — the gate will reject it as a chase. In this case, output PASS with confidence",
+        "   < 0.70 instead of fighting the gate. A clean trend without fresh breakout structure is NOT tradeable",
+        "   per the gate's rules — respect the gate and wait for a fresh setup. Only commit to LONG/SHORT when",
+        "   BOTH higher-TF alignment AND recent breakout/momentum structure are present."
         "6. 1h structure (volumeBuildup1h / trendFlip1h / higherLows1h) is an ENTRY-TIMING signal, NOT a",
         "   reason to fight the 4h/1d trend. Use it to time the entry IN the trend's direction:",
         "   - Uptrend + 1h accumulation → LONG entry (buy the pullback).",

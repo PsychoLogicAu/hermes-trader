@@ -26,11 +26,6 @@ MIN_ORDER_USD = 10.5
 from eth_account import Account
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
-from hyperliquid.utils.signing import (
-    OrderType,
-    TriggerOrderType,
-)
-
 from hermes_trader.client.hl_client import (
     HL_API,
     _http_post,
@@ -91,7 +86,8 @@ def _make_exchange() -> Exchange:
     if key_hex.startswith("0x"):
         key_hex = key_hex[2:]
 
-    # The SDK uses eth_account for signing
+    # The SDK's Exchange(wallet=...) expects an eth_account LocalAccount.
+    # Account.from_key() returns exactly that — no wrapper needed.
     acct = Account.from_key(key_hex)
 
     # For unified accounts with agent wallet:
@@ -550,7 +546,8 @@ def place_hl_order(
         logger.info(f"[place_hl_order] price_str={price_str}, size_str={size_str}, mid={mid_price}, sz_dec={sz_dec}")
         
         exchange = _make_exchange()
-        order_type = OrderType(limit={"tif": "Ioc"})
+        # SDK expects an order_type dict (no longer imported from utils.signing)
+        order_type = {"limit": {"tif": "Ioc"}}
         
         logger.info(f"[place_hl_order] Calling exchange.order({coin}, {is_buy}, {float(size_str)}, {float(price_str)}, {order_type})")
         
@@ -610,13 +607,17 @@ def place_hl_trigger_order(
         trigger_f = float(trigger_str)
         size_str = f"{size:.{sz_dec}f}"
 
-        order_type = OrderType(
-            trigger=TriggerOrderType(
-                triggerPx=trigger_f,
-                isMarket=True,
-                tpsl="sl" if kind == "sl" else "tp",
-            )
-        )
+        # SDK expects an order_type dict (no longer imported from utils.signing)
+        order_type = {
+            "limit": {
+                "tif": "Trigger",
+                "trigger": {
+                    "trigger_px": trigger_f,
+                    "is_market": True,
+                    "t_ps_l": "sl" if kind == "sl" else "tp"
+                }
+            }
+        }
 
         logger.info(
             f"[place_hl_trigger_order] {coin} {kind} is_buy={is_buy} "
