@@ -111,6 +111,7 @@ def market_liquidity_floor(
     ctx: GateContext,
     min_volume: float,
     min_volume_hip3: Optional[float] = None,
+    gate_config: Optional[dict] = None,
 ) -> GateResult:
     """Block trades on markets with insufficient 24h notional volume.
 
@@ -121,11 +122,29 @@ def market_liquidity_floor(
     markets like xyz:CRCL ($4.7M) and km:USTECH ($1.06M). When the coin
     is HIP-3 (colon-namespaced) and a separate `min_volume_hip3` is set,
     use that floor instead.
+
+    High-confidence overrides: when `gate_config.bypass_low_volume=True`
+    and confidence >= `gate_config.bypass_low_volume_min_conf`, allow the
+    trade despite thin volume.
     """
     is_hip3 = ":" in (ctx.coin or "")
     floor = (min_volume_hip3 if (is_hip3 and min_volume_hip3 is not None) else min_volume)
     if ctx.market_volume_24h_usd >= floor:
         return {"pass": True}
+
+    # High-confidence bypass
+    if gate_config:
+        if gate_config.get("bypass_low_volume"):
+            min_conf = gate_config.get("bypass_low_volume_min_conf", 0.85)
+            if ctx.confidence >= min_conf:
+                return {
+                    "pass": True,
+                    "via": "bypass_low_volume",
+                    "reason": (
+                        f"low-liquidity bypass on {ctx.coin} (conf {ctx.confidence:.2f} >= {min_conf:.2f})"
+                    ),
+                }
+
     return {"pass": False, "reason": f"market 24h volume ${ctx.market_volume_24h_usd/1e6:.2f}M below floor ${floor/1e6:.2f}M"}
 
 
@@ -408,10 +427,12 @@ def eval_all_gates(
         float(_cfg(effective_config, "daily_giveback_halt_pct", 0.0) or 0.0),
         float(_cfg(effective_config, "daily_giveback_min_peak_usd", 20.0) or 0.0),
     )
+    runner_gate_cfg = effective_config.get("runner_entry_gate") or {}
     results["liquidity"] = market_liquidity_floor(
         ctx,
         float(_cfg(effective_config, "min_market_volume_usd", 5_000_000) or 5_000_000),
         float(_cfg(effective_config, "min_hip3_volume_usd", 500_000) or 500_000),
+        gate_config=runner_gate_cfg,
     )
     results["short_liquidity"] = short_liquidity_floor(
         ctx, float(_cfg(effective_config, "min_short_volume_usd", 0) or 0)

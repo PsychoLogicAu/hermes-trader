@@ -106,12 +106,15 @@
     "min_confidence": 0.7,
     "min_composite": 30.0,
     "bypass_late_trend_chase": true,
-    "bypass_late_trend_chase_min_conf": 0.80,
+    "bypass_late_trend_chase_min_conf": 0.8,
     "min_hip3_composite": 50.0,
     "min_short_confidence": 0.72,
     "min_short_composite": 25.0,
     "mover_min_confidence": 0.72,
-    "mover_min_composite": 20.0
+    "mover_min_composite": 20.0,
+    "bypass_low_volume": true,
+    "bypass_low_volume_min_conf": 0.85,
+    "liquidity_min_volume_usd": 3500000
   },
   "momentum_continuation": {
     "enabled": false,
