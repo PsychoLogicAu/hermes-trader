@@ -113,7 +113,7 @@
     "mover_min_confidence": 0.72,
     "mover_min_composite": 20.0,
     "bypass_low_volume": true,
-    "bypass_low_volume_min_conf": 0.78,
+    "bypass_low_volume_min_conf": 0.85,
     "liquidity_min_volume_usd": 3500000
   },
   "momentum_continuation": {
