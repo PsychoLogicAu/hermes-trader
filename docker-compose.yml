@@ -10,4 +10,10 @@ services:
       - ./trader-logs:/app/log:rw
     env_file:
       - .env.local
+    networks:
+      - llama-net
     restart: unless-stopped
+
+networks:
+  llama-net:
+    external: true
