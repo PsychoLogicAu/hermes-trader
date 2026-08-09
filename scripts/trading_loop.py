@@ -413,6 +413,58 @@ while True:
                     evt["realized_pnl_pct"] = res.get("realized_pnl_pct")
                     evt["fees_pct"] = res.get("fees_pct")
                 log_event(evt)
+
+            # Trailing TP: adjust server-side TP upward if DSL trailing rules say to push it up.
+            # Runs every heartbeat (~60s); only fires when trailing level > current TP + min_move.
+            try:
+                from hermes_trader.agents.dsl_exit import _active_positions
+                from hermes_trader.client.exchange import adjust_tp_order
+                from hermes_trader.client.hl_client import fetch_account_state, resolve_user_address
+                config_tp = (_cfg.get("trailing_tp") or {}).get("min_move_usd", 0.05)
+                for key, tracker in list(_active_positions.items()):
+                    mark = mids.get(tracker.coin)
+                    if mark is None:
+                        continue
+                    new_tp = tracker.compute_trailing_tp(mark)
+                    if new_tp is None:
+                        continue
+                    if tracker.current_tp_px is None:
+                        logger.info(f"[dsl-trail-tp] {tracker.coin}: no existing TP order to adjust, skipping")
+                        continue
+                    user = resolve_user_address()
+                    if not user:
+                        logger.warning("[dsl-trail-tp] no user address; cannot adjust TP")
+                        break
+                    state = fetch_account_state(user, include_hip3=True)
+                    pos_size = None
+                    for p in state.get("asset_positions", []) or []:
+                        pos = p.get("position", {})
+                        if pos.get("coin") == tracker.coin:
+                            pos_size = abs(float(pos.get("szi", 0)))
+                            break
+                    if pos_size is None or pos_size <= 0:
+                        logger.warning(f"[dsl-trail-tp] {tracker.coin}: no position found, cannot adjust TP")
+                        continue
+                    adj = adjust_tp_order(
+                        coin=tracker.coin,
+                        is_long_position=tracker.is_long(),
+                        size=pos_size,
+                        old_tp_px=tracker.current_tp_px,
+                        new_tp_px=new_tp,
+                    )
+                    if adj.get("ok"):
+                        tracker.current_tp_px = new_tp
+                        log_event({
+                            "event": "dsl_trail_tp",
+                            "coin": tracker.coin,
+                            "side": tracker.side,
+                            "old_tp": tracker.current_tp_px - (new_tp - tracker.current_tp_px),
+                            "new_tp": new_tp,
+                        })
+                    else:
+                        logger.warning(f"[dsl-trail-tp] {tracker.coin}: adjust failed: {adj.get('error')}")
+            except Exception as tp_e:
+                logger.warning(f"[dsl-trail-tp] adjustment pass failed: {tp_e}")
         except Exception as e:
             logger.error(f"[dsl] monitor pass failed: {e}")
             log_event({"event": "error", "scope": "dsl_monitor", "error": str(e)})
