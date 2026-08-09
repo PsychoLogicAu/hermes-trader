@@ -967,9 +967,6 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # ATR as % of entry — captured once here so the DSL stop width is stable
     # for the life of the trade (the atr_stop feature scales off this).
     entry_atr_pct = (atr / entry_px * 100) if entry_px > 0 else 0.0
-    register_position(coin, trade_side, entry_px, policy=policy, leverage=leverage,
-                      entry_atr_pct=entry_atr_pct)
-    logger.info(f"[executor] Registered DSL exit for {coin} {trade_side} @ {entry_px} ({leverage}x)")
 
     _entry_ts = int(time.time() * 1000)
     memory.record_trade({
@@ -1071,6 +1068,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
 
     final_sl = (entry_px - atr * sl_atr_mult) if is_buy else (entry_px + atr * sl_atr_mult) if atr > 0 else stop_px
     final_tp = (entry_px + atr * TP_ATR_MULT) if is_buy else (entry_px - atr * TP_ATR_MULT) if atr > 0 else tp_px
+
+    # Register DSL tracking AFTER we know the server-side TP level.
+    register_position(coin, trade_side, entry_px, policy=policy, leverage=leverage,
+                      entry_atr_pct=entry_atr_pct, initial_tp_px=final_tp)
+    logger.info(f"[executor] Registered DSL exit for {coin} {trade_side} @ {entry_px} ({leverage}x)")
 
     return {
         "executed": True, "mode": mode,
@@ -1277,10 +1279,23 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     if forced and whale and not fresh_impulse:
         return "runner_gate_blocked (whale-only forced override; no fresh breakout/burst)"
     if uptrend and not (fresh_impulse or structured_daily_mover):
-        return "runner_gate_blocked (late trend-only chase; no fresh breakout/burst)"
-    if not (structured_runner or structured_daily_mover):
-        return (f"runner_gate_blocked (needs volume+breakout/burst and structure; "
-                f"score={score:.0f}, slow={slow_count})")
+        bypass_min = float(gate.get("bypass_late_trend_chase_min_conf", 0))
+        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bypass_min
+        if bypassed:
+            logger.info(f"[executor] late-trend chase bypassed on {coin} "
+                        f"(conf {conf:.2f} >= {bypass_min:.2f})")
+        else:
+            return ("runner_gate_blocked (late trend-only chase; no fresh "
+                    "breakout/burst)")
+    else:
+        bypassed = False
+
+    # Only require fresh impulse structure if we didn't just bypass above.
+    if not (fresh_impulse or structured_daily_mover):
+        if not bypassed:
+            if not (structured_runner or structured_daily_mover):
+                return (f"runner_gate_blocked (needs volume+breakout/burst "
+                        f"and structure; score={score:.0f}, slow={slow_count})")
     return ""
 
 

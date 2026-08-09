@@ -95,10 +95,14 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "   a marginal setup — take the trade. The execution gate requires 0.70, so meet it when the trend is clear.",
         "   CRITICAL: The execution gate also requires a FRESH breakout or momentum burst structure at entry time.",
         "   If the trend is clean but no breakout/structure triggers have fired recently, this is a late-trend",
-        "   continuation setup — the gate will reject it as a chase. In this case, output PASS with confidence",
-        "   < 0.70 instead of fighting the gate. A clean trend without fresh breakout structure is NOT tradeable",
-        "   per the gate's rules — respect the gate and wait for a fresh setup. Only commit to LONG/SHORT when",
-        "   BOTH higher-TF alignment AND recent breakout/momentum structure are present."
+        "   continuation setup — the gate will normally reject it as a chase. HOWEVER: the gate has a bypass for",
+        "   high-conviction late-trend setups (e.g., a pullback/retest into support in a strong uptrend where the",
+        "   risk/reward is clearly favorable). If you see such a setup, explicitly justify it (why the pullback is",
+        "   structurally sound, support level, volume profile) and give a higher confidence score — a setup that",
+        "   would warrant buying the dip rather than chasing will clear the bypass. For ordinary late-chase risk",
+        "   without strong justification, output PASS with confidence < 0.70 instead of fighting the gate.",
+        "   Only commit to LONG/SHORT when BOTH higher-TF alignment AND recent breakout/momentum structure are",
+        "   present — unless the pullback/retest is structurally compelling enough to warrant the bypass."
         "6. 1h structure (volumeBuildup1h / trendFlip1h / higherLows1h) is an ENTRY-TIMING signal, NOT a",
         "   reason to fight the 4h/1d trend. Use it to time the entry IN the trend's direction:",
         "   - Uptrend + 1h accumulation → LONG entry (buy the pullback).",
