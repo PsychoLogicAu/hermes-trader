@@ -23,6 +23,7 @@ from hermes_trader.agents.dsl_exit import (
     register_position,
 )
 from hermes_trader.agents.memory import memory
+from hermes_trader.ledger import record_open, record_close
 from hermes_trader.agents.risk_gates import GateContext, eval_all_gates
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
@@ -979,6 +980,26 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "order_id": order_res.get("order_id"),
         "executed_at": _entry_ts,
     })
+    # Append-only ledger (separate from operational memory)
+    try:
+        _sl_mult = float(config.get("sl_atr_mult", 1.5))
+        record_open(
+            coin=coin,
+            side=trade_side,
+            entry_px=entry_px,
+            notional_usd=round(position_notional, 4),
+            order_id=order_res.get("order_id"),
+            leverage=leverage,
+            analysis_id=analysis.get("id"),
+            config_snapshot={
+                "regime": _regime,
+                "exit_policy_label": _ex_label,
+                "sl_atr_mult": _sl_mult,
+                "tp_atr_mult": TP_ATR_MULT,
+            },
+        )
+    except Exception as _le:
+        logger.debug(f"[executor] ledger record_open failed (non-fatal): {_le}")
 
     # Entry-context snapshot for the forward signal backtest: record WHEN we opened
     # and WHAT the free signals said at entry (cache-only — no network on the hot
@@ -1430,6 +1451,24 @@ def close_position_market(coin: str) -> Dict[str, Any]:
                     # when rate>0). Estimate (entry-rate held constant over the hold).
                     "funding_cost_usd": _funding_cost_usd,
                 })
+                # Append-only ledger (separate from operational memory)
+                try:
+                    record_close(
+                        coin=coin,
+                        side=side,
+                        entry_px=entry_px,
+                        exit_px=fill_px,
+                        notional_usd=round(_notional_entry, 4),
+                        realized_pnl_pct=out["realized_pnl_pct"],
+                        realized_pnl_usd=round(_net_pnl_usd, 4),
+                        spot_pct=out["spot_pct"],
+                        hold_minutes=_hold_min,
+                        leverage=leverage,
+                        fee_usd=round(_fee_usd, 4),
+                        funding_cost_usd=_funding_cost_usd,
+                    )
+                except Exception as _lc_e:
+                    logger.debug(f"[executor] ledger record_close failed (non-fatal): {_lc_e}")
             except Exception as _rc_e:
                 logger.warning(f"[outcome-store] record_close failed for {coin} (non-fatal): {_rc_e}")
             # Loss cooldown: a losing close arms an extended re-entry block on
