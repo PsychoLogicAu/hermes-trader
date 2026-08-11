@@ -1,4 +1,5 @@
-# Core trading engine
+# Time-series forecasting (Chronos-2 shadow signal)
+chronos-forecasting>=2.0,<3
 python-dotenv>=1.0.0
 requests>=2.31.0
 aiohttp>=3.9.0

@@ -4,13 +4,13 @@
   "enable_hip3": false,
   "equity_fraction_per_trade": 0.08,
   "leverage": 5,
-  "max_trade_notional_usd": 25,
+  "max_trade_notional_usd": 35,
   "tp_scale_fraction": 0.5,
   "max_concurrent": 5,
-  "max_total_notional_pct": 1.5,
-  "max_daily_loss_usd": -15,
+  "max_total_notional_pct": 2.0,
+  "max_daily_loss_usd": -20,
   "daily_giveback_halt_pct": 0.5,
-  "daily_giveback_min_peak_usd": 20.0,
+  "daily_giveback_min_peak_usd": 25.0,
   "crowded_with_min_conf": 0.8,
   "min_available_margin_pct": 0.2,
   "cooldown_min": 30,
@@ -180,5 +180,17 @@
     "min_crypto_24h_pct": 10.0,
     "min_hip3_24h_pct": 8.0,
     "min_volume_usd": 5000000
+  },
+  "chronos_signal": {
+    "enabled": true,
+    "debug": false,
+    "model_id": "amazon/chronos-2",
+    "device": "cpu",
+    "context_length": 100,
+    "forecast_horizon": 48,
+    "cache_ttl_seconds": 300,
+    "timeout_seconds": 30,
+    "quantile_levels": [0.1, 0.5, 0.9],
+    "num_samples": 50
   }
 }

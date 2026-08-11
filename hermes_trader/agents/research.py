@@ -673,5 +673,27 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         "whale_signal": perception.get("whale_signal"),
     }
 
+    # Shadow-mode Chronos-2 forecast (async, logged only — never blocks, never
+    # feeds the LLM prompt). Fired for any trade-level verdict (LONG/SHORT)
+    # so we can build forward-validation data before any gating integration.
+    if parsed["verdict"] in ("LONG", "SHORT"):
+        _fire_chronos_shadow(coin, parsed["side"])
+
     memory.record_analysis(analysis)
     return analysis
+
+
+def _fire_chronos_shadow(coin: str, side: str) -> None:
+    """Fire a Chronos-2 forecast in the background for shadow-mode logging.
+
+    Runs async on a daemon thread; NEVER blocks research or the execute hot path.
+    The signal is LOGGED only — NOT fed into the LLM prompt, NOT used for gating.
+    This is pure forward-validation so we can measure forecast quality before
+    any decision integration.
+    """
+    try:
+        from hermes_trader.agents.chronos_signal import get_chronos_signal_async
+        side_str = side or "long" if side else "long"
+        get_chronos_signal_async(coin, side_str)
+    except Exception as e:
+        logger.debug(f"[research] chronos shadow failed for {coin}: {e}")
