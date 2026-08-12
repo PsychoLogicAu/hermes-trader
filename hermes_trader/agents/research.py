@@ -673,11 +673,10 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         "whale_signal": perception.get("whale_signal"),
     }
 
-    # Shadow-mode Chronos-2 forecast (async, logged only — never blocks, never
-    # feeds the LLM prompt). Fired for any trade-level verdict (LONG/SHORT)
-    # so we can build forward-validation data before any gating integration.
+    # Chronos shadow logging moved to executor.py (trade result path).
+    # Keeping this would duplicate logs; executor owns the signal now.
     if parsed["verdict"] in ("LONG", "SHORT"):
-        _fire_chronos_shadow(coin, parsed["side"])
+        pass  # Chronos handled in executor.py
 
     memory.record_analysis(analysis)
     return analysis
