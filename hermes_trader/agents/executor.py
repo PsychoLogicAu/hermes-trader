@@ -1240,7 +1240,11 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
         if has_whale or slow_burn_hint or breakout_hint or composite_hint or sidestep_hint:
             return {"action": "execute", "verdict": "PASS",
                     "result": execute_fn(analysis)}
-        return {"action": "none", "verdict": "PASS", "result": None}
+        # Attach Chronos for visibility even when no structural override applies
+        _side = analysis.get("side", "long") or "long"
+        _res = {"action": "none", "verdict": "PASS", "result": None}
+        _attach_chronos_to_result(_res, coin or "unknown", _side)
+        return _res
     # Should be unreachable (parse_verdict normalizes to one of the above),
     # but never silently drop — surface it so a new verdict can't go unhandled.
     logger.warning(f"[router] unhandled verdict {verdict!r} for {coin} — treating as no-op")
