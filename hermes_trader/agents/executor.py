@@ -1240,10 +1240,27 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
         if has_whale or slow_burn_hint or breakout_hint or composite_hint or sidestep_hint:
             return {"action": "execute", "verdict": "PASS",
                     "result": execute_fn(analysis)}
-        # Attach Chronos for visibility even when no structural override applies
-        _side = analysis.get("side", "long") or "long"
-        _res = {"action": "none", "verdict": "PASS", "result": None}
-        _attach_chronos_to_result(_res, coin or "unknown", _side)
+        # PASS has no implied direction; attach both long and short forecasts
+        # so you can see the bidirectional picture.
+        try:
+            from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
+            c = coin or "unknown"
+            long_sig = get_chronos_signal_sync(c, "long")
+            short_sig = get_chronos_signal_sync(c, "short")
+            _res = {
+                "action": "none", "verdict": "PASS", "result": None,
+                "chronos_long_median_pct": round(long_sig.median_pct * 10) / 10 if long_sig.median_pct is not None else None,
+                "chronos_short_median_pct": round(short_sig.median_pct * 10) / 10 if short_sig.median_pct is not None else None,
+            }
+            if long_sig.error:
+                _res["chronos_error"] = long_sig.error
+        except Exception as e:
+            _res = {
+                "action": "none", "verdict": "PASS", "result": None,
+                "chronos_long_median_pct": None,
+                "chronos_short_median_pct": None,
+                "chronos_error": str(e),
+            }
         return _res
     # Should be unreachable (parse_verdict normalizes to one of the above),
     # but never silently drop — surface it so a new verdict can't go unhandled.
