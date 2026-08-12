@@ -1240,25 +1240,26 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
         if has_whale or slow_burn_hint or breakout_hint or composite_hint or sidestep_hint:
             return {"action": "execute", "verdict": "PASS",
                     "result": execute_fn(analysis)}
-        # PASS has no implied direction; attach both long and short forecasts
-        # so you can see the bidirectional picture.
+        # PASS has no implied direction; show median forecast with alignment for both sides.
         try:
             from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
             c = coin or "unknown"
-            long_sig = get_chronos_signal_sync(c, "long")
-            short_sig = get_chronos_signal_sync(c, "short")
+            sig = get_chronos_signal_sync(c, "long")
+            m = sig.median_pct if sig.median_pct is not None else None
             _res = {
                 "action": "none", "verdict": "PASS", "result": None,
-                "chronos_long_median_pct": round(long_sig.median_pct * 10) / 10 if long_sig.median_pct is not None else None,
-                "chronos_short_median_pct": round(short_sig.median_pct * 10) / 10 if short_sig.median_pct is not None else None,
+                "chronos_median_pct": round(m * 10) / 10 if m is not None else None,
+                "chronos_aligned_if_long": bool(m is not None and m > 0),
+                "chronos_aligned_if_short": bool(m is not None and m < 0),
             }
-            if long_sig.error:
-                _res["chronos_error"] = long_sig.error
+            if sig.error:
+                _res["chronos_error"] = sig.error
         except Exception as e:
             _res = {
                 "action": "none", "verdict": "PASS", "result": None,
-                "chronos_long_median_pct": None,
-                "chronos_short_median_pct": None,
+                "chronos_median_pct": None,
+                "chronos_aligned_if_long": None,
+                "chronos_aligned_if_short": None,
                 "chronos_error": str(e),
             }
         return _res
