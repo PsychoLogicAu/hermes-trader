@@ -20,8 +20,8 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LEDGER_FILE = os.path.join(_REPO_ROOT, "trades.jsonl")
+_LOG_DIR = "/app/log"
+LEDGER_FILE = os.path.join(_LOG_DIR, "trades.jsonl")
 
 
 def _append_event(event_type: str, data: Dict[str, Any]) -> None:
