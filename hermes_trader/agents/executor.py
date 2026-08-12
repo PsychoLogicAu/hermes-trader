@@ -428,10 +428,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     if not _sidestep_bypasses_runner:
         runner_block = _runner_entry_block_reason(analysis, config)
         if runner_block:
-            return {
+            coin = analysis.get("coin") or "unknown"
+            side = analysis.get("side", "long") or "long"
+            result = {
                 "executed": False, "mode": mode,
                 "analysis_id": analysis["id"], "reason": runner_block,
             }
+            _attach_chronos_to_result(result, coin, side)
+            return result
 
     # Loss cooldown: refuse re-entry on a coin whose last close was a LOSS and
     # whose extended block hasn't expired (armed in close_position_market).

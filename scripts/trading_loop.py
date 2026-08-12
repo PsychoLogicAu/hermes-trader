@@ -594,93 +594,81 @@ while True:
                                "score": round(float(score), 1),
                                "trigger_score": round(float(score), 1)})
                     continue
-                # Re-research throttle: already researched recently (any verdict) →
-                # don't re-pay the LLM until research_cooldown_min lapses.
-                last_research = _last_research_by_coin.get(coin, 0)
-                if (now_ms - last_research) < research_cooldown_ms:
-                    remaining_min = _remaining_minutes(research_cooldown_ms - (now_ms - last_research))
-                    logger.info(f"{coin}: re-research throttle ({remaining_min}min remaining) — skip")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "RESEARCH_THROTTLE",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
+        # TA filter — cheap statistical gate before the paid AI call.
+        ta = analyze_perception(perception)
+        if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
+            logger.info(f"{coin}: TA {ta['signal']} (score {ta['score']:.0f}) — skip AI research")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": ta['signal'],
+                       "score": round(float(ta.get('score', 0)), 1),
+                       "trigger_score": round(float(score), 1)})
+            continue
+        gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
+        logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
+        # Record the paid-research time so the held-coin throttle above can
+        # pace the next AI close-check on this position.
+        _last_research_by_coin[coin] = now_ms
 
-            # TA filter — cheap statistical gate before the paid AI call.
-            ta = analyze_perception(perception)
-            if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
-                logger.info(f"{coin}: TA {ta['signal']} (score {ta['score']:.0f}) — skip AI research")
-                log_event({"event": "ta_skip", "coin": coin,
-                           "signal": ta['signal'],
-                           "score": round(float(ta.get('score', 0)), 1),
-                           "trigger_score": round(float(score), 1)})
-                continue
-            gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
-            logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
-            # Record the paid-research time so the held-coin throttle above can
-            # pace the next AI close-check on this position.
-            _last_research_by_coin[coin] = now_ms
+        try:
+            analysis = research(coin, perception)
+            logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
+            # Store the full LLM reasoning verbatim — no character cap.
+            # The feed shows the complete rationale.
+            _r = (analysis.get('reasoning') or '').strip()
+            log_event({"event": "research", "coin": coin,
+                       "verdict": analysis['verdict'],
+                       "confidence": round(float(analysis['confidence']), 2),
+                       "reasoning": _r,
+                       "news_risk": analysis.get('news_risk'),
+                       "entry_px": analysis.get('entry_px'),
+                       "stop_px": analysis.get('stop_px'),
+                       "tp_px": analysis.get('tp_px')})
 
-            try:
-                analysis = research(coin, perception)
-                logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
-                # Store the full LLM reasoning verbatim — no character cap.
-                # The feed shows the complete rationale.
-                _r = (analysis.get('reasoning') or '').strip()
-                log_event({"event": "research", "coin": coin,
-                           "verdict": analysis['verdict'],
-                           "confidence": round(float(analysis['confidence']), 2),
-                           "reasoning": _r,
-                           "news_risk": analysis.get('news_risk'),
-                           "entry_px": analysis.get('entry_px'),
-                           "stop_px": analysis.get('stop_px'),
-                           "tp_px": analysis.get('tp_px')})
-
-                # All verdict→action routing lives in executor.route_verdict
-                # (unit-tested) so no verdict can be silently dropped again.
-                routed = route_verdict(analysis)
-                action = routed["action"]
-                result = routed["result"] or {}
-                if action == "execute":
-                    logger.info(f"Trade result: {result}")
-                    executed = bool(result.get("executed"))
-                    # Surface the regime decision so the log answers "why did a
-                    # counter-regime trade fire?" — via is one of aligned /
-                    # neutral / confidence / composite / trigger:<name> / blocked.
-                    mr = (result.get("gate_results") or {}).get("market_regime") or {}
-                    log_event({"event": "execute", "coin": coin,
-                               "side": analysis['side'],
-                               "executed": executed,
-                               "detail": result.get("order_id")
-                               or result.get("reason")
-                               or result.get("blocked_by"),
-                               "blocked_by": result.get("blocked_by") if not executed else None,
-                               "size_usd": result.get("size_usd"),
-                               "entry_px": result.get("entry_px"),
-                               "stop_px": result.get("stop_px"),
-                               "tp_px": result.get("tp_px"),
-                               "regime": mr.get("regime"),
-                               "funding_regime": mr.get("funding"),
-                               "regime_via": mr.get("via"),
-                               "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
-                elif action == "close":
-                    logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
-                    log_event({"event": "ai_close", "coin": coin,
-                               "executed": bool(result.get("ok")),
-                               "detail": result.get("order_id")
-                               or result.get("noop")
-                               or result.get("error"),
-                               "reasoning": (analysis.get("reasoning") or "")})
-                elif action == "unknown":
-                    log_event({"event": "error", "coin": coin,
-                               "error": f"unhandled verdict {routed['verdict']!r}"})
-            except Exception as e:
-                # repr(e) not str(e): a bare exception (e.g. some httpx errors)
-                # stringifies to "" and produced blank "Error processing X:" lines.
-                detail = repr(e) if str(e) == "" else str(e)
-                logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
+            # All verdict→action routing lives in executor.route_verdict
+            # (unit-tested) so no verdict can be silently dropped again.
+            routed = route_verdict(analysis)
+            action = routed["action"]
+            result = routed["result"] or {}
+            if action == "execute":
+                logger.info(f"Trade result: {result}")
+                executed = bool(result.get("executed"))
+                # Surface the regime decision so the log answers "why did a
+                # counter-regime trade fire?" — via is one of aligned /
+                # neutral / confidence / composite / trigger:<name> / blocked.
+                mr = (result.get("gate_results") or {}).get("market_regime") or {}
+                log_event({"event": "execute", "coin": coin,
+                           "side": analysis['side'],
+                           "executed": executed,
+                           "detail": result.get("order_id")
+                           or result.get("reason")
+                           or result.get("blocked_by"),
+                           "blocked_by": result.get("blocked_by") if not executed else None,
+                           "size_usd": result.get("size_usd"),
+                           "entry_px": result.get("entry_px"),
+                           "stop_px": result.get("stop_px"),
+                           "tp_px": result.get("tp_px"),
+                           "regime": mr.get("regime"),
+                           "funding_regime": mr.get("funding"),
+                           "regime_via": mr.get("via"),
+                           "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
+            elif action == "close":
+                logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
+                log_event({"event": "ai_close", "coin": coin,
+                           "executed": bool(result.get("ok")),
+                           "detail": result.get("order_id")
+                           or result.get("noop")
+                           or result.get("error"),
+                           "reasoning": (analysis.get("reasoning") or "")})
+            elif action == "unknown":
                 log_event({"event": "error", "coin": coin,
-                           "error": f"{type(e).__name__}: {detail}"})
+                           "error": f"unhandled verdict {routed['verdict']!r}"})
+        except Exception as e:
+            # repr(e) not str(e): a bare exception (e.g. some httpx errors)
+            # stringifies to "" and produced blank "Error processing X:" lines.
+            detail = repr(e) if str(e) == "" else str(e)
+            logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
+            log_event({"event": "error", "coin": coin,
+                       "error": f"{type(e).__name__}: {detail}"})
 
         _last_progress_ts = time.time()  # watchdog: a full cycle completed
         logger.info(f"Sleeping {scan_interval}s until next scan...")
