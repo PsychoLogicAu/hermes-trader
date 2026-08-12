@@ -14,6 +14,7 @@ import uuid
 from typing import Any, Dict, List
 
 from hermes_trader.agents.config_store import read_agent_config
+from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
 from hermes_trader.agents.dsl_exit import (
     ExitPolicy,
     RetraceTier,
@@ -177,6 +178,31 @@ def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
         return (True, f"reclaimed +{gain:.1f}% above stop {last_exit_px:g}, "
                       f"composite {float(composite or 0):.0f}")
     return (False, "")
+
+
+def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact Chronos fields to a trade result dict.
+
+    Wrapped in try/except so it never breaks the trade path.
+    Output shape:
+      chronos_median_pct: float | null
+      chronos_aligned: bool | null (True if median move agrees with side)
+      chronos_error: str | null
+    """
+    try:
+        sig = get_chronos_signal_sync(coin, side)
+        result["chronos_median_pct"] = round(sig.median_pct * 10) / 10 if sig.median_pct is not None else None
+        if sig.median_pct is not None:
+            result["chronos_aligned"] = (
+                (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+            )
+        else:
+            result["chronos_aligned"] = None
+        result["chronos_error"] = sig.error
+    except Exception as e:
+        result["chronos_median_pct"] = None
+        result["chronos_aligned"] = None
+        result["chronos_error"] = str(e)
 
 
 def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Dict[str, Any]:
@@ -859,21 +885,28 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # Don't write blocked attempts to memory._trades — the cooldown gate
         # keys off the most recent trade-by-coin and would self-perpetuate.
         # Visibility comes from the `execute` event in the session log.
-        return {
+        coin = analysis.get("coin") or "unknown"
+        side = analysis.get("side", "long") or "long"
+        result = {
             "executed": False, "mode": mode,
             "analysis_id": analysis["id"],
             "blocked_by": gate_output["block_reasons"],
             "gate_results": gate_output["results"],
         }
+        _attach_chronos_to_result(result, coin, side)
+        return result
 
     if shadow_mode:
-        return {
+        _side = analysis.get("side", "long") or "long"
+        _res = {
             "executed": False, "mode": mode,
             "analysis_id": analysis["id"],
             "reason": "shadow_mode_would_execute",
             "gate_results": gate_output["results"],
             "size_usd": trade_notional,
         }
+        _attach_chronos_to_result(_res, coin, _side)
+        return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
         return {
@@ -1095,7 +1128,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                       entry_atr_pct=entry_atr_pct, initial_tp_px=final_tp)
     logger.info(f"[executor] Registered DSL exit for {coin} {trade_side} @ {entry_px} ({leverage}x)")
 
-    return {
+    result = {
         "executed": True, "mode": mode,
         "analysis_id": analysis["id"],
         "order_id": order_res.get("order_id"),
@@ -1107,6 +1140,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "dsl_registered": True,
         "sl_missing": sl_missing,
     }
+    _attach_chronos_to_result(result, coin, trade_side)
+    return result
 
 
 def monitor_exits(mids: Dict[str, float]) -> List[Dict[str, Any]]:
