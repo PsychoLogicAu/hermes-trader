@@ -652,6 +652,13 @@ while True:
                            or result.get("noop")
                            or result.get("error"),
                            "reasoning": (analysis.get("reasoning") or "")})
+            elif action == "none":
+                logger.info(f"Trade result: {routed}")
+                log_event({"event": "pass", "coin": coin,
+                           "reasoning": (analysis.get("reasoning") or "")[:500],
+                           "chronos_long": routed.get("chronos_long_median_pct"),
+                           "chronos_short": routed.get("chronos_short_median_pct"),
+                           "chronos_error": routed.get("chronos_error")})
             elif action == "unknown":
                 log_event({"event": "error", "coin": coin,
                            "error": f"unhandled verdict {routed['verdict']!r}"})
