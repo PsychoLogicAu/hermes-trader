@@ -656,8 +656,9 @@ while True:
                 logger.info(f"Trade result: {routed}")
                 log_event({"event": "pass", "coin": coin,
                            "reasoning": (analysis.get("reasoning") or "")[:500],
-                           "chronos_long": routed.get("chronos_long_median_pct"),
-                           "chronos_short": routed.get("chronos_short_median_pct"),
+                           "chronos_median": routed.get("chronos_median_pct"),
+                           "chronos_aligned_if_long": routed.get("chronos_aligned_if_long"),
+                           "chronos_aligned_if_short": routed.get("chronos_aligned_if_short"),
                            "chronos_error": routed.get("chronos_error")})
             elif action == "unknown":
                 log_event({"event": "error", "coin": coin,
