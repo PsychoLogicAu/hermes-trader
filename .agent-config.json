@@ -1,7 +1,7 @@
 {
   "mode": "LIVE",
   "enable_crypto": true,
-  "enable_hip3": false,
+  "enable_hip3": true,
   "equity_fraction_per_trade": 0.08,
   "leverage": 5,
   "max_trade_notional_usd": 35,
