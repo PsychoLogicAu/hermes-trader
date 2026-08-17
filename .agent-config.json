@@ -188,7 +188,7 @@
     "model_id": "amazon/chronos-2",
     "device": "cpu",
     "context_length": 100,
-    "forecast_horizon": 48,
+    "forecast_horizon": 12,
     "cache_ttl_seconds": 300,
     "timeout_seconds": 30,
     "quantile_levels": [0.1, 0.5, 0.9],

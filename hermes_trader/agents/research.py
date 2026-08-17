@@ -219,19 +219,19 @@ def _chronos_block(coin: str) -> str:
             span = f", p10 {lo_pct:+.1f}% / p90 {hi_pct:+.1f}%"
         else:
             span = ""
-        if med > 0:
-            note = ("the model sees continuation for the next ~4h — supports "
-                    "holding through pullbacks, favours swing over scalp conviction.")
-        elif med < 0:
-            note = ("the model expects the move to FADE within ~4h — this is a "
-                    "decay/continuation warning: lower conviction on late entries, "
-                    "prefer a tight scalp TP over holding for the 4h horizon; it is "
-                    "NOT an instruction to auto-PASS a confirmed fresh breakout.")
-        else:
-            note = "the model is directionally neutral over the next ~4h."
         # Chronos runs on 5m candles; horizon bars * 5m = the forward window.
         hours = sig.horizon * 5 / 60
         hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
+        if med > 0:
+            note = (f"the model sees continuation for the next ~{hours_s}h — supports "
+                    "holding through pullbacks, favours swing over scalp conviction.")
+        elif med < 0:
+            note = (f"the model expects the move to FADE within ~{hours_s}h — this is a "
+                    "decay/continuation warning: lower conviction on late entries, "
+                    f"prefer a tight scalp TP over holding for the {hours_s}h horizon; it is "
+                    "NOT an instruction to auto-PASS a confirmed fresh breakout.")
+        else:
+            note = f"the model is directionally neutral over the next ~{hours_s}h."
         return (
             "Chronos forecast (shadow signal — weigh, don't obey):\n"
             f"  - Median price {hours_s}h ahead: {med:+.2f}%{span}. "
