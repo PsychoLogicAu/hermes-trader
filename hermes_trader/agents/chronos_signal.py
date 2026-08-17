@@ -302,6 +302,10 @@ def _fetch_signal(coin: str, side: str) -> ChronosSignal:
     signal = _forecast_from_candles(coin, side, candles or [], cfg)
     if not signal.error:
         _cache_set(coin, signal, ttl)
+    # Log once per actual compute (cache miss). Cache hits return above
+    # without logging, so each line reflects a real forecast rather than a
+    # wrapper re-reading a warm entry (which made it look like N runs/coin).
+    logger.info(_format_signal_log(signal, bool(cfg.get("debug", False))))
     return signal
 
 
@@ -351,9 +355,8 @@ def get_chronos_signal_async(coin: str, side: str) -> None:
                 logger.debug(f"[chronos] {coin}: signal disabled")
                 return
 
-            signal = _fetch_signal(coin, side)
-            debug = bool(cfg.get("debug", False))
-            logger.info(_format_signal_log(signal, debug))
+            # _fetch_signal logs on a fresh compute; cache hits are silent.
+            _fetch_signal(coin, side)
         except Exception as e:
             logger.debug(f"[chronos] {coin} worker failed: {e}")
 
@@ -381,8 +384,7 @@ def get_chronos_signal_sync(coin: str, side: str) -> ChronosSignal:
 
     USE ONLY FOR TESTING or when you explicitly want to block for a forecast.
     The main pipeline uses `get_chronos_signal_async()` instead.
+    Logging happens in `_fetch_signal` (once per real compute), so this
+    wrapper does not log a second time.
     """
-    signal = _fetch_signal(coin, side)
-    debug = bool(_get_chronos_config().get("debug", False))
-    logger.info(_format_signal_log(signal, debug))
-    return signal
+    return _fetch_signal(coin, side)

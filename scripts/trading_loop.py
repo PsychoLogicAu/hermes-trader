@@ -608,17 +608,6 @@ while True:
                 continue
             gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
             logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
-            # If the AI prompt consumes the Chronos forecast (in_prompt), warm
-            # the 300s cache NOW — the shadow worker normally only fires at
-            # verdict time, which would leave the prompt cold on a coin's first
-            # sighting. Fire-and-forget daemon thread; a cold cache at prompt
-            # time just omits the block.
-            if read_agent_config().get("chronos_signal", {}).get("in_prompt", False):
-                try:
-                    from hermes_trader.agents.chronos_signal import get_chronos_signal_async
-                    get_chronos_signal_async(coin, "long")
-                except Exception as e:
-                    logger.debug(f"chronos warm-up failed for {coin}: {e}")
             # Record the paid-research time so the held-coin throttle above can
             # pace the next AI close-check on this position.
             _last_research_by_coin[coin] = now_ms
