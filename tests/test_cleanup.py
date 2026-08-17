@@ -3009,6 +3009,121 @@ def test_dashboard_positions_falls_back_to_hl_when_no_snapshot(monkeypatch):
     assert rows[0]["coin"] == "ETH" and rows[0]["side"] == "short"
 
 
+def test_chronos_block_in_prompt_sync_render():
+    """With in_prompt enabled, the 4h forecast is pulled via the sync wrapper
+    (deterministic per coin) and surfaced in the LLM prompt with a decay-warning
+    label for negative calls; an error/absent signal omits the block."""
+    from dataclasses import dataclass
+    from typing import Optional
+    import hermes_trader.agents.chronos_signal as cs
+    from hermes_trader.agents import research
+
+    @dataclass
+    class _Sig:
+        coin: str = "BTC"
+        side: str = "long"
+        context_last: float = 9.0
+        median: Optional[float] = 9.1
+        q_low: Optional[float] = 8.7
+        q_high: Optional[float] = 9.4
+        median_pct: Optional[float] = 1.111
+        spread_pct: Optional[float] = 5.555
+        horizon: int = 48
+        model_id: str = "amazon/chronos-2"
+        inference_ms: float = 10.0
+        error: Optional[str] = None
+
+    # Negative median (decay warning), sync returns a fresh signal.
+    sig_neg = _Sig(median=8.9, median_pct=-1.111, q_low=8.5, q_high=9.3)
+    perception = {"type": "perp", "mid": 9.0, "composite_score": 40, "triggers": []}
+    snap = {"ema8": None, "ema21": None, "last_close": 9.0}
+
+    real_read = research.read_agent_config
+    real_sync = None
+
+    try:
+        research.read_agent_config = lambda: {
+            "chronos_signal": {"enabled": True, "in_prompt": True}
+        }
+        real_sync = cs.get_chronos_signal_sync
+        cs.get_chronos_signal_sync = lambda coin, side: sig_neg
+        msg = research._build_user_message(
+            "BTC", perception, snap, snap, snap, "0.01%/hr", "no news",
+            250.0, [], "LIVE",
+        )
+        assert "Chronos forecast (shadow signal" in msg
+        assert "-1.11%" in msg
+        assert "FADE within ~4h" in msg
+        assert "4h ahead" in msg
+
+        # Sync returns an error signal -> block omitted, prompt shape unchanged.
+        err = _Sig(median=None, median_pct=None, error="no candles")
+        cs.get_chronos_signal_sync = lambda coin, side: err
+        msg_cold = research._build_user_message(
+            "BTC", perception, snap, snap, snap, "0.01%/hr", "no news",
+            250.0, [], "LIVE",
+        )
+        assert "Chronos" not in msg_cold
+
+        # in_prompt disabled -> block omitted even with a valid signal.
+        cs.get_chronos_signal_sync = lambda coin, side: sig_neg
+        research.read_agent_config = lambda: {
+            "chronos_signal": {"enabled": True, "in_prompt": False}
+        }
+        msg_off = research._build_user_message(
+            "BTC", perception, snap, snap, snap, "0.01%/hr", "no news",
+            250.0, [], "LIVE",
+        )
+        assert "Chronos" not in msg_off
+    finally:
+        research.read_agent_config = real_read
+        if real_sync is not None:
+            cs.get_chronos_signal_sync = real_sync
+
+
+def test_peek_chronos_never_computes():
+    """peek_chronos returns the fresh cache entry or None; it never runs a
+    forecast (so the prompt path stays non-blocking)."""
+    import time
+    from dataclasses import dataclass
+    import hermes_trader.agents.chronos_signal as cs
+
+    @dataclass
+    class _Sig:
+        coin: str = "X"
+        side: str = "long"
+        context_last: float = 1.0
+        median: float = 1.0
+        q_low: float = None
+        q_high: float = None
+        median_pct: float = 0.0
+        spread_pct: float = 0.0
+        horizon: int = 48
+        model_id: str = "amazon/chronos-2"
+        inference_ms: float = 0.0
+        error: None = None
+
+    real_get = cs._cache_get
+    try:
+        cs._cache_get = lambda coin, ttl: _Sig()
+        sig = cs.peek_chronos("X")
+        assert sig is not None and sig.coin == "X"
+
+        cs._cache_get = lambda coin, ttl: None
+        assert cs.peek_chronos("X") is None
+
+        # Disabled config -> None.
+        cs._cache_get = lambda coin, ttl: _Sig()
+        real_cfg = cs._get_chronos_config
+        cs._get_chronos_config = lambda: {"enabled": False}
+        try:
+            assert cs.peek_chronos("X") is None
+        finally:
+            cs._get_chronos_config = real_cfg
+    finally:
+        cs._cache_get = real_get
+
+
 def test_build_user_message_indicator_block_full_snap():
     """A full indicator snapshot renders the bullish/bearish + RSI/ATR/ADX line."""
     from hermes_trader.agents.research import _build_user_message

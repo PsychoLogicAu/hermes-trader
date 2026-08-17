@@ -170,6 +170,16 @@ def _prewarm_meta_cache_bounded(timeout_s: float) -> None:
 
 
 _prewarm_meta_cache_bounded(float(os.environ.get('HERMES_META_PREWARM_TIMEOUT_S', '3')))
+# Preload the Chronos-2 pipeline OFF the first-scan critical path so the
+# prompt-path sync call (in_prompt) never pays the one-time model load (~2-4s)
+# mid-research. Bounded + lazy-fallback like the meta prewarm above. Skipped
+# unless chronos_signal is enabled; env-overridable timeout.
+try:
+    if startup_agent_config.get("chronos_signal", {}).get("enabled", False):
+        from hermes_trader.agents.chronos_signal import preload_model
+        preload_model(float(os.environ.get('HERMES_CHRONOS_PRELOAD_TIMEOUT_S', '60')))
+except Exception as e:
+    logger.warning(f"[startup] chronos preload skipped (lazy fallback): {e}")
 # The universe carries prevDayPx / dayNtlVlm / funding which DRIFT over the
 # day; fetched once here they'd freeze at loop-start for the whole process,
 # so mover-selection + volume-ranking would rank stale 24h windows (a coin
@@ -598,6 +608,17 @@ while True:
                 continue
             gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
             logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
+            # If the AI prompt consumes the Chronos forecast (in_prompt), warm
+            # the 300s cache NOW — the shadow worker normally only fires at
+            # verdict time, which would leave the prompt cold on a coin's first
+            # sighting. Fire-and-forget daemon thread; a cold cache at prompt
+            # time just omits the block.
+            if read_agent_config().get("chronos_signal", {}).get("in_prompt", False):
+                try:
+                    from hermes_trader.agents.chronos_signal import get_chronos_signal_async
+                    get_chronos_signal_async(coin, "long")
+                except Exception as e:
+                    logger.debug(f"chronos warm-up failed for {coin}: {e}")
             # Record the paid-research time so the held-coin throttle above can
             # pace the next AI close-check on this position.
             _last_research_by_coin[coin] = now_ms

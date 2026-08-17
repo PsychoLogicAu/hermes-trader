@@ -114,3 +114,9 @@ log.txt
 
 # Hermes trader logs (datestamped, rotated, unlimited)
 trader-logs/
+
+# HuggingFace model cache (mounted into container; binary, re-downloadable)
+hf-cache/
+
+# Local agent notes (PROJECT.md) — not part of the project
+.hermes/

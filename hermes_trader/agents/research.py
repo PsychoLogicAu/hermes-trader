@@ -182,6 +182,66 @@ def _signals_block(coin: str) -> str:
             + "\n".join(lines))
 
 
+def _chronos_block(coin: str) -> str:
+    """Chronos-2 4h forward forecast for the AI prompt, when
+    `chronos_signal.in_prompt` is true. Calls the sync wrapper so the line is
+    DETERMINISTIC per coin: it renders whenever the signal is enabled and the
+    model is loaded (the model is preloaded at app init; steady-state cost is
+    ~200ms/coin, dominated by the HL candle fetch). A disabled flag or a
+    failed/absent forecast returns '' so the prompt shape is unchanged.
+
+    Labeled as a DECAY/continuation warning on purpose: the bot's exit policy is
+    scalp, so the 4h horizon is LONGER than the hold. A negative call means the
+    move is likely to fade within 4h — drop conviction for a scalp, don't
+    auto-PASS a confirmed fresh breakout. A positive call means the model sees
+    continuation over the next ~4h — supports holding through noise.
+    """
+    try:
+        cfg = read_agent_config().get("chronos_signal", {})
+        if not cfg.get("in_prompt", False) or not cfg.get("enabled", False):
+            return ""
+        # Lazy import keeps the torch/chronos dep off the module-load path;
+        # module-attr call (not `from ... import`) so tests can patch the sync
+        # wrapper. The model is preloaded at init, so this rarely pays more
+        # than the ~200ms candle fetch.
+        from hermes_trader.agents import chronos_signal as _cs
+        sig = _cs.get_chronos_signal_sync(coin, "long")
+        if sig is None or sig.error or sig.median_pct is None:
+            return ""
+        med = sig.median_pct
+        low = sig.q_low
+        high = sig.q_high
+        # Quantiles are absolute prices; convert to % vs context_last for the
+        # prompt (the log line uses context_last too, so both are comparable).
+        if low is not None and high is not None and sig.context_last:
+            lo_pct = (low - sig.context_last) / sig.context_last * 100
+            hi_pct = (high - sig.context_last) / sig.context_last * 100
+            span = f", p10 {lo_pct:+.1f}% / p90 {hi_pct:+.1f}%"
+        else:
+            span = ""
+        if med > 0:
+            note = ("the model sees continuation for the next ~4h — supports "
+                    "holding through pullbacks, favours swing over scalp conviction.")
+        elif med < 0:
+            note = ("the model expects the move to FADE within ~4h — this is a "
+                    "decay/continuation warning: lower conviction on late entries, "
+                    "prefer a tight scalp TP over holding for the 4h horizon; it is "
+                    "NOT an instruction to auto-PASS a confirmed fresh breakout.")
+        else:
+            note = "the model is directionally neutral over the next ~4h."
+        # Chronos runs on 5m candles; horizon bars * 5m = the forward window.
+        hours = sig.horizon * 5 / 60
+        hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
+        return (
+            "Chronos forecast (shadow signal — weigh, don't obey):\n"
+            f"  - Median price {hours_s}h ahead: {med:+.2f}%{span}. "
+            + note
+        )
+    except Exception as e:
+        logger.debug(f"[research] chronos block failed for {coin}: {e}")
+        return ""
+
+
 def _build_user_message(
     coin: str,
     perception: Dict[str, Any],
@@ -326,6 +386,7 @@ def _build_user_message(
         whale_block,
         "",
         _signals_block(coin),
+        _chronos_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
         f"Recent news: {news}",

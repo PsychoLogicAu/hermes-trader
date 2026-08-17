@@ -1,9 +1,11 @@
 """Chronos-2 shadow signal module (shadow-mode, logged only).
 
-Pulls in Chronos-2 zero-shot forecasting as a supplementary signal that runs
-ASYNC on a daemon thread, caches aggressively, and NEVER blocks the execute or
-research hot paths. Output is LOGGED but NOT fed into the LLM prompt — pure
-forward-validation shadow mode like the free signal suite.
+Pulls in Chronos-2 zero-shot forecasting as a supplementary signal. The
+shadow worker runs ASYNC on a daemon thread and logs every forecast (forward
+validation); when `in_prompt: true`, the LLM prompt path additionally calls
+`get_chronos_signal_sync()` so the line is deterministic per call. The model
+is preloaded at app init (`preload_model`) and the per-coin cache (300s TTL)
+bounds steady-state cost to ~200ms per coin (mostly the HL candle fetch).
 
 Config-driven via `.agent-config.json` under `chronos_signal`:
     chronos_signal:
@@ -96,6 +98,41 @@ def _get_pipeline() -> Any:
             logger.warning(f"[chronos] model load failed: {e}")
             _model_init_error = str(e)
             return None
+
+
+def preload_model(timeout_s: float = 60.0) -> bool:
+    """Preload the Chronos pipeline on a bounded background thread at app init.
+
+    Pays the one-time model-load cost (~2-4s) OFF the first-scan critical path
+    so the prompt-path sync call never eats it. Bounded (join with timeout) so
+    a hung load can't stall startup; on timeout/exception it falls back to
+    lazy load on first use. Returns True if the model is ready when the join
+    completes.
+    """
+    state = {"done": False, "pipeline": None, "error": None}
+
+    def _run() -> None:
+        try:
+            state["pipeline"] = _get_pipeline()
+        except Exception as e:
+            state["error"] = e
+        finally:
+            state["done"] = True
+
+    t = threading.Thread(target=_run, name="chronos-preload", daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        logger.warning(
+            f"[chronos] model preload exceeded {timeout_s:.0f}s — continuing; "
+            "it will finish in the background or load lazily on first use")
+    elif state["error"] is not None:
+        logger.warning(f"[chronos] model preload failed (lazy fallback): {state['error']}")
+    elif state["pipeline"] is None:
+        logger.debug("[chronos] model not loaded (disabled or error cached); lazy fallback")
+    else:
+        logger.info("[chronos] model preloaded at init")
+    return state["pipeline"] is not None
 
 
 # ── Result structure ──────────────────────────────────────────────────────────
@@ -321,6 +358,21 @@ def get_chronos_signal_async(coin: str, side: str) -> None:
             logger.debug(f"[chronos] {coin} worker failed: {e}")
 
     threading.Thread(target=_worker, name=f"chronos-{coin}", daemon=True).start()
+
+
+def peek_chronos(coin: str) -> Optional[ChronosSignal]:
+    """Return the cached forecast if fresh, else None. NEVER computes, never
+    blocks. The LLM-prompt path uses this: it must not pay model-load or
+    forecast cost — if the shadow worker has not produced a fresh forecast yet,
+    the prompt simply omits the block."""
+    try:
+        cfg = _get_chronos_config()
+        if not cfg.get("enabled", False):
+            return None
+        return _cache_get(coin, float(cfg.get("cache_ttl_seconds", 300)))
+    except Exception as e:
+        logger.debug(f"[chronos] peek failed for {coin}: {e}")
+        return None
 
 
 # ── Synchronous wrapper (for testing / explicit use only) ─────────────────────

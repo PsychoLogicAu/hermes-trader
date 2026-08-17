@@ -184,6 +184,7 @@
   "chronos_signal": {
     "enabled": true,
     "debug": false,
+    "in_prompt": true,
     "model_id": "amazon/chronos-2",
     "device": "cpu",
     "context_length": 100,
