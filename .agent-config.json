@@ -19,7 +19,7 @@
   "min_ai_confidence": 0.7,
   "counter_regime_min_conf": 0.8,
   "max_crypto_long_correlated": 2,
-  "min_market_volume_usd": 3500000,
+  "min_market_volume_usd": 1000000,
   "min_hip3_volume_usd": 5000000,
   "min_short_volume_usd": 50000000,
   "coin_allowlist": [],
@@ -114,7 +114,7 @@
     "mover_min_composite": 20.0,
     "bypass_low_volume": true,
     "bypass_low_volume_min_conf": 0.85,
-    "liquidity_min_volume_usd": 3500000
+    "liquidity_min_volume_usd": 1000000
   },
   "momentum_continuation": {
     "enabled": false,
