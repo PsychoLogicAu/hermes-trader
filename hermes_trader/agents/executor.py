@@ -772,12 +772,12 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"→ {size_in_coin:g} coin (${normalized_notional:.2f})")
     trade_notional = normalized_notional
 
-    recent_trades = memory.get_recent_trades(10)
-    last_trade = next(
-        (t for t in recent_trades if t.get("coin") == analysis["coin"]),
-        None,
-    )
-    last_trade_time = last_trade.get("executed_at") if last_trade else None
+    # Cooldown must measure against the NEWEST trade on this coin: the ledger is
+    # chronological, so `next()` over recent_trades would pick the OLDEST —
+    # letting a second entry through 30min after the first while the coin was
+    # re-traded minutes ago (observed: ACE leg 2 at 32min after leg 1, leg 3 at
+    # 59min, all into one position).
+    last_trade_time = memory.latest_trade_ts_by_coin(50).get(analysis["coin"])
 
     # News blackout: stand down only on GENUINELY adverse news. The AI judges
     # the recent (last 48h) headlines and emits news_risk; only "negative"

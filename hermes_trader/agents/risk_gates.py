@@ -442,6 +442,7 @@ def eval_all_gates(
         _cfg(effective_config, "coin_allowlist", []),
         _cfg(effective_config, "coin_blocklist", []),
     )
+    results["no_pyramid"] = opposite_direction_guard(ctx)
     results["cooldown"] = cooldown_gate(ctx, last_trade_time, _cfg(effective_config, "cooldown_min", 60))
     results["correlation"] = correlation_cap(ctx, int(_cfg(effective_config, "max_crypto_long_correlated", 2)))
     results["equity_risk"] = equity_risk_cap(ctx, _cfg(effective_config, "max_total_notional_pct", 1.0))
