@@ -15,6 +15,7 @@ Flags (tolerant — unknown flags are ignored so legacy callers keep working):
                     `nohup ... &` / Hermes background. Kept for skill scripts.
 """
 import argparse
+import json
 import math
 import os
 import sys
@@ -192,6 +193,180 @@ except Exception as e:
 universe_refresh_s = int(os.environ.get('HERMES_UNIVERSE_REFRESH_S', '1800'))
 _last_universe_refresh = time.time()
 memory.load()  # hydrate from .agent-memory.json so cache + flush work.
+
+
+# ── Ledger reconciliation: backfill CLOSEs the bot never recorded ─────────────
+# A CLOSE row is written ONLY from the executor's close path
+# (close_position_market → record_close). An exit that happens WITHOUT that
+# path running — most importantly an exchange-side SL/TP trigger fill that the
+# DSL engine later drops as a "stale tracker" — leaves the ledger OPEN for a
+# position that no longer exists. That poisons win-rate / payoff / risk-of-ruin
+# (a never-closed trade is neither win nor loss) and skews the ledger-vs-book
+# diff. Observed live: XMR 08-18 long stopped on-exchange 12:06:01, tracker
+# dropped as stale 12:08, no CLOSE ever written.
+#
+# At startup, reconcile the ledger against the exchange's authoritative fill
+# history: for each OPEN with no matching CLOSE, if a closing fill exists AND
+# the coin no longer has a live position, append the missing CLOSE using the
+# executor's exact record_close conventions (so stats treat it identically to
+# a live close) plus a `backfilled: true` marker for audit. Idempotent: an
+# already-recorded CLOSE (live or previously backfilled) means the open is
+# matched, so a re-exec never double-appends. Never blocks startup on failure.
+def _reconcile_ledger_closes() -> None:
+    from datetime import datetime, timezone
+    from typing import Dict
+    import requests as _requests
+    from hermes_trader.ledger import LEDGER_FILE
+
+    try:
+        with open(LEDGER_FILE) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        logger.warning(f"[ledger-reconcile] could not read ledger: {e}")
+        return
+
+    # Per (coin, side), pair CLOSEs to OPENs chronologically (stack): each
+    # CLOSE matches the most recent still-unmatched OPEN — a coin re-traded
+    # later (OPEN, CLOSE, OPEN) must not have its NEW open covered by the OLD
+    # close. Whatever OPENs are left on the stack are the unmatched ones.
+    # Positions never overlap on one coin+side (no_pyramid gate), so the stack
+    # stays depth ≤1 in practice; the stack is still correct if that ever
+    # changes.
+    events_by_key: Dict[tuple, list] = {}
+    for r in rows:
+        if r.get("event") in ("OPEN", "CLOSE") and r.get("coin") and r.get("side") and r.get("ts"):
+            events_by_key.setdefault((r["coin"], r["side"]), []).append(r)
+
+    unmatched_opens = []
+    for key, evs in events_by_key.items():
+        stack = []
+        for r in sorted(evs, key=lambda r: r["ts"]):
+            if r["event"] == "OPEN":
+                stack.append(r)
+            elif stack:
+                stack.pop()  # this CLOSE settles the newest open
+        unmatched_opens.extend(stack)
+    if not unmatched_opens:
+        return
+
+    user = resolve_user_address()
+    if not user:
+        return
+    try:
+        fills = _requests.post("https://api.hyperliquid.xyz/info",
+                               json={"type": "userFills", "user": user}, timeout=15).json()
+        state = _requests.post("https://api.hyperliquid.xyz/info",
+                               json={"type": "clearinghouseState", "user": user}, timeout=15).json()
+    except Exception as e:
+        logger.warning(f"[ledger-reconcile] exchange fetch failed (will retry next start): {e}")
+        return
+    if not isinstance(fills, list):
+        logger.warning(f"[ledger-reconcile] userFills returned {type(fills).__name__} — skipping")
+        return
+
+    live_coins = {p.get("position", {}).get("coin") for p in state.get("assetPositions", [])
+                  if float((p.get("position") or {}).get("szi", 0) or 0) != 0}
+    close_dir = {"long": "Close Long", "short": "Close Short"}
+
+    # Window per (coin, side): a backfill is only trustworthy when exactly ONE
+    # closing fill sits between this open and the next open on the same coin+side.
+    # More than one (pyramid-era net/aggregate closes, split fills) → skip: the
+    # ledger alone can't attribute which open the fill settled.
+    next_open_ts: Dict[tuple, Dict[int, int]] = {}
+    max_open_ts: Dict[tuple, int] = {}
+    for key, evs in events_by_key.items():
+        open_ts_list = sorted(r["ts"] for r in evs if r["event"] == "OPEN")
+        if open_ts_list:
+            max_open_ts[key] = open_ts_list[-1]
+        nxt = next_open_ts.setdefault(key, {})
+        for i, t in enumerate(open_ts_list):
+            nxt[t] = open_ts_list[i + 1] if i + 1 < len(open_ts_list) else 0
+
+    appended = 0
+    for o in sorted(unmatched_opens, key=lambda r: r["ts"], reverse=True):
+        coin, side, ots = o["coin"], o["side"], int(o["ts"])
+        # Skip ONLY the open that is the current live position (newest open on
+        # this coin+side, if that coin is live on-exchange). Its window is
+        # unbounded and has no close fill after it, so windowing already skips
+        # it — this guard is explicit for clarity. OLDER unmatched opens on a
+        # live coin were genuinely closed then re-entered (no_pyramid), so they
+        # are real missing CLOSEs and fall through to be backfilled if clean.
+        if coin in live_coins and ots == max_open_ts.get((coin, side)):
+            logger.warning(f"[ledger-reconcile] {coin}_{side} has no CLOSE but is the current live position — skipping")
+            continue
+        want = close_dir.get(side)
+        window_end = next_open_ts.get((coin, side), {}).get(ots, 0)
+        cands = [f for f in fills
+                 if f.get("coin") == coin and f.get("dir") == want
+                 and ots < int(f.get("time") or 0)
+                 and (not window_end or int(f.get("time") or 0) < window_end)]
+        if not cands:
+            logger.warning(f"[ledger-reconcile] {coin}_{side} no CLOSE in ledger and no closing fill in window — cannot backfill")
+            continue
+        if len(cands) > 1:
+            logger.warning(f"[ledger-reconcile] {coin}_{side} has {len(cands)} closing fills in window — ambiguous, skipping")
+            continue
+        f = cands[0]
+        entry_px_check = float(o.get("entry_px") or 0)
+        if entry_px_check > 0:
+            open_sz = float(o.get("notional_usd") or 0) / entry_px_check
+            fill_sz = float(f.get("sz") or 0)
+            if open_sz > 0 and abs(fill_sz - open_sz) / open_sz > 0.20:
+                logger.warning(f"[ledger-reconcile] {coin}_{side} fill size {fill_sz} vs open ~{open_sz:.4f} — size mismatch, skipping")
+                continue
+        entry_px = float(o.get("entry_px") or 0)
+        lev = int(o.get("leverage") or 1) or 1
+        if entry_px <= 0:
+            continue
+        exit_px = float(f["px"])
+        notional = round(float(o.get("notional_usd") or (float(f.get("sz") or 0) * entry_px)), 4)
+        # Identical formula to executor.record_close (verified against
+        # ledger CLOSE rows): leveraged P/L net of a 2x-taker-fee estimate.
+        spot_pct = ((exit_px - entry_px) if side == "long" else (entry_px - exit_px)) / entry_px * 100
+        spot_pct = round(spot_pct, 4)
+        fees_pct = 0.025 * 2 * lev
+        realized_pct = round(spot_pct * lev - fees_pct, 4)
+        gross_usd = notional * spot_pct / 100.0
+        fee_usd = round(notional * (fees_pct / max(lev, 1)) / 100.0, 4)
+        net_usd = round(gross_usd - fee_usd, 4)
+        ts_ms = int(f["time"])
+        rec = {
+            "event": "CLOSE",
+            "ts": ts_ms,
+            "ts_iso": datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "coin": coin,
+            "side": side,
+            "entry_px": entry_px,
+            "exit_px": exit_px,
+            "notional_usd": notional,
+            "realized_pnl_pct": realized_pct,
+            "realized_pnl_usd": net_usd,
+            "spot_pct": spot_pct,
+            "hold_minutes": None,
+            "leverage": lev,
+            "fee_usd": fee_usd,
+            "funding_cost_usd": None,
+            "exit_reason": "backfilled at startup: exchange fill had no recorded CLOSE",
+            "exit_type": None,
+            "backfilled": True,
+        }
+        try:
+            with open(LEDGER_FILE, "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+            appended += 1
+            logger.warning(
+                f"[ledger-reconcile] backfilled missing CLOSE for {coin}_{side}: "
+                f"exit {exit_px} @ {rec['ts_iso']} ({realized_pct:+.2f}% leveraged, {net_usd:+.4f} USDC)")
+        except Exception as e:
+            logger.error(f"[ledger-reconcile] append failed for {coin}_{side}: {e}")
+
+    if appended:
+        log_event({"event": "ledger_reconcile", "backfilled_closes": appended})
+
+
+_reconcile_ledger_closes()
 
 # Startup grace: the prewarm burst above + the cold-cache first scan (every
 # coin's candles fetched fresh) + any tail from the just-killed process all hit
