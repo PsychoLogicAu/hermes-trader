@@ -6,7 +6,7 @@
   "leverage": 5,
   "max_trade_notional_usd": 36.75,
   "tp_scale_fraction": 0.5,
-  "max_concurrent": 5,
+  "max_concurrent": 6,
   "max_total_notional_pct": 2.0,
   "max_daily_loss_usd": -20,
   "daily_giveback_halt_pct": 0.5,
