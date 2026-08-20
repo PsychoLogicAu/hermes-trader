@@ -92,11 +92,14 @@ def _remaining_minutes(ms_remaining: float) -> int:
 # outage froze the loop twice — once mid-scan, once during STARTUP (universe
 # load / prewarm) where the watchdog wasn't armed yet, so it stayed hung ~58min.
 # Arm it before any network call so BOTH a startup hang and a mid-scan hang
-# self-heal via re-exec. `_last_progress_ts` is bumped after each completed scan
-# cycle; if it goes stale > HERMES_WATCHDOG_TIMEOUT_S (default 600s, generous so
-# a slow-but-progressing scan isn't killed) the process re-execs (startup
-# rehydrates trackers from disk; the stacking backstop prevents a re-entry
-# pyramid). A persistent DNS outage just re-execs every ~600s until it clears.
+# self-heal via re-exec. `_last_progress_ts` is bumped after each COMPLETED coin
+# in the research loop (perception.scan_once returns ~90s; the per-coin LLM
+# research calls are the long pole, 20-40s each × up to ~23 triggers, so a full
+# cycle can run 10min+ — longer than HERMES_WATCHDOG_TIMEOUT_S, default 600s).
+# Bumping only at cycle end (the 2026-08-13 behavior) tripped the watchdog on
+# every healthy long cycle and re-execed the loop mid-research every ~10min.
+# A true hang (frozen network / dead LLM call) stops producing per-coin
+# progress, so the 600s tripwire still catches it within two coin calls.
 _last_progress_ts = time.time()
 _watchdog_timeout_s = int(os.environ.get('HERMES_WATCHDOG_TIMEOUT_S', '600'))
 
@@ -499,6 +502,7 @@ while True:
 
         logger.info("Scanning markets...")
         results = scan_once(universe=universe, min_score=min_score, config=config)
+        _last_progress_ts = time.time()  # scan survived; research heartbeats per coin
         logger.info(f"Scan found {len(results)} triggers")
         # Per-cycle heartbeat — proof of life even when nothing triggers.
         # `coin_scores` carries the composite score for each trigger so the
@@ -537,6 +541,10 @@ while True:
         for perception in results:
             coin = perception['coin']
             score = perception.get('composite_score', 0)
+
+            # Watchdog heartbeat: every coin processed proves the loop is alive,
+            # so a healthy 10min+ research phase can't trip the 600s re-exec.
+            _last_progress_ts = time.time()
 
             # Persist perceptions so memory/dashboard track real signal volume.
             try:
