@@ -6,9 +6,11 @@ Integrates the DSL exit engine for two-phase trailing stops
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, List
@@ -41,6 +43,27 @@ from hermes_trader.client.exchange import (
 from hermes_trader.client.hl_client import fetch_account_state, resolve_user_address
 
 logger = logging.getLogger(__name__)
+
+# Serializes all trade execution (gate eval → sizing → order placement → DSL
+# registration → memory/ledger writes) so the parallel research phase can't
+# double-spend capital. With research_max_workers > 1 each worker runs
+# maybe_execute() concurrently; two of them evaluating max_concurrent / capital
+# rotation against the SAME pre-trade account state would both pass and both
+# fire, overshooting the position cap. Holding this across the WHOLE function —
+# including the rotation retry, which re-enters maybe_execute() and
+# close_position_market() on the SAME thread — is why it's an RLock, not a Lock
+# (a plain Lock would deadlock on that self-retry). Research (the slow LLM part)
+# happens OUTSIDE this lock; only the fast execution tail is serialized.
+_exec_lock = threading.RLock()
+
+
+def _serialized(fn):
+    """Run `fn` under _exec_lock so concurrent executions never interleave."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _exec_lock:
+            return fn(*args, **kwargs)
+    return wrapper
 
 # Backup server-side stop multiplier. RETUNED 2026-06-02 (microscope audit): was
 # 3.5 -> ~5.5% spot on median names, far too wide to catch anything. The data showed
@@ -205,6 +228,7 @@ def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["chronos_error"] = str(e)
 
 
+@_serialized
 def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Dict[str, Any]:
     """Execute an analysis through risk gates and into the market.
 
@@ -1381,6 +1405,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     return ""
 
 
+@_serialized
 def close_position_market(coin: str) -> Dict[str, Any]:
     """Market-close any open perp position for `coin`. Deregisters the DSL tracker on success.
 

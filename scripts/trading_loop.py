@@ -23,6 +23,9 @@ import threading
 import time
 import logging
 import logging.handlers
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from hermes_trader.agents.research_concurrency import compute_research_workers
 
 # Load .env.local (CWD-relative, matches skill restart command).
 env_path = '.env.local'
@@ -482,7 +485,179 @@ def _sync_account_state():
 # AI close-check on coins we already hold so we don't research a "hold" every
 # scan. Resets on restart (a fresh close-check on startup is harmless/useful).
 _last_research_by_coin: dict = {}
+_research_lock = threading.Lock()
 
+
+def _process_coin(perception, ctx):
+    """Research + execute a single trigger; safe to run on a worker thread.
+
+    The slow LLM call is isolated per coin (a fresh event loop per _call_ai),
+    the HL client is a thread-safe Session, and shared mutable state (memory,
+    _last_research_by_coin) is individually locked. `ctx` carries the per-scan
+    snapshot (now_ms, held_coins, ...) computed once on the main thread so
+    every worker reads a consistent view of that scan.
+    """
+    global _last_progress_ts
+    now_ms = ctx["now_ms"]
+    held_coins = ctx["held_coins"]
+    held_research_ms = ctx["held_research_ms"]
+    cooldown_ms = ctx["cooldown_ms"]
+    recent_trades_by_coin = ctx["recent_trades_by_coin"]
+    _blocklist = ctx["blocklist"]
+    _cfg_cd = ctx["cfg_cd"]
+    coin = perception['coin']
+    score = perception.get('composite_score', 0)
+
+    # Watchdog heartbeat: every coin processed proves the loop is alive,
+    # so a healthy 10min+ research phase can't trip the 600s re-exec.
+    _last_progress_ts = time.time()
+
+    # Persist perceptions so memory/dashboard track real signal volume.
+    try:
+        memory.record_perception(perception)
+    except Exception:
+        pass
+
+    if coin in held_coins:
+        # Held position: research only every held_research_interval_min
+        # so the AI can still issue a CLOSE without paying for a "hold"
+        # PASS on every scan. (A re-entry is gate-blocked anyway.)
+        with _research_lock:
+            last_research = _last_research_by_coin.get(coin, 0)
+        if (now_ms - last_research) < held_research_ms:
+            remaining_min = _remaining_minutes(held_research_ms - (now_ms - last_research))
+            logger.info(f"{coin}: held — next AI close-check in {remaining_min}min — skip")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": "HELD_THROTTLE",
+                       "score": round(float(score), 1),
+                       "trigger_score": round(float(score), 1)})
+            return
+        # Infancy hold: skip the AI close-check while the position is
+        # younger than min_ai_close_hold_min (0=off). Measured churn
+        # 2026-06-11/12: the FIRST 10-min close-check reversed the AI's
+        # own fresh entry 3x (TON 2x, ZEC 1x, each ~-1% ROE incl. fees) —
+        # flip-flopping on entry noise. DSL stop + backup SL still
+        # protect an infant position; only the AI's second-guess waits.
+        min_hold_min = float(_cfg_cd.get("min_ai_close_hold_min", 0) or 0)
+        if min_hold_min > 0:
+            from hermes_trader.agents import dsl_exit as _dsl
+            _tr = (_dsl._active_positions.get(f"{coin}_long")
+                   or _dsl._active_positions.get(f"{coin}_short"))
+            if _tr is not None:
+                age_min = (time.time() - _tr.entry_time) / 60
+                if age_min < min_hold_min:
+                    logger.info(f"{coin}: held {age_min:.0f}min < min_hold "
+                                f"{min_hold_min:.0f}min — infancy, skip close-check")
+                    return
+    else:
+        # Blocklisted + not held → coin_filter will reject any entry, so
+        # skip the paid LLM research entirely (this coin keeps triggering
+        # every scan otherwise). Held blocklisted coins took the held
+        # branch above and still get their AI close-check.
+        if coin in _blocklist:
+            logger.info(f"{coin}: on coin blocklist — skip research")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": "BLOCKLISTED",
+                       "score": round(float(score), 1),
+                       "trigger_score": round(float(score), 1)})
+            return
+        # Not held but executed within cooldown_min → re-entry would be
+        # gate-blocked, so skip the paid AI call.
+        last_ms = recent_trades_by_coin.get(coin)
+        if last_ms and (now_ms - last_ms) < cooldown_ms:
+            remaining_min = _remaining_minutes(cooldown_ms - (now_ms - last_ms))
+            logger.info(f"{coin}: pre-research cooldown ({remaining_min}min remaining) — skip")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": "COOLDOWN",
+                       "score": round(float(score), 1),
+                       "trigger_score": round(float(score), 1)})
+            return
+    # TA filter — cheap statistical gate before the paid AI call.
+    ta = analyze_perception(perception)
+    if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
+        logger.info(f"{coin}: TA {ta['signal']} (score {ta['score']:.0f}) — skip AI research")
+        log_event({"event": "ta_skip", "coin": coin,
+                   "signal": ta['signal'],
+                   "score": round(float(ta.get('score', 0)), 1),
+                   "trigger_score": round(float(score), 1)})
+        return
+    gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
+    logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
+    # Record the paid-research time so the held-coin throttle above can
+    # pace the next AI close-check on this position. Locked: read on the
+    # main thread by the skip-check and written by whichever worker finishes
+    # research on this coin first.
+    with _research_lock:
+        _last_research_by_coin[coin] = now_ms
+
+    try:
+        analysis = research(coin, perception)
+        logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
+        # Store the full LLM reasoning verbatim — no character cap.
+        # The feed shows the complete rationale.
+        _r = (analysis.get('reasoning') or '').strip()
+        log_event({"event": "research", "coin": coin,
+                   "verdict": analysis['verdict'],
+                   "confidence": round(float(analysis['confidence']), 2),
+                   "reasoning": _r,
+                   "news_risk": analysis.get('news_risk'),
+                   "entry_px": analysis.get('entry_px'),
+                   "stop_px": analysis.get('stop_px'),
+                   "tp_px": analysis.get('tp_px')})
+
+        # All verdict→action routing lives in executor.route_verdict
+        # (unit-tested) so no verdict can be silently dropped again.
+        routed = route_verdict(analysis)
+        action = routed["action"]
+        result = routed["result"] or {}
+        if action == "execute":
+            logger.info(f"Trade result: {result}")
+            executed = bool(result.get("executed"))
+            # Surface the regime decision so the log answers "why did a
+            # counter-regime trade fire?" — via is one of aligned /
+            # neutral / confidence / composite / trigger:<name> / blocked.
+            mr = (result.get("gate_results") or {}).get("market_regime") or {}
+            log_event({"event": "execute", "coin": coin,
+                       "side": analysis['side'],
+                       "executed": executed,
+                       "detail": result.get("order_id")
+                       or result.get("reason")
+                       or result.get("blocked_by"),
+                       "blocked_by": result.get("blocked_by") if not executed else None,
+                       "size_usd": result.get("size_usd"),
+                       "entry_px": result.get("entry_px"),
+                       "stop_px": result.get("stop_px"),
+                       "tp_px": result.get("tp_px"),
+                       "regime": mr.get("regime"),
+                       "funding_regime": mr.get("funding"),
+                       "regime_via": mr.get("via"),
+                       "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
+        elif action == "close":
+            logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
+            log_event({"event": "ai_close", "coin": coin,
+                       "executed": bool(result.get("ok")),
+                       "detail": result.get("order_id")
+                       or result.get("noop")
+                       or result.get("error"),
+                       "reasoning": (analysis.get("reasoning") or "")})
+        elif action == "none":
+            logger.info(f"Trade result: {routed}")
+            log_event({"event": "pass", "coin": coin,
+                       "reasoning": (analysis.get("reasoning") or "")[:500],
+                       "chronos_median": routed.get("chronos_median_pct"),
+                       "chronos_aligned_if_long": routed.get("chronos_aligned_if_long"),
+                       "chronos_aligned_if_short": routed.get("chronos_aligned_if_short"),
+                       "chronos_error": routed.get("chronos_error")})
+        elif action == "unknown":
+            log_event({"event": "error", "coin": coin,
+                       "error": f"unhandled verdict {routed['verdict']!r}"})
+    except Exception as e:
+        # repr(e) not str(e): a bare exception (e.g. some httpx errors)
+        # stringifies to "" and produced blank "Error processing X:" lines.
+        detail = repr(e) if str(e) == "" else str(e)
+        logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
+        log_event({"event": "error", "coin": coin,
+                   "error": f"{type(e).__name__}: {detail}"})
 
 while True:
     try:
@@ -713,157 +888,38 @@ while True:
         _blocklist = set(_cfg_cd.get("coin_blocklist", []) or [])
         now_ms = int(time.time() * 1000)
 
-        for perception in results:
-            coin = perception['coin']
-            score = perception.get('composite_score', 0)
-
-            # Watchdog heartbeat: every coin processed proves the loop is alive,
-            # so a healthy 10min+ research phase can't trip the 600s re-exec.
-            _last_progress_ts = time.time()
-
-            # Persist perceptions so memory/dashboard track real signal volume.
-            try:
-                memory.record_perception(perception)
-            except Exception:
-                pass
-
-            if coin in held_coins:
-                # Held position: research only every held_research_interval_min
-                # so the AI can still issue a CLOSE without paying for a "hold"
-                # PASS on every scan. (A re-entry is gate-blocked anyway.)
-                last_research = _last_research_by_coin.get(coin, 0)
-                if (now_ms - last_research) < held_research_ms:
-                    remaining_min = _remaining_minutes(held_research_ms - (now_ms - last_research))
-                    logger.info(f"{coin}: held — next AI close-check in {remaining_min}min — skip")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "HELD_THROTTLE",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-                # Infancy hold: skip the AI close-check while the position is
-                # younger than min_ai_close_hold_min (0=off). Measured churn
-                # 2026-06-11/12: the FIRST 10-min close-check reversed the AI's
-                # own fresh entry 3x (TON 2x, ZEC 1x, each ~-1% ROE incl. fees) —
-                # flip-flopping on entry noise. DSL stop + backup SL still
-                # protect an infant position; only the AI's second-guess waits.
-                min_hold_min = float(_cfg_cd.get("min_ai_close_hold_min", 0) or 0)
-                if min_hold_min > 0:
-                    from hermes_trader.agents import dsl_exit as _dsl
-                    _tr = (_dsl._active_positions.get(f"{coin}_long")
-                           or _dsl._active_positions.get(f"{coin}_short"))
-                    if _tr is not None:
-                        age_min = (time.time() - _tr.entry_time) / 60
-                        if age_min < min_hold_min:
-                            logger.info(f"{coin}: held {age_min:.0f}min < min_hold "
-                                        f"{min_hold_min:.0f}min — infancy, skip close-check")
-                            continue
-            else:
-                # Blocklisted + not held → coin_filter will reject any entry, so
-                # skip the paid LLM research entirely (this coin keeps triggering
-                # every scan otherwise). Held blocklisted coins took the held
-                # branch above and still get their AI close-check.
-                if coin in _blocklist:
-                    logger.info(f"{coin}: on coin blocklist — skip research")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "BLOCKLISTED",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-                # Not held but executed within cooldown_min → re-entry would be
-                # gate-blocked, so skip the paid AI call.
-                last_ms = recent_trades_by_coin.get(coin)
-                if last_ms and (now_ms - last_ms) < cooldown_ms:
-                    remaining_min = _remaining_minutes(cooldown_ms - (now_ms - last_ms))
-                    logger.info(f"{coin}: pre-research cooldown ({remaining_min}min remaining) — skip")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "COOLDOWN",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-            # TA filter — cheap statistical gate before the paid AI call.
-            ta = analyze_perception(perception)
-            if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
-                logger.info(f"{coin}: TA {ta['signal']} (score {ta['score']:.0f}) — skip AI research")
-                log_event({"event": "ta_skip", "coin": coin,
-                           "signal": ta['signal'],
-                           "score": round(float(ta.get('score', 0)), 1),
-                           "trigger_score": round(float(score), 1)})
-                continue
-            gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
-            logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
-            # Record the paid-research time so the held-coin throttle above can
-            # pace the next AI close-check on this position.
-            _last_research_by_coin[coin] = now_ms
-
-            try:
-                analysis = research(coin, perception)
-                logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
-                # Store the full LLM reasoning verbatim — no character cap.
-                # The feed shows the complete rationale.
-                _r = (analysis.get('reasoning') or '').strip()
-                log_event({"event": "research", "coin": coin,
-                           "verdict": analysis['verdict'],
-                           "confidence": round(float(analysis['confidence']), 2),
-                           "reasoning": _r,
-                           "news_risk": analysis.get('news_risk'),
-                           "entry_px": analysis.get('entry_px'),
-                           "stop_px": analysis.get('stop_px'),
-                           "tp_px": analysis.get('tp_px')})
-
-                # All verdict→action routing lives in executor.route_verdict
-                # (unit-tested) so no verdict can be silently dropped again.
-                routed = route_verdict(analysis)
-                action = routed["action"]
-                result = routed["result"] or {}
-                if action == "execute":
-                    logger.info(f"Trade result: {result}")
-                    executed = bool(result.get("executed"))
-                    # Surface the regime decision so the log answers "why did a
-                    # counter-regime trade fire?" — via is one of aligned /
-                    # neutral / confidence / composite / trigger:<name> / blocked.
-                    mr = (result.get("gate_results") or {}).get("market_regime") or {}
-                    log_event({"event": "execute", "coin": coin,
-                               "side": analysis['side'],
-                               "executed": executed,
-                               "detail": result.get("order_id")
-                               or result.get("reason")
-                               or result.get("blocked_by"),
-                               "blocked_by": result.get("blocked_by") if not executed else None,
-                               "size_usd": result.get("size_usd"),
-                               "entry_px": result.get("entry_px"),
-                               "stop_px": result.get("stop_px"),
-                               "tp_px": result.get("tp_px"),
-                               "regime": mr.get("regime"),
-                               "funding_regime": mr.get("funding"),
-                               "regime_via": mr.get("via"),
-                               "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
-                elif action == "close":
-                    logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
-                    log_event({"event": "ai_close", "coin": coin,
-                               "executed": bool(result.get("ok")),
-                               "detail": result.get("order_id")
-                               or result.get("noop")
-                               or result.get("error"),
-                               "reasoning": (analysis.get("reasoning") or "")})
-                elif action == "none":
-                    logger.info(f"Trade result: {routed}")
-                    log_event({"event": "pass", "coin": coin,
-                               "reasoning": (analysis.get("reasoning") or "")[:500],
-                               "chronos_median": routed.get("chronos_median_pct"),
-                               "chronos_aligned_if_long": routed.get("chronos_aligned_if_long"),
-                               "chronos_aligned_if_short": routed.get("chronos_aligned_if_short"),
-                               "chronos_error": routed.get("chronos_error")})
-                elif action == "unknown":
-                    log_event({"event": "error", "coin": coin,
-                               "error": f"unhandled verdict {routed['verdict']!r}"})
-            except Exception as e:
-                # repr(e) not str(e): a bare exception (e.g. some httpx errors)
-                # stringifies to "" and produced blank "Error processing X:" lines.
-                detail = repr(e) if str(e) == "" else str(e)
-                logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
-                log_event({"event": "error", "coin": coin,
-                           "error": f"{type(e).__name__}: {detail}"})
-
+        # Research + execute on a bounded thread pool so the (slow) LLM calls
+        # overlap instead of serializing. scan_once returns triggers sorted by
+        # composite_score DESC, so submitting in order preserves priority (the
+        # pool dispatches the highest-score coins first). research_max_workers
+        # =1 keeps today's exact sequential behavior; set it to the LLM
+        # server's slot count to actually parallelize the research phase.
+        _n_research = max(1, len(results))
+        # Clamp workers to [1, n_triggers]; a malformed config value falls back
+        # to 1 (sequential) rather than blowing up the scan.
+        _workers = compute_research_workers(_cfg_cd, _n_research)
+        _ctx = {
+            "now_ms": now_ms,
+            "held_coins": held_coins,
+            "held_research_ms": held_research_ms,
+            "cooldown_ms": cooldown_ms,
+            "recent_trades_by_coin": recent_trades_by_coin,
+            "blocklist": _blocklist,
+            "cfg_cd": _cfg_cd,
+        }
+        if _workers == 1:
+            # Sequential path (default): exactly today's behavior.
+            for perception in results:
+                _process_coin(perception, _ctx)
+        else:
+            logger.info(f"Research phase: {len(results)} trigger(s) on {_workers} worker(s)")
+            with ThreadPoolExecutor(max_workers=_workers, thread_name_prefix="research") as _pool:
+                _futures = [_pool.submit(_process_coin, perception, _ctx) for perception in results]
+                # _process_coin swallows per-coin errors (logged + session event);
+                # .result() still surfaces any uncaught one so it can't be lost.
+                for _fut in as_completed(_futures):
+                    _fut.result()
+                    _last_progress_ts = time.time()
         _last_progress_ts = time.time()  # watchdog: a full cycle completed
         logger.info(f"Sleeping {scan_interval}s until next scan...")
         time.sleep(scan_interval)

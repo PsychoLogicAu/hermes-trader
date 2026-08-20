@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +48,13 @@ class AgentMemory:
         self._day_start_ts: int = 0
         self._open_positions: List[Dict[str, Any]] = []
         self._initialized = False
+        # Guards every mutation of the in-memory lists/dicts AND flush(). The
+        # research phase can run on multiple worker threads (research_max_workers
+        # > 1), and flush() snapshots the state then writes it via a tmp file +
+        # os.replace — two concurrent flushes can interleave and corrupt the
+        # JSON. RLock (not Lock) because the mutating methods call flush() while
+        # already holding this same lock.
+        self._lock = threading.RLock()
 
     @classmethod
     def get_instance(cls) -> "AgentMemory":
@@ -107,42 +115,46 @@ class AgentMemory:
         if not self._initialized:
             return
         try:
-            data = {
-                "perceptions": self._perceptions,
-                "analyses": self._analyses,
-                "trades": self._trades,
-                "closes": self._closes,
-                "entryCtx": self._entry_ctx,
-                "cooldowns": [{"coin": coin, "expires": exp} for coin, exp in self._cooldowns.items()],
-                "equity": self._equity,
-                "dailyPnl": self._daily_pnl,
-                "startOfDayEquity": self._start_of_day_equity,
-                "dayStartTs": self._day_start_ts,
-                "openPositions": self._open_positions,
-            }
-            tmp = MEMORY_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, MEMORY_FILE)
+            with self._lock:
+                data = {
+                    "perceptions": self._perceptions,
+                    "analyses": self._analyses,
+                    "trades": self._trades,
+                    "closes": self._closes,
+                    "entryCtx": self._entry_ctx,
+                    "cooldowns": [{"coin": coin, "expires": exp} for coin, exp in self._cooldowns.items()],
+                    "equity": self._equity,
+                    "dailyPnl": self._daily_pnl,
+                    "startOfDayEquity": self._start_of_day_equity,
+                    "dayStartTs": self._day_start_ts,
+                    "openPositions": self._open_positions,
+                }
+                tmp = MEMORY_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp, MEMORY_FILE)
         except Exception as e:
             logger.error(f"[memory] save failed: {e}")
 
     # ── Write operations ────────────────────────────────────────────────────
 
     def record_perception(self, p: Dict[str, Any]) -> None:
-        self._perceptions.append(p)
-        if len(self._perceptions) > MAX_PERCEPTIONS:
-            self._perceptions.pop(0)
+        with self._lock:
+            self._perceptions.append(p)
+            if len(self._perceptions) > MAX_PERCEPTIONS:
+                self._perceptions.pop(0)
 
     def record_analysis(self, a: Dict[str, Any]) -> None:
-        self._analyses.append(a)
-        if len(self._analyses) > MAX_ANALYSES:
-            self._analyses.pop(0)
+        with self._lock:
+            self._analyses.append(a)
+            if len(self._analyses) > MAX_ANALYSES:
+                self._analyses.pop(0)
 
     def record_trade(self, t: Dict[str, Any]) -> None:
-        self._trades.append(t)
-        if len(self._trades) > MAX_TRADES:
-            self._trades.pop(0)
+        with self._lock:
+            self._trades.append(t)
+            if len(self._trades) > MAX_TRADES:
+                self._trades.pop(0)
 
     def record_entry_context(self, coin: str, side: str, ctx: Dict[str, Any]) -> None:
         """Stash entry time + signal snapshot for an opening position, so its close
