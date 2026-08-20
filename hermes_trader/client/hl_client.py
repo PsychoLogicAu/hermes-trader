@@ -267,8 +267,24 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
         p for p in raw_positions
         if float(p.get("position", {}).get("szi", "0")) != 0
     ]
+    # In a unified account the perp margin is USDC reserved ("hold") out of the
+    # spot balance — the same dollars, not extra. We need both the reserved
+    # amount and the perp unrealized PnL to value the portfolio without
+    # double-counting the margin that's already sitting in spot_usdc.
+    spot_held = sum(float(b.get("hold", "0") or 0) for b in spot_balances)
+    perp_uPnL = sum(
+        float(p.get("position", {}).get("unrealizedPnl", "0") or 0)
+        for p in raw_positions
+    )
 
-    equity = perp_equity + spot_usdc  # Unified mode: spot USDC backs perp margin
+    # Portfolio value = spot cash + perp unrealized PnL + (any perp margin from
+    # a SEPARATE deposit, i.e. non-unified accounts). Adding perp_equity
+    # (accountValue = margin + uPnL) on top of spot_usdc would count the held
+    # margin twice in unified mode, inflating equity by the open-book margin
+    # size. `perp_equity - perp_uPnL` is the margin backing; subtract the
+    # spot-reserved portion to keep only separately-deposited margin.
+    perp_deposited_cash = max(0.0, perp_equity - perp_uPnL - spot_held)
+    equity = spot_usdc + perp_uPnL + perp_deposited_cash
     # Free initial margin = what HL's UI shows as "Available to Trade" and
     # what HL checks before accepting new orders. `withdrawable` is a
     # different (much tighter) number — the spot-bridgeable amount — and
@@ -334,7 +350,7 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
         "available": available,                       # main-only — for executor sizing
         "available_aggregated": available_aggregated, # total across all dexes — for display
         "spot_usdc": spot_usdc,
-        "total_usdc": equity + spot_usdc,
+        "total_usdc": equity,
         "total_ntl": total_ntl,
         "spot_balances": spot_balances,
         "asset_positions": asset_positions,
