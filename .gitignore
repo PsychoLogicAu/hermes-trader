@@ -120,3 +120,6 @@ hf-cache/
 
 # Local agent notes (PROJECT.md) — not part of the project
 .hermes/
+
+# Sizing-monitor state (daily cap/revert watchdog) — machine-managed
+.ratchet-state.json
