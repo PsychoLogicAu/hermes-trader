@@ -128,10 +128,11 @@ One scan cycle (default 60s, env-tunable via `HERMES_SCAN_INTERVAL`):
         + volume confirmation. Free statistical gate before any AI cost.
         Result: CONFIRMED / WEAK / REJECTED. Momentum-burst triggers bypass.
      c. AI research (research.research) — fetches candles + news context,
-        sends to OpenRouter LLM (Grok-4 or similar), parses verdict
+        sends to the configured OpenAI-compatible LLM endpoint (see
+        docs/OPERATIONS.md "External LLM (reference)"), parses verdict
         (LONG / SHORT / PASS) + confidence (0-1) + entry/stop/tp prices.
         memory.record_analysis() persists the result.
-     d. Risk gates (risk_gates.eval_all_gates) — 11 independent gates,
+     d. Risk gates (risk_gates.eval_all_gates) — 14 independent gates,
         all evaluated (no short-circuit) for telemetry. Listed below.
      e. Executor (executor.maybe_execute) — defensive equity guard first
         (refuse if HL API returned equity=0). If all gates pass: size
@@ -144,7 +145,7 @@ One scan cycle (default 60s, env-tunable via `HERMES_SCAN_INTERVAL`):
      f. Log `execute` event with side, executed flag, order_id, blocked_by.
 ```
 
-### The 11 risk gates
+### The 14 risk gates
 
 All evaluated; results recorded for telemetry. Trade blocks if any returns
 `{pass: False}`. **All config keys are `snake_case`** — legacy camelCase
@@ -157,10 +158,12 @@ used by the old MCP-server status display.
 | `max_concurrent` | Open positions < `max_concurrent` |
 | `notional_cap` | Per-trade notional ≤ `max_trade_notional_usd` |
 | `daily_loss` | Daily PnL > `max_daily_loss_usd` (kill switch) |
-| `liquidity` | Asset-class-aware floor. Crypto: ≥ `min_market_volume_usd` (default 5M). HIP-3 (colon-namespaced): ≥ `min_hip3_volume_usd` (default 500k). Same floor would have wrongly blocked legitimately-liquid tokenized markets like `xyz:CRCL` ($4.7M) and `km:USTECH` ($1.06M). |
+| `daily_giveback` | Once the day's PnL has peaked ≥ `daily_giveback_min_peak_usd`, new entries halt if it retraces > `daily_giveback_halt_pct` |
+| `liquidity` | Asset-class-aware floor. Crypto: ≥ `min_market_volume_usd` (default 5M). HIP-3 (colon-namespaced): ≥ `min_hip3_volume_usd` (default 500k). Same floor would have wrongly blocked legitimately-liquid tokenized markets like `xyz:CRCL` ($4.7M) and `km:USTECH` ($1.06M). High-confidence bypass available via `runner_entry_gate.bypass_low_volume`. |
+| `short_liquidity` | Shorts require ≥ `min_short_volume_usd` 24h volume — deeper floor than the long-side liquidity gate |
 | `coin_filter` | Coin not in blocklist; if allowlist set, must be in it |
+| `no_pyramid` | No re-entry (same or opposite side) on a coin the bot already holds |
 | `cooldown` | Same-coin cooldown elapsed (`cooldown_min`). Keys off the most-recent REAL trade in memory (blocked attempts no longer pollute this — see fix in pipeline section). |
-| `opposite_guard` | No simultaneous opposite-direction position on the same coin |
 | `correlation` | Crypto long correlation cap — `max_crypto_long_correlated` (default 2, often 5–8 in live). HIP-3 equity/commodity longs don't count against the crypto cap because the regime classifier strips the dex prefix and routes them to the equity/commodity class. |
 | `equity_risk` | Total open notional ≤ `max_total_notional_pct × equity` |
 | `market_regime` | Counter-trend trades blocked unless confidence ≥ `counter_regime_min_conf`. Per-asset-class proxy: BTC for crypto, `xyz:SP500` for equity, own ticker for commodities. |
@@ -646,36 +649,38 @@ trading loop running headless for autonomous execution.
 
 ### General use (no Hermes Agent)
 
-The minimum to get from "I cloned this" to "the bot is trading":
+The minimum to get from "I cloned this" to "the bot is trading" (the Docker
+Compose path is the documented default — see the README Quick Start; this is
+the bare-Python variant):
 
 ```bash
 # 1. Install
-git clone https://github.com/Julian-dev28/hermes-trader
 cd hermes-trader
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev]"        # loop deps + dashboard (fastapi/uvicorn/prometheus) + pytest
 
 # 2. Configure
-cp .env.local.example .env.local
-# Edit: OPENROUTER_API_KEY, HYPERLIQUID_WALLET_ADDRESS, HYPERLIQUID_PRIVATE_KEY
-# Optional: HERMES_OPERATOR_TOKEN (for the operator console), BRAVE_API_KEY (news)
+cp .env.example .env.local
+# Edit: HYPERLIQUID_WALLET_ADDRESS, HYPERLIQUID_PRIVATE_KEY,
+#       LLM_BASE_URL, LLM_MODEL (LLM_API_KEY usually "local" for a local server)
+# Optional: HERMES_OPERATOR_TOKEN (operator console), BRAVE_API_KEY (news)
+cp .agent-config.example.json .agent-config.json
+# The template ships with mode OFF (analyse-only) — tune per docs/CONFIG.md
 
-# 3. Start in OFF mode first — verify the engine reads market data without trading
-echo '{"mode":"OFF","minAiConfidence":0.8,"max_concurrent":3}' > .agent-config.json
-
-# 4. Run the trading loop and the dashboard
+# 3. Run the trading loop and the dashboard
 python3 scripts/trading_loop.py &     # scans every 60s
-python3 -m hermes_trader.server &      # dashboard at http://localhost:8000
+python3 -m hermes_trader.server &     # dashboard at http://localhost:8000
 
-# 5. Watch one cycle — the dashboard's live feed shows scans + research verdicts
+# 4. Watch one cycle — the dashboard's live feed shows scans + research verdicts
 open http://localhost:8000
 
-# 6. When you're satisfied, flip mode to LIVE
+# 5. When you're satisfied, flip mode to LIVE
 #    Either edit .agent-config.json directly, or use /operator?token=… and click "set mode LIVE"
 ```
 
-The config is read **fresh on every trade** — no restart needed for changes.
-Same for risk caps, leverage, allowlists.
+In bare Python there is no bind mount, so the config is read **fresh from disk
+on every trade** — no restart needed for changes (the container inode trap
+documented in the README only applies to the Docker path).
 
 ### Hands-off operating via Hermes Agent (the MCP path)
 
@@ -1094,8 +1099,9 @@ into a loss — they can't drain them.
 ### Things that should NEVER be in the repo
 
 ```
-HYPERLIQUID_PRIVATE_KEY    OPENROUTER_API_KEY    HERMES_OPERATOR_TOKEN
-BRAVE_API_KEY              .agent-memory.json    .dsl-state.json
+HYPERLIQUID_PRIVATE_KEY    LLM_API_KEY          HERMES_OPERATOR_TOKEN
+OPENROUTER_API_KEY         BRAVE_API_KEY        .agent-memory.json
+.agent-config.json         .dsl-state.json      .env.local
 ```
 
 All of these are in `.gitignore`. If you ever commit one by accident,

@@ -7,11 +7,15 @@ Usage:
 
 Filters trades to the period since Chronos went live (Aug 10 2026 ~23:48 UTC).
 """
+import os
 import re
 import sys
 from datetime import datetime
 
-LOG_FILE = sys.argv[1] if len(sys.argv) > 1 else "/home/oknight/src/hermes-trader/trader-logs/trader.log"
+LOG_FILE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "trader-logs", "trader.log",
+)
 CUTOFF = datetime(2026, 8, 10, 23, 0, 0)  # before Chronos started
 
 def ts(line):

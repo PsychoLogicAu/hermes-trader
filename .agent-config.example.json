@@ -1,12 +1,18 @@
 {
-  "mode": "LIVE",
+  "_comment": [
+    "Template for .agent-config.json \u2014 copy, edit, keep out of git:",
+    "  cp .agent-config.example.json .agent-config.json",
+    "mode OFF = analyse-only (exits still managed). Flip to LIVE deliberately.",
+    "See docs/CONFIG.md for every key and docs/OPERATIONS.md for hot-reload rules."
+  ],
+  "mode": "OFF",
   "enable_crypto": true,
   "enable_hip3": false,
   "equity_fraction_per_trade": 0.08,
   "leverage": 5,
-  "max_trade_notional_usd": 36.75,
+  "max_trade_notional_usd": 35,
   "tp_scale_fraction": 0.5,
-  "max_concurrent": 6,
+  "max_concurrent": 5,
   "research_max_workers": 4,
   "max_total_notional_pct": 2.0,
   "max_daily_loss_usd": -20,
@@ -192,7 +198,11 @@
     "forecast_horizon": 12,
     "cache_ttl_seconds": 300,
     "timeout_seconds": 30,
-    "quantile_levels": [0.1, 0.5, 0.9],
+    "quantile_levels": [
+      0.1,
+      0.5,
+      0.9
+    ],
     "num_samples": 50
   }
 }

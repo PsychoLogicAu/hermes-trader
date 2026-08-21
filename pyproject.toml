@@ -19,6 +19,22 @@ dependencies = [
     "eth-account>=0.8.0",
     "hyperliquid-python-sdk>=0.24.0",
     "httpcore>=1.0.0",
+    # Optional shadow signal: Chronos-2 forecasting (lazy-imported; the bot
+    # runs fine without it — the signal just stays disabled).
+    "chronos-forecasting>=2.0,<3",
+]
+
+[project.optional-dependencies]
+# Dashboard + operator console (python -m hermes_trader.server).
+dashboard = [
+    "fastapi>=0.141",
+    "uvicorn>=0.52",
+    "prometheus-client>=0.26",
+]
+# Offline test suite (CI installs this).
+dev = [
+    "pytest>=9.0",
+    "hermes-trader[dashboard]",
 ]
 
 [tool.setuptools.packages.find]
