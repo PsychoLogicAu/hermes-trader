@@ -26,11 +26,6 @@ MIN_ORDER_USD = 10.5
 from eth_account import Account
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
-from hyperliquid.utils.signing import (
-    OrderType,
-    TriggerOrderType,
-)
-
 from hermes_trader.client.hl_client import (
     HL_API,
     _http_post,
@@ -91,7 +86,8 @@ def _make_exchange() -> Exchange:
     if key_hex.startswith("0x"):
         key_hex = key_hex[2:]
 
-    # The SDK uses eth_account for signing
+    # The SDK's Exchange(wallet=...) expects an eth_account LocalAccount.
+    # Account.from_key() returns exactly that — no wrapper needed.
     acct = Account.from_key(key_hex)
 
     # For unified accounts with agent wallet:
@@ -550,7 +546,8 @@ def place_hl_order(
         logger.info(f"[place_hl_order] price_str={price_str}, size_str={size_str}, mid={mid_price}, sz_dec={sz_dec}")
         
         exchange = _make_exchange()
-        order_type = OrderType(limit={"tif": "Ioc"})
+        # SDK expects an order_type dict (no longer imported from utils.signing)
+        order_type = {"limit": {"tif": "Ioc"}}
         
         logger.info(f"[place_hl_order] Calling exchange.order({coin}, {is_buy}, {float(size_str)}, {float(price_str)}, {order_type})")
         
@@ -610,13 +607,14 @@ def place_hl_trigger_order(
         trigger_f = float(trigger_str)
         size_str = f"{size:.{sz_dec}f}"
 
-        order_type = OrderType(
-            trigger=TriggerOrderType(
-                triggerPx=trigger_f,
-                isMarket=True,
-                tpsl="sl" if kind == "sl" else "tp",
-            )
-        )
+        # SDK's order_type_to_wire expects the "trigger" dict with camelCase keys.
+        order_type = {
+            "trigger": {
+                "triggerPx": trigger_f,
+                "isMarket": True,
+                "tpsl": "sl" if kind == "sl" else "tp"
+            }
+        }
 
         logger.info(
             f"[place_hl_trigger_order] {coin} {kind} is_buy={is_buy} "
@@ -636,6 +634,86 @@ def place_hl_trigger_order(
         return _parse_order_result(result, accept_resting=True)
     except Exception as e:
         logger.error(f"Failed to place trigger order for {coin}: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+def adjust_tp_order(
+    coin: str,
+    is_long_position: bool,
+    size: float,
+    old_tp_px: float,
+    new_tp_px: float,
+) -> Dict[str, Any]:
+    """Adjust an existing take-profit trigger order to a new level.
+
+    Cancels the old TP order (by scanning open orders for this coin/side/price)
+    and places a new TP order at `new_tp_px`. Returns result dict with 'ok' key.
+    Never raises — errors are logged and returned as {'ok': False, ...}.
+    """
+    if not PRIVATE_KEY_HEX:
+        return {"ok": False, "error": "HYPERLIQUID_PRIVATE_KEY not set"}
+    if size <= 0 or new_tp_px <= 0 or new_tp_px <= old_tp_px:
+        return {"ok": False, "error": "invalid parameters"}
+
+    try:
+        _, sz_dec, _ = get_coin_index(coin)
+
+        # Step 1: Find and cancel existing TP order for this coin
+        user = resolve_user_address()
+        if not user:
+            return {"ok": False, "error": "no user address"}
+
+        orders = _http_post("/info", {"type": "openOrders", "user": user}) or []
+        tp_oid = None
+        for o in orders:
+            if o.get("coin") == coin and o.get("side") == ("sell" if is_long_position else "buy"):
+                oid = o.get("oid")
+                trigger = float(o.get("triggerPx", 0)) if o.get("triggerPx") else None
+                if oid and trigger and abs(trigger - old_tp_px) / max(1.0, old_tp_px) < 0.005:
+                    tp_oid = int(oid)
+                    break
+
+        if tp_oid is None:
+            return {"ok": False, "error": "no existing TP order found near expected price"}
+
+        exchange = _make_exchange()
+        cancel_result = exchange.cancel(coin, tp_oid)
+        if not (isinstance(cancel_result, dict) and cancel_result.get("status") == "ok"):
+            return {"ok": False, "error": f"cancel TP failed: {cancel_result}"}
+
+        # Step 2: Place new TP order
+        is_buy = not is_long_position
+        trigger_str = _round_price_for_hl(new_tp_px, sz_dec, is_perp=True)
+        trigger_f = float(trigger_str)
+        size_str = f"{size:.{sz_dec}f}"
+
+        order_type = {
+            "trigger": {
+                "triggerPx": trigger_f,
+                "isMarket": True,
+                "tpsl": "tp"
+            }
+        }
+
+        result = exchange.order(
+            coin,
+            is_buy,
+            float(size_str),
+            trigger_f,
+            order_type,
+            reduce_only=True,
+        )
+
+        parsed = _parse_order_result(result, accept_resting=True)
+        if parsed.get("ok"):
+            logger.info(f"[adjust_tp] {coin} TP adjusted from {old_tp_px:.4f} → {new_tp_px:.4f}")
+        else:
+            logger.warning(f"[adjust_tp] {coin} new TP order rejected: {parsed.get('error')}")
+
+        return parsed
+
+    except Exception as e:
+        logger.error(f"[adjust_tp] failed for {coin}: {e}")
         return {"ok": False, "error": str(e)}
 
 

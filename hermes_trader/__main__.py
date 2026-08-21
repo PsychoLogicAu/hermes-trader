@@ -317,31 +317,28 @@ def cmd_config(*args):
 
 
 def cmd_start():
-    """Start autonomous scanning loop in background."""
-    import subprocess
+    """Run the trading loop in the foreground."""
+    import sys as _sys
+    import importlib.util
 
-    pid_file = os.path.expanduser("~/.hermes.pid")
-    if os.path.exists(pid_file):
-        old_pid = open(pid_file).read().strip()
+    dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env.local")
+    if os.path.isfile(dotenv_path):
         try:
-            os.kill(int(old_pid), 0)
-            print(f"  Scanner already running (PID {old_pid}). Run 'hermes stop' first.\n")
-            return
-        except (OSError, ValueError):
+            import importlib as _imp
+            _imp.import_module("dotenv").dotenv.load_dotenv(dotenv_path, override=True)
+        except Exception:
             pass
 
-    print("  Starting autonomous scanner...\n")
-    env = os.environ.copy()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "hermes_trader"],
-        env=env,
-        start_new_session=True,
-    )
-
-    open(pid_file, "w").write(str(proc.pid))
-    print(f"  Scanner running (PID {proc.pid}).\n")
-    print("  To stop:  hermes stop")
-    print("  Monitor:  hermes status\n")
+    print("  Starting autonomous scanner (foreground)...\n")
+    script_path = os.path.join(os.path.dirname(__file__), "..", "scripts", "trading_loop.py")
+    
+    # Load and run the script as a module
+    spec = importlib.util.spec_from_file_location("trading_loop", script_path)
+    if spec is None or spec.loader is None:
+        print(f"  Error: could not load {script_path}")
+        sys.exit(1)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
 
 def cmd_stop():

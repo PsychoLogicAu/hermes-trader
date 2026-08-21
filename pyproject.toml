@@ -1,45 +1,25 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-trader"
-dynamic = ["version"]
-description = "Autonomous quant trading agent for Hyperliquid perpetual markets"
-requires-python = ">=3.11"
+version = "1.0.0"
+description = "Hyperliquid trading engine"
+requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.115,<1",
-    "uvicorn[standard]>=0.30,<1",
-    "httpx>=0.27,<1",
-    "pydantic>=2.0",
-    "pydantic_settings>=2.0",
-    "python-dotenv>=1.0",
-    "hyperliquid-python-sdk>=0.23.0",
-    "eth-account>=0.13.0",
-    "msgpack>=1.1.0",
-    "prometheus-client>=0.20",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "aiohttp>=3.9.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "rich>=13.7.0",
+    "pyfiglet>=1.0.2",
+    "certifi>=2023.5.0",
+    "eth-account>=0.8.0",
+    "hyperliquid-python-sdk>=0.24.0",
+    "httpcore>=1.0.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "ruff>=0.4",
-]
-
-[project.scripts]
-hermes-trader = "hermes_trader.__main__:main"
-
-[tool.hatch.version]
-path = "hermes_trader/__init__.py"
-
-[tool.hatch.build.targets.wheel]
-packages = ["hermes_trader"]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
-addopts = "-m 'not online and not live'"
-markers = [
-    "online: exercises the live Hyperliquid public API (read-only); deselected by default (run with: pytest -m online)",
-    "live: real-money e2e — places orders and calls the billable LLM; deselected by default and additionally requires HERMES_E2E=1 (run with: HERMES_E2E=1 pytest -m live)",
-]
+[tool.setuptools.packages.find]
+include = ["hermes_trader"]

@@ -15,7 +15,7 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
     if normalized_mode == "LIVE":
         mode_desc = "You are in LIVE mode — your verdict auto-executes against real funds. Be precise but DECISIVE."
     elif normalized_mode == "SHADOW":
-        mode_desc = "You are in SHADOW mode — output your verdict for validation only. No new entry order will be placed."
+        mode_desc = "You are in SHADOW mode — output your verdict for validation only. No real funds are at risk. SHADOW is your TRAINING environment: be DECISIVE and commit to trades on clean trend-aligned setups. Treat this like you're proving you can pick setups. A setup with clean 4h/1d trend alignment that made it through scanning deserves a trade call, not a marginal PASS — SHADOW lets you test your conviction without risk."
     else:
         mode_desc = "You are in OFF mode — output your verdict for analysis only. No execution will occur."
 
@@ -75,8 +75,11 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "  'earnings', 'Fed' or 'SEC'. Only a THIS-COIN-specific catastrophe is negative.",
         "",
         "HARD RULES:",
-        "1. SL/TP JSON must be sensible and nonzero, but execution owns the live bracket:",
-        "   backup SL defaults to 1.5× ATR and TP scale-out defaults to 1.0× ATR.",
+        "1. SL/TP JSON must be sensible and nonzero; execution owns the bracket. Use volatility buffers"
+        "tailored to the trend strength: for confirmed 4h/1d trend-aligned moves, use 2.0–2.5× ATR"
+        "for stops (noise-floor distance). Use 1.5× ATR only on weak setups or low volume."
+        "TP scale-out: 1.2–1.5× ATR is preferred. Treat the stop as a noise floor — not a precise"
+        "trigger — to avoid being wick-out on strong rippers.",
         "2. Never output entryPx without stopPx and tpPx — incomplete orders are rejected.",
         "3. If already in a position on this coin → CLOSE if the structure has flipped against it,",
         "   else HOLD (just output PASS — the position keeps running).",
@@ -85,9 +88,21 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "4. Your default is to PICK A DIRECTION that AGREES WITH THE 4h/1d TREND. PASS is reserved",
         "   for genuine conflict: 1h/4h/1d give no coherent direction AND no slow-burn fired.",
         "5. THE HIGHER-TIMEFRAME TREND IS KING. Trade in its direction, never against it:",
-        "   - Clean bullish 4h/1d EMA  → LONG.  Take it with confidence 0.65+.",
-        "   - Clean bearish 4h/1d EMA  → SHORT. Take it with confidence 0.65+. (Do NOT 'buy the dip'.)",
+        "   - Clean bullish 4h/1d EMA  → LONG.  Take it with confidence 0.70+.",
+        "   - Clean bearish 4h/1d EMA  → SHORT. Take it with confidence 0.70+. (Do NOT 'buy the dip'.)",
         "   Shorting a downtrend is just as good a trade as longing an uptrend — weight them equally.",
+        "   If the higher-TF trend is clean AND the composite score cleared scanning (>=25), this is NOT",
+        "   a marginal setup — take the trade. The execution gate requires 0.70, so meet it when the trend is clear.",
+        "   CRITICAL: The execution gate also requires a FRESH breakout or momentum burst structure at entry time.",
+        "   If the trend is clean but no breakout/structure triggers have fired recently, this is a late-trend",
+        "   continuation setup — the gate will normally reject it as a chase. HOWEVER: the gate has a bypass for",
+        "   high-conviction late-trend setups (e.g., a pullback/retest into support in a strong uptrend where the",
+        "   risk/reward is clearly favorable). If you see such a setup, explicitly justify it (why the pullback is",
+        "   structurally sound, support level, volume profile) and give a higher confidence score — a setup that",
+        "   would warrant buying the dip rather than chasing will clear the bypass. For ordinary late-chase risk",
+        "   without strong justification, output PASS with confidence < 0.70 instead of fighting the gate.",
+        "   Only commit to LONG/SHORT when BOTH higher-TF alignment AND recent breakout/momentum structure are",
+        "   present — unless the pullback/retest is structurally compelling enough to warrant the bypass."
         "6. 1h structure (volumeBuildup1h / trendFlip1h / higherLows1h) is an ENTRY-TIMING signal, NOT a",
         "   reason to fight the 4h/1d trend. Use it to time the entry IN the trend's direction:",
         "   - Uptrend + 1h accumulation → LONG entry (buy the pullback).",
@@ -118,12 +133,14 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "",
         "CONFIDENCE CALIBRATION (identical for LONG and SHORT):",
         "- 0.85–1.0: multi-TF alignment + slow-burn fired + favorable funding — high-conviction bet",
-        "- 0.65–0.84: clean 4h/1d trend + aligned 1h entry timing",
-        "- 0.45–0.64: mixed/partial signals — PASS. (Ledger: trades taken here are net-NEGATIVE. A merely-",
-        "  'directional bias' without clean multi-TF alignment is NOT worth taking — wait for a better one.)",
+        "- 0.70–0.84: clean 4h/1d trend + composite score cleared scanning. This is a STRONG ENOUGH setup to trade.",
+        "  In SHADOW mode, if the trend is clean, commit here. A setup with aligned EMAs that reached you",
+        "  via scanning is NOT marginal — it's a trade candidate.",
+        "- 0.45–0.69: mixed/partial signals — PASS. (Ledger: trades taken here are net-NEGATIVE.)",
         "- < 0.45: conflicting setup — PASS.",
-        "  NOTE: the execution gate already requires confidence >= 0.70, so only genuinely strong reads",
-        "  trade. Calibrate honestly — don't inflate a mediocre setup to 0.7 just to force it through.",
+        "  NOTE: the execution gate requires confidence >= 0.70. If you see a clean trend but only output",
+        "  0.65, the gate blocks it anyway — so if the trend alignment justifies a trade, give it 0.70+.",
+        "  Don't self-sabotage by setting confidence to 0.0 on a PASS or 0.60 on a decent setup.",
         "",
         "ANTI-PATTERNS TO AVOID:",
         "- Don't force a trade on a marginal setup — PASS is correct when alignment isn't clean (this book",

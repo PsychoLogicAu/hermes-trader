@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -15,6 +16,12 @@ SESSION_LOG_FILE = os.environ.get(
     "SESSION_LOG_PATH",
     os.path.expanduser("~/.hermes-trader-session-log.jsonl"),
 )
+
+# In-process guard: the research phase can run on multiple worker threads
+# (research_max_workers > 1), and research events embed full LLM reasoning —
+# a line that big is not a single atomic O_APPEND write, so two threads
+# writing at once can interleave and corrupt each other's JSONL line.
+_LOG_LOCK = threading.Lock()
 
 
 def append(event: Dict[str, Any]) -> None:
@@ -25,8 +32,9 @@ def append(event: Dict[str, Any]) -> None:
     """
     record = {"ts": int(time.time() * 1000), **event}
     try:
-        with open(SESSION_LOG_FILE, "a") as f:
-            f.write(json.dumps(record) + "\n")
+        with _LOG_LOCK:
+            with open(SESSION_LOG_FILE, "a") as f:
+                f.write(json.dumps(record) + "\n")
     except OSError:
         pass
 

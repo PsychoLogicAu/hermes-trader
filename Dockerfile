@@ -1,32 +1,27 @@
-FROM python:3.11-slim AS base
+# Hermes Trader — Production Dockerfile (python:3.13-slim)
+FROM python:3.13-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
-
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Install deps first so `pip install` is cached across code changes.
-COPY pyproject.toml ./
-COPY hermes_trader/__init__.py hermes_trader/__init__.py
-RUN pip install -e .
+# 1) System deps (no python3-pip, which doesn't exist in 3.13-slim)
+RUN apt-get update && apt-get install -y --no-install-recommends git curl && rm -rf /var/lib/apt/lists/*
 
-# Copy the rest of the source.
-COPY hermes_trader/ hermes_trader/
-COPY scripts/ scripts/
-COPY conftest.py ./
+# 2) Copy requirements + install deps (cacheable layer)
+# First uninstall the CCXT fork hyperliquid (0.4.x) which shadows the SDK's modules
+COPY requirements.txt .
+RUN python -m pip install --upgrade pip && \
+    python -m pip uninstall -y hyperliquid || true && \
+    python -m pip install --no-cache-dir -r requirements.txt && \
+    # Force remove CCXT fork if it snuck in as a transitive dep
+    python -m pip uninstall -y hyperliquid || true
 
-# State lives on a Fly volume mounted at /data; defaults are overridden via env
-# in fly.toml so the loop + server + MCP all share one source of truth.
-RUN mkdir -p /data
-ENV SESSION_LOG_PATH=/data/session-log.jsonl \
-    HERMES_DSL_STATE_FILE=/data/.dsl-state.json \
-    HERMES_AGENT_CONFIG_FILE=/data/.agent-config.json \
-    HERMES_AGENT_MEMORY_FILE=/data/.agent-memory.json
+# 3) Copy source + editable install (Docker layer caching handles speed)
+COPY . .
+RUN python -m pip install -e . && python -m pip uninstall -y hyperliquid || true
 
-EXPOSE 8000
+# 4) Non-root user
+RUN useradd --create-home --shell /bin/bash trader && chown -R trader:trader /app
+USER trader
 
-# Default command runs the FastAPI server (dashboard + API). The trading loop
-# runs as a separate Fly process — see [processes] in fly.toml.
-CMD ["python3", "-m", "hermes_trader.server"]
+CMD ["python", "-m", "hermes_trader", "start"]

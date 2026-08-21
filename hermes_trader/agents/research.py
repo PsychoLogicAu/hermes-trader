@@ -182,6 +182,66 @@ def _signals_block(coin: str) -> str:
             + "\n".join(lines))
 
 
+def _chronos_block(coin: str) -> str:
+    """Chronos-2 4h forward forecast for the AI prompt, when
+    `chronos_signal.in_prompt` is true. Calls the sync wrapper so the line is
+    DETERMINISTIC per coin: it renders whenever the signal is enabled and the
+    model is loaded (the model is preloaded at app init; steady-state cost is
+    ~200ms/coin, dominated by the HL candle fetch). A disabled flag or a
+    failed/absent forecast returns '' so the prompt shape is unchanged.
+
+    Labeled as a DECAY/continuation warning on purpose: the bot's exit policy is
+    scalp, so the 4h horizon is LONGER than the hold. A negative call means the
+    move is likely to fade within 4h — drop conviction for a scalp, don't
+    auto-PASS a confirmed fresh breakout. A positive call means the model sees
+    continuation over the next ~4h — supports holding through noise.
+    """
+    try:
+        cfg = read_agent_config().get("chronos_signal", {})
+        if not cfg.get("in_prompt", False) or not cfg.get("enabled", False):
+            return ""
+        # Lazy import keeps the torch/chronos dep off the module-load path;
+        # module-attr call (not `from ... import`) so tests can patch the sync
+        # wrapper. The model is preloaded at init, so this rarely pays more
+        # than the ~200ms candle fetch.
+        from hermes_trader.agents import chronos_signal as _cs
+        sig = _cs.get_chronos_signal_sync(coin, "long")
+        if sig is None or sig.error or sig.median_pct is None:
+            return ""
+        med = sig.median_pct
+        low = sig.q_low
+        high = sig.q_high
+        # Quantiles are absolute prices; convert to % vs context_last for the
+        # prompt (the log line uses context_last too, so both are comparable).
+        if low is not None and high is not None and sig.context_last:
+            lo_pct = (low - sig.context_last) / sig.context_last * 100
+            hi_pct = (high - sig.context_last) / sig.context_last * 100
+            span = f", p10 {lo_pct:+.1f}% / p90 {hi_pct:+.1f}%"
+        else:
+            span = ""
+        # Chronos runs on 5m candles; horizon bars * 5m = the forward window.
+        hours = sig.horizon * 5 / 60
+        hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
+        if med > 0:
+            note = (f"the model sees continuation for the next ~{hours_s}h — supports "
+                    "holding through pullbacks, favours swing over scalp conviction.")
+        elif med < 0:
+            note = (f"the model expects the move to FADE within ~{hours_s}h — this is a "
+                    "decay/continuation warning: lower conviction on late entries, "
+                    f"prefer a tight scalp TP over holding for the {hours_s}h horizon; it is "
+                    "NOT an instruction to auto-PASS a confirmed fresh breakout.")
+        else:
+            note = f"the model is directionally neutral over the next ~{hours_s}h."
+        return (
+            "Chronos forecast (shadow signal — weigh, don't obey):\n"
+            f"  - Median price {hours_s}h ahead: {med:+.2f}%{span}. "
+            + note
+        )
+    except Exception as e:
+        logger.debug(f"[research] chronos block failed for {coin}: {e}")
+        return ""
+
+
 def _build_user_message(
     coin: str,
     perception: Dict[str, Any],
@@ -326,6 +386,7 @@ def _build_user_message(
         whale_block,
         "",
         _signals_block(coin),
+        _chronos_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
         f"Recent news: {news}",
@@ -340,28 +401,30 @@ def _build_user_message(
 
 
 def _call_ai(system_prompt: str, user_message: str) -> str:
-    """Call the OpenRouter LLM API (runs the async client in a fresh event loop)."""
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-    model = os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3")
+    """Call the LLM API (runs the async client in a fresh event loop)."""
+    api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
+    base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    model = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
 
-    if not openrouter_key:
-        logger.warning("[research] OPENROUTER_API_KEY not set — returning empty response")
+    if not api_key:
+        logger.warning("[research] LLM_API_KEY not set — returning empty response")
         return ""
 
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(_async_do_call(openrouter_key, model, system_prompt, user_message))
+        return loop.run_until_complete(_async_do_call(api_key, base_url, model, system_prompt, user_message))
     finally:
         loop.close()
 
 
 async def _async_do_call(
-    openrouter_key: str,
+    api_key: str,
+    base_url: str,
     model: str,
     system_prompt: str,
     user_message: str,
 ) -> str:
-    """Async POST to the OpenRouter chat-completions endpoint.
+    """Async POST to the chat-completions endpoint.
 
     On a 402 that includes an affordability hint ("can only afford N tokens"),
     retries ONCE with max_tokens shrunk to the affordable budget. During the
@@ -373,9 +436,11 @@ async def _async_do_call(
     """
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
 
+        # 8192 gives reasoning models room to think AND output JSON without truncating.
         async def _post(max_toks: int):
+            url = base_url.rstrip("/") + "/chat/completions"
             return await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                url,
                 json={
                     "model": model,
                     "messages": [
@@ -383,19 +448,13 @@ async def _async_do_call(
                         {"role": "user", "content": user_message},
                     ],
                     "stream": False,
-                    # Output is a verdict JSON + 2-3 sentences (~150-300 visible
-                    # tokens). 512 was fine for non-reasoning models, but REASONING
-                    # models (qwen3.x-plus/max, etc.) emit ~1.5-2k hidden reasoning
-                    # tokens that can count against max_tokens and truncate the JSON
-                    # (qwen3.7-max did exactly this live). 2048 leaves room for
-                    # reasoning + JSON; non-reasoning models ignore the extra.
                     "max_tokens": max_toks,
                     "temperature": 0.1,
                 },
-                headers={"Authorization": f"Bearer {openrouter_key}"},
+                headers={"Authorization": f"Bearer {api_key}"},
             )
 
-        resp = await _post(2048)
+        resp = await _post(8192)
         if resp.status_code == 402:
             # "...You requested up to 2048 tokens, but can only afford 842..."
             m = re.search(r"can only afford (\d+)", resp.text or "")
@@ -411,7 +470,9 @@ async def _async_do_call(
             data = resp.json()
             choices = data.get("choices", [])
             if choices:
-                return choices[0].get("message", {}).get("content", "")
+                msg = choices[0].get("message", {})
+                text = msg.get("content") or msg.get("reasoning") or ""
+                return text
             logger.error("[research] LLM returned 200 but no choices — empty response")
             return ""
         # LOUD failure. A non-200 (esp. 402 Payment Required = out of OpenRouter
@@ -434,6 +495,9 @@ def parse_verdict(
     """Parse the AI response: JSON on the last line, with a regex fallback."""
     if not ai_text:
         ai_text = ""
+
+    logger = logging.getLogger("hermes_trader.agents.research")
+    logger.info(f"[parse_verdict] {coin} raw AI text (last 800 chars):\n{ai_text[-800:]}" if len(ai_text) > 800 else f"[parse_verdict] {coin} raw AI text:\n{ai_text}")
 
     verdict = "PASS"
     confidence = 0.0
@@ -670,5 +734,26 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         "whale_signal": perception.get("whale_signal"),
     }
 
+    # Chronos shadow logging moved to executor.py (trade result path).
+    # Keeping this would duplicate logs; executor owns the signal now.
+    if parsed["verdict"] in ("LONG", "SHORT"):
+        pass  # Chronos handled in executor.py
+
     memory.record_analysis(analysis)
     return analysis
+
+
+def _fire_chronos_shadow(coin: str, side: str) -> None:
+    """Fire a Chronos-2 forecast in the background for shadow-mode logging.
+
+    Runs async on a daemon thread; NEVER blocks research or the execute hot path.
+    The signal is LOGGED only — NOT fed into the LLM prompt, NOT used for gating.
+    This is pure forward-validation so we can measure forecast quality before
+    any decision integration.
+    """
+    try:
+        from hermes_trader.agents.chronos_signal import get_chronos_signal_async
+        side_str = side or "long" if side else "long"
+        get_chronos_signal_async(coin, side_str)
+    except Exception as e:
+        logger.debug(f"[research] chronos shadow failed for {coin}: {e}")

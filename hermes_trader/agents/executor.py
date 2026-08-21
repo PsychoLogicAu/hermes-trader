@@ -6,14 +6,17 @@ Integrates the DSL exit engine for two-phase trailing stops
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, List
 
 from hermes_trader.agents.config_store import read_agent_config
+from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
 from hermes_trader.agents.dsl_exit import (
     ExitPolicy,
     RetraceTier,
@@ -23,6 +26,7 @@ from hermes_trader.agents.dsl_exit import (
     register_position,
 )
 from hermes_trader.agents.memory import memory
+from hermes_trader.ledger import record_open, record_close
 from hermes_trader.agents.risk_gates import GateContext, eval_all_gates
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
@@ -39,6 +43,27 @@ from hermes_trader.client.exchange import (
 from hermes_trader.client.hl_client import fetch_account_state, resolve_user_address
 
 logger = logging.getLogger(__name__)
+
+# Serializes all trade execution (gate eval → sizing → order placement → DSL
+# registration → memory/ledger writes) so the parallel research phase can't
+# double-spend capital. With research_max_workers > 1 each worker runs
+# maybe_execute() concurrently; two of them evaluating max_concurrent / capital
+# rotation against the SAME pre-trade account state would both pass and both
+# fire, overshooting the position cap. Holding this across the WHOLE function —
+# including the rotation retry, which re-enters maybe_execute() and
+# close_position_market() on the SAME thread — is why it's an RLock, not a Lock
+# (a plain Lock would deadlock on that self-retry). Research (the slow LLM part)
+# happens OUTSIDE this lock; only the fast execution tail is serialized.
+_exec_lock = threading.RLock()
+
+
+def _serialized(fn):
+    """Run `fn` under _exec_lock so concurrent executions never interleave."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _exec_lock:
+            return fn(*args, **kwargs)
+    return wrapper
 
 # Backup server-side stop multiplier. RETUNED 2026-06-02 (microscope audit): was
 # 3.5 -> ~5.5% spot on median names, far too wide to catch anything. The data showed
@@ -178,6 +203,32 @@ def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
     return (False, "")
 
 
+def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact Chronos fields to a trade result dict.
+
+    Wrapped in try/except so it never breaks the trade path.
+    Output shape:
+      chronos_median_pct: float | null
+      chronos_aligned: bool | null (True if median move agrees with side)
+      chronos_error: str | null
+    """
+    try:
+        sig = get_chronos_signal_sync(coin, side)
+        result["chronos_median_pct"] = round(sig.median_pct * 10) / 10 if sig.median_pct is not None else None
+        if sig.median_pct is not None:
+            result["chronos_aligned"] = (
+                (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+            )
+        else:
+            result["chronos_aligned"] = None
+        result["chronos_error"] = sig.error
+    except Exception as e:
+        result["chronos_median_pct"] = None
+        result["chronos_aligned"] = None
+        result["chronos_error"] = str(e)
+
+
+@_serialized
 def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Dict[str, Any]:
     """Execute an analysis through risk gates and into the market.
 
@@ -401,10 +452,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     if not _sidestep_bypasses_runner:
         runner_block = _runner_entry_block_reason(analysis, config)
         if runner_block:
-            return {
+            coin = analysis.get("coin") or "unknown"
+            side = analysis.get("side", "long") or "long"
+            result = {
                 "executed": False, "mode": mode,
                 "analysis_id": analysis["id"], "reason": runner_block,
             }
+            _attach_chronos_to_result(result, coin, side)
+            return result
 
     # Loss cooldown: refuse re-entry on a coin whose last close was a LOSS and
     # whose extended block hasn't expired (armed in close_position_market).
@@ -512,6 +567,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
 
     def _read_state() -> tuple[dict, float, float]:
         st = fetch_account_state(user, include_hip3=True) or {}
+        logger.info(f"[executor] raw account state: equity={st.get('equity')!r} available={st.get('available')!r} spot_usdc={st.get('spot_usdc')!r}")
         deq = st.get("dex_equity") or {}
         dav = st.get("dex_available") or {}
         if _target_dex:
@@ -520,6 +576,16 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         else:
             eq = float(deq.get("", st.get("equity")) or 0)
             av = float(dav.get("", st.get("available")) or 0)
+
+        # For unified accounts: spot USDC is shared margin for perps.
+        # If perp equity is 0 but we have spot USDC, treat it as available.
+        spot_usdc = float(st.get("spot_usdc", 0) or 0)
+        if eq == 0.0 and spot_usdc > 0:
+            logger.info(f"[executor] Unified account detected — using spot_usdc={spot_usdc:.2f} as equity")
+            eq = spot_usdc
+            av = max(av, spot_usdc)
+
+        logger.info(f"[executor] resolved equity={eq:.2f} available={av:.2f} target_dex={_target_dex or 'main'}")
         return st, eq, av
 
     state, equity, available = _read_state()
@@ -730,12 +796,12 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"→ {size_in_coin:g} coin (${normalized_notional:.2f})")
     trade_notional = normalized_notional
 
-    recent_trades = memory.get_recent_trades(10)
-    last_trade = next(
-        (t for t in recent_trades if t.get("coin") == analysis["coin"]),
-        None,
-    )
-    last_trade_time = last_trade.get("executed_at") if last_trade else None
+    # Cooldown must measure against the NEWEST trade on this coin: the ledger is
+    # chronological, so `next()` over recent_trades would pick the OLDEST —
+    # letting a second entry through 30min after the first while the coin was
+    # re-traded minutes ago (observed: ACE leg 2 at 32min after leg 1, leg 3 at
+    # 59min, all into one position).
+    last_trade_time = memory.latest_trade_ts_by_coin(50).get(analysis["coin"])
 
     # News blackout: stand down only on GENUINELY adverse news. The AI judges
     # the recent (last 48h) headlines and emits news_risk; only "negative"
@@ -847,21 +913,28 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # Don't write blocked attempts to memory._trades — the cooldown gate
         # keys off the most recent trade-by-coin and would self-perpetuate.
         # Visibility comes from the `execute` event in the session log.
-        return {
+        coin = analysis.get("coin") or "unknown"
+        side = analysis.get("side", "long") or "long"
+        result = {
             "executed": False, "mode": mode,
             "analysis_id": analysis["id"],
             "blocked_by": gate_output["block_reasons"],
             "gate_results": gate_output["results"],
         }
+        _attach_chronos_to_result(result, coin, side)
+        return result
 
     if shadow_mode:
-        return {
+        _side = analysis.get("side", "long") or "long"
+        _res = {
             "executed": False, "mode": mode,
             "analysis_id": analysis["id"],
             "reason": "shadow_mode_would_execute",
             "gate_results": gate_output["results"],
             "size_usd": trade_notional,
         }
+        _attach_chronos_to_result(_res, coin, _side)
+        return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
         return {
@@ -956,9 +1029,6 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # ATR as % of entry — captured once here so the DSL stop width is stable
     # for the life of the trade (the atr_stop feature scales off this).
     entry_atr_pct = (atr / entry_px * 100) if entry_px > 0 else 0.0
-    register_position(coin, trade_side, entry_px, policy=policy, leverage=leverage,
-                      entry_atr_pct=entry_atr_pct)
-    logger.info(f"[executor] Registered DSL exit for {coin} {trade_side} @ {entry_px} ({leverage}x)")
 
     _entry_ts = int(time.time() * 1000)
     memory.record_trade({
@@ -971,6 +1041,26 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "order_id": order_res.get("order_id"),
         "executed_at": _entry_ts,
     })
+    # Append-only ledger (separate from operational memory)
+    try:
+        _sl_mult = float(config.get("sl_atr_mult", 1.5))
+        record_open(
+            coin=coin,
+            side=trade_side,
+            entry_px=entry_px,
+            notional_usd=round(position_notional, 4),
+            order_id=order_res.get("order_id"),
+            leverage=leverage,
+            analysis_id=analysis.get("id"),
+            config_snapshot={
+                "regime": _regime,
+                "exit_policy_label": _ex_label,
+                "sl_atr_mult": _sl_mult,
+                "tp_atr_mult": TP_ATR_MULT,
+            },
+        )
+    except Exception as _le:
+        logger.debug(f"[executor] ledger record_open failed (non-fatal): {_le}")
 
     # Entry-context snapshot for the forward signal backtest: record WHEN we opened
     # and WHAT the free signals said at entry (cache-only — no network on the hot
@@ -1061,7 +1151,12 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     final_sl = (entry_px - atr * sl_atr_mult) if is_buy else (entry_px + atr * sl_atr_mult) if atr > 0 else stop_px
     final_tp = (entry_px + atr * TP_ATR_MULT) if is_buy else (entry_px - atr * TP_ATR_MULT) if atr > 0 else tp_px
 
-    return {
+    # Register DSL tracking AFTER we know the server-side TP level.
+    register_position(coin, trade_side, entry_px, policy=policy, leverage=leverage,
+                      entry_atr_pct=entry_atr_pct, initial_tp_px=final_tp)
+    logger.info(f"[executor] Registered DSL exit for {coin} {trade_side} @ {entry_px} ({leverage}x)")
+
+    result = {
         "executed": True, "mode": mode,
         "analysis_id": analysis["id"],
         "order_id": order_res.get("order_id"),
@@ -1073,6 +1168,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "dsl_registered": True,
         "sl_missing": sl_missing,
     }
+    _attach_chronos_to_result(result, coin, trade_side)
+    return result
 
 
 def monitor_exits(mids: Dict[str, float]) -> List[Dict[str, Any]]:
@@ -1167,7 +1264,29 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
         if has_whale or slow_burn_hint or breakout_hint or composite_hint or sidestep_hint:
             return {"action": "execute", "verdict": "PASS",
                     "result": execute_fn(analysis)}
-        return {"action": "none", "verdict": "PASS", "result": None}
+        # PASS has no implied direction; show median forecast with alignment for both sides.
+        try:
+            from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
+            c = coin or "unknown"
+            sig = get_chronos_signal_sync(c, "long")
+            m = sig.median_pct if sig.median_pct is not None else None
+            _res = {
+                "action": "none", "verdict": "PASS", "result": None,
+                "chronos_median_pct": round(m * 10) / 10 if m is not None else None,
+                "chronos_aligned_if_long": bool(m is not None and m > 0),
+                "chronos_aligned_if_short": bool(m is not None and m < 0),
+            }
+            if sig.error:
+                _res["chronos_error"] = sig.error
+        except Exception as e:
+            _res = {
+                "action": "none", "verdict": "PASS", "result": None,
+                "chronos_median_pct": None,
+                "chronos_aligned_if_long": None,
+                "chronos_aligned_if_short": None,
+                "chronos_error": str(e),
+            }
+        return _res
     # Should be unreachable (parse_verdict normalizes to one of the above),
     # but never silently drop — surface it so a new verdict can't go unhandled.
     logger.warning(f"[router] unhandled verdict {verdict!r} for {coin} — treating as no-op")
@@ -1266,13 +1385,27 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     if forced and whale and not fresh_impulse:
         return "runner_gate_blocked (whale-only forced override; no fresh breakout/burst)"
     if uptrend and not (fresh_impulse or structured_daily_mover):
-        return "runner_gate_blocked (late trend-only chase; no fresh breakout/burst)"
-    if not (structured_runner or structured_daily_mover):
-        return (f"runner_gate_blocked (needs volume+breakout/burst and structure; "
-                f"score={score:.0f}, slow={slow_count})")
+        bypass_min = float(gate.get("bypass_late_trend_chase_min_conf", 0))
+        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bypass_min
+        if bypassed:
+            logger.info(f"[executor] late-trend chase bypassed on {coin} "
+                        f"(conf {conf:.2f} >= {bypass_min:.2f})")
+        else:
+            return ("runner_gate_blocked (late trend-only chase; no fresh "
+                    "breakout/burst)")
+    else:
+        bypassed = False
+
+    # Only require fresh impulse structure if we didn't just bypass above.
+    if not (fresh_impulse or structured_daily_mover):
+        if not bypassed:
+            if not (structured_runner or structured_daily_mover):
+                return (f"runner_gate_blocked (needs volume+breakout/burst "
+                        f"and structure; score={score:.0f}, slow={slow_count})")
     return ""
 
 
+@_serialized
 def close_position_market(coin: str) -> Dict[str, Any]:
     """Market-close any open perp position for `coin`. Deregisters the DSL tracker on success.
 
@@ -1404,6 +1537,24 @@ def close_position_market(coin: str) -> Dict[str, Any]:
                     # when rate>0). Estimate (entry-rate held constant over the hold).
                     "funding_cost_usd": _funding_cost_usd,
                 })
+                # Append-only ledger (separate from operational memory)
+                try:
+                    record_close(
+                        coin=coin,
+                        side=side,
+                        entry_px=entry_px,
+                        exit_px=fill_px,
+                        notional_usd=round(_notional_entry, 4),
+                        realized_pnl_pct=out["realized_pnl_pct"],
+                        realized_pnl_usd=round(_net_pnl_usd, 4),
+                        spot_pct=out["spot_pct"],
+                        hold_minutes=_hold_min,
+                        leverage=leverage,
+                        fee_usd=round(_fee_usd, 4),
+                        funding_cost_usd=_funding_cost_usd,
+                    )
+                except Exception as _lc_e:
+                    logger.debug(f"[executor] ledger record_close failed (non-fatal): {_lc_e}")
             except Exception as _rc_e:
                 logger.warning(f"[outcome-store] record_close failed for {coin} (non-fatal): {_rc_e}")
             # Loss cooldown: a losing close arms an extended re-entry block on

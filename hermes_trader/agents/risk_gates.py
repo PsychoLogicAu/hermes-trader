@@ -111,6 +111,7 @@ def market_liquidity_floor(
     ctx: GateContext,
     min_volume: float,
     min_volume_hip3: Optional[float] = None,
+    gate_config: Optional[dict] = None,
 ) -> GateResult:
     """Block trades on markets with insufficient 24h notional volume.
 
@@ -121,11 +122,29 @@ def market_liquidity_floor(
     markets like xyz:CRCL ($4.7M) and km:USTECH ($1.06M). When the coin
     is HIP-3 (colon-namespaced) and a separate `min_volume_hip3` is set,
     use that floor instead.
+
+    High-confidence overrides: when `gate_config.bypass_low_volume=True`
+    and confidence >= `gate_config.bypass_low_volume_min_conf`, allow the
+    trade despite thin volume.
     """
     is_hip3 = ":" in (ctx.coin or "")
     floor = (min_volume_hip3 if (is_hip3 and min_volume_hip3 is not None) else min_volume)
     if ctx.market_volume_24h_usd >= floor:
         return {"pass": True}
+
+    # High-confidence bypass
+    if gate_config:
+        if gate_config.get("bypass_low_volume"):
+            min_conf = gate_config.get("bypass_low_volume_min_conf", 0.85)
+            if ctx.confidence >= min_conf:
+                return {
+                    "pass": True,
+                    "via": "bypass_low_volume",
+                    "reason": (
+                        f"low-liquidity bypass on {ctx.coin} (conf {ctx.confidence:.2f} >= {min_conf:.2f})"
+                    ),
+                }
+
     return {"pass": False, "reason": f"market 24h volume ${ctx.market_volume_24h_usd/1e6:.2f}M below floor ${floor/1e6:.2f}M"}
 
 
@@ -373,10 +392,13 @@ def _cfg(config: Dict[str, Any], key: str, default: Any) -> Any:
 
 def eval_all_gates(
     ctx: GateContext,
-    config: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None,
     last_trade_time: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Evaluate all risk gates and collect results."""
+    from hermes_trader.agents.config import get_config
+    runtime_config = get_config()
+    effective_config = config or runtime_config
     results = {}
     # Regime-aware confidence floor: a WITH-TREND (aligned) trade — long in an up
     # regime, SHORT in a DOWN regime — gets a lower bar (`aligned_min_conf`) than
@@ -384,8 +406,8 @@ def eval_all_gates(
     # LONG-side 0.70-0.80 leak; applying it to aligned shorts made us sit out
     # selloffs (e.g. SOL SHORT 0.72 / -6.3% / $399M blocked). Demand full
     # conviction only to fight the trend (neutral/counter-trend keep the default).
-    min_conf = float(_cfg(config, "min_ai_confidence", 0.8))
-    aligned_min_conf = config.get("aligned_min_conf")
+    min_conf = float(_cfg(effective_config, "min_ai_confidence", 0.8))
+    aligned_min_conf = effective_config.get("aligned_min_conf")
     if aligned_min_conf is not None:
         try:
             from hermes_trader.agents.market_regime import detect_regime
@@ -397,34 +419,37 @@ def eval_all_gates(
         except Exception:
             pass
     results["confidence"] = confidence_gate(ctx, min_conf)
-    results["max_concurrent"] = max_concurrent_positions_gate(ctx, config.get("max_concurrent", 3))
-    results["notional_cap"] = per_trade_notional_cap_gate(ctx, config.get("max_trade_notional_usd", 300))
-    results["daily_loss"] = daily_loss_kill_switch(ctx, config.get("max_daily_loss_usd", -100))
+    results["max_concurrent"] = max_concurrent_positions_gate(ctx, _cfg(effective_config, "max_concurrent", 3))
+    results["notional_cap"] = per_trade_notional_cap_gate(ctx, _cfg(effective_config, "max_trade_notional_usd", 300))
+    results["daily_loss"] = daily_loss_kill_switch(ctx, _cfg(effective_config, "max_daily_loss_usd", -100))
     results["daily_giveback"] = daily_giveback_gate(
         ctx,
-        float(config.get("daily_giveback_halt_pct", 0.0) or 0.0),
-        float(config.get("daily_giveback_min_peak_usd", 20.0) or 0.0),
+        float(_cfg(effective_config, "daily_giveback_halt_pct", 0.0) or 0.0),
+        float(_cfg(effective_config, "daily_giveback_min_peak_usd", 20.0) or 0.0),
     )
+    runner_gate_cfg = effective_config.get("runner_entry_gate") or {}
     results["liquidity"] = market_liquidity_floor(
         ctx,
-        config.get("min_market_volume_usd", 5_000_000),
-        config.get("min_hip3_volume_usd", 500_000),
+        float(_cfg(effective_config, "min_market_volume_usd", 5_000_000) or 5_000_000),
+        float(_cfg(effective_config, "min_hip3_volume_usd", 500_000) or 500_000),
+        gate_config=runner_gate_cfg,
     )
     results["short_liquidity"] = short_liquidity_floor(
-        ctx, config.get("min_short_volume_usd", 0) or 0)
+        ctx, float(_cfg(effective_config, "min_short_volume_usd", 0) or 0)
+    )
     results["coin_filter"] = coin_allowlist_gate(
         ctx,
-        config.get("coin_allowlist", []),
-        config.get("coin_blocklist", []),
+        _cfg(effective_config, "coin_allowlist", []),
+        _cfg(effective_config, "coin_blocklist", []),
     )
-    results["cooldown"] = cooldown_gate(ctx, last_trade_time, config.get("cooldown_min", 60))
-    results["opposite_guard"] = opposite_direction_guard(ctx)
-    results["correlation"] = correlation_cap(ctx, int(config.get("max_crypto_long_correlated", 2)))
-    results["equity_risk"] = equity_risk_cap(ctx, config.get("max_total_notional_pct", 1.0))  # Default 100% to allow trading with small accounts
+    results["no_pyramid"] = opposite_direction_guard(ctx)
+    results["cooldown"] = cooldown_gate(ctx, last_trade_time, _cfg(effective_config, "cooldown_min", 60))
+    results["correlation"] = correlation_cap(ctx, int(_cfg(effective_config, "max_crypto_long_correlated", 2)))
+    results["equity_risk"] = equity_risk_cap(ctx, _cfg(effective_config, "max_total_notional_pct", 1.0))
     results["market_regime"] = market_regime_gate(
-        ctx, _cfg(config, "counter_regime_min_conf", 0.7),
-        bool(_cfg(config, "block_counter_trend_bypass", False)),
-        float(_cfg(config, "crowded_with_min_conf", 0.0) or 0.0),
+        ctx, _cfg(effective_config, "counter_regime_min_conf", 0.7),
+        bool(_cfg(effective_config, "block_counter_trend_bypass", False)),
+        float(_cfg(effective_config, "crowded_with_min_conf", 0.0) or 0.0),
     )
     results["news"] = news_blackout_gate(ctx)
 

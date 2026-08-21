@@ -15,12 +15,17 @@ Flags (tolerant — unknown flags are ignored so legacy callers keep working):
                     `nohup ... &` / Hermes background. Kept for skill scripts.
 """
 import argparse
+import json
 import math
 import os
 import sys
 import threading
 import time
 import logging
+import logging.handlers
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from hermes_trader.agents.research_concurrency import compute_research_workers
 
 # Load .env.local (CWD-relative, matches skill restart command).
 env_path = '.env.local'
@@ -40,10 +45,30 @@ _parser.add_argument("--env", default="prod")
 _parser.add_argument("--daemon", action="store_true")
 _args, _unknown = _parser.parse_known_args()
 
+# Log to both stdout and a file on the shared mount (./trader-logs)
+LOG_DIR = "/app/log"
+LOG_FILE = os.path.join(LOG_DIR, "trader.log")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Daily rotation with datestamped filenames: trader.log, trader.log.2026-08-06, ...
+# backupCount=0 → never deletes old files (unlimited audit trail)
+log_handler = logging.handlers.TimedRotatingFileHandler(
+    LOG_FILE, when='D', interval=1, backupCount=0
+)
+log_handler.suffix = "%Y-%m-%d"
+log_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")
+)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(name)s:%(message)s'
+    format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        log_handler,
+    ]
 )
+logger = logging.getLogger(__name__)
 
 from hermes_trader.agents.perception import scan_once
 from hermes_trader.agents.ta_filter import analyze_perception
@@ -71,11 +96,14 @@ def _remaining_minutes(ms_remaining: float) -> int:
 # outage froze the loop twice — once mid-scan, once during STARTUP (universe
 # load / prewarm) where the watchdog wasn't armed yet, so it stayed hung ~58min.
 # Arm it before any network call so BOTH a startup hang and a mid-scan hang
-# self-heal via re-exec. `_last_progress_ts` is bumped after each completed scan
-# cycle; if it goes stale > HERMES_WATCHDOG_TIMEOUT_S (default 600s, generous so
-# a slow-but-progressing scan isn't killed) the process re-execs (startup
-# rehydrates trackers from disk; the stacking backstop prevents a re-entry
-# pyramid). A persistent DNS outage just re-execs every ~600s until it clears.
+# self-heal via re-exec. `_last_progress_ts` is bumped after each COMPLETED coin
+# in the research loop (perception.scan_once returns ~90s; the per-coin LLM
+# research calls are the long pole, 20-40s each × up to ~23 triggers, so a full
+# cycle can run 10min+ — longer than HERMES_WATCHDOG_TIMEOUT_S, default 600s).
+# Bumping only at cycle end (the 2026-08-13 behavior) tripped the watchdog on
+# every healthy long cycle and re-execed the loop mid-research every ~10min.
+# A true hang (frozen network / dead LLM call) stops producing per-coin
+# progress, so the 600s tripwire still catches it within two coin calls.
 _last_progress_ts = time.time()
 _watchdog_timeout_s = int(os.environ.get('HERMES_WATCHDOG_TIMEOUT_S', '600'))
 
@@ -149,6 +177,16 @@ def _prewarm_meta_cache_bounded(timeout_s: float) -> None:
 
 
 _prewarm_meta_cache_bounded(float(os.environ.get('HERMES_META_PREWARM_TIMEOUT_S', '3')))
+# Preload the Chronos-2 pipeline OFF the first-scan critical path so the
+# prompt-path sync call (in_prompt) never pays the one-time model load (~2-4s)
+# mid-research. Bounded + lazy-fallback like the meta prewarm above. Skipped
+# unless chronos_signal is enabled; env-overridable timeout.
+try:
+    if startup_agent_config.get("chronos_signal", {}).get("enabled", False):
+        from hermes_trader.agents.chronos_signal import preload_model
+        preload_model(float(os.environ.get('HERMES_CHRONOS_PRELOAD_TIMEOUT_S', '60')))
+except Exception as e:
+    logger.warning(f"[startup] chronos preload skipped (lazy fallback): {e}")
 # The universe carries prevDayPx / dayNtlVlm / funding which DRIFT over the
 # day; fetched once here they'd freeze at loop-start for the whole process,
 # so mover-selection + volume-ranking would rank stale 24h windows (a coin
@@ -158,6 +196,180 @@ _prewarm_meta_cache_bounded(float(os.environ.get('HERMES_META_PREWARM_TIMEOUT_S'
 universe_refresh_s = int(os.environ.get('HERMES_UNIVERSE_REFRESH_S', '1800'))
 _last_universe_refresh = time.time()
 memory.load()  # hydrate from .agent-memory.json so cache + flush work.
+
+
+# ── Ledger reconciliation: backfill CLOSEs the bot never recorded ─────────────
+# A CLOSE row is written ONLY from the executor's close path
+# (close_position_market → record_close). An exit that happens WITHOUT that
+# path running — most importantly an exchange-side SL/TP trigger fill that the
+# DSL engine later drops as a "stale tracker" — leaves the ledger OPEN for a
+# position that no longer exists. That poisons win-rate / payoff / risk-of-ruin
+# (a never-closed trade is neither win nor loss) and skews the ledger-vs-book
+# diff. Observed live: XMR 08-18 long stopped on-exchange 12:06:01, tracker
+# dropped as stale 12:08, no CLOSE ever written.
+#
+# At startup, reconcile the ledger against the exchange's authoritative fill
+# history: for each OPEN with no matching CLOSE, if a closing fill exists AND
+# the coin no longer has a live position, append the missing CLOSE using the
+# executor's exact record_close conventions (so stats treat it identically to
+# a live close) plus a `backfilled: true` marker for audit. Idempotent: an
+# already-recorded CLOSE (live or previously backfilled) means the open is
+# matched, so a re-exec never double-appends. Never blocks startup on failure.
+def _reconcile_ledger_closes() -> None:
+    from datetime import datetime, timezone
+    from typing import Dict
+    import requests as _requests
+    from hermes_trader.ledger import LEDGER_FILE
+
+    try:
+        with open(LEDGER_FILE) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        logger.warning(f"[ledger-reconcile] could not read ledger: {e}")
+        return
+
+    # Per (coin, side), pair CLOSEs to OPENs chronologically (stack): each
+    # CLOSE matches the most recent still-unmatched OPEN — a coin re-traded
+    # later (OPEN, CLOSE, OPEN) must not have its NEW open covered by the OLD
+    # close. Whatever OPENs are left on the stack are the unmatched ones.
+    # Positions never overlap on one coin+side (no_pyramid gate), so the stack
+    # stays depth ≤1 in practice; the stack is still correct if that ever
+    # changes.
+    events_by_key: Dict[tuple, list] = {}
+    for r in rows:
+        if r.get("event") in ("OPEN", "CLOSE") and r.get("coin") and r.get("side") and r.get("ts"):
+            events_by_key.setdefault((r["coin"], r["side"]), []).append(r)
+
+    unmatched_opens = []
+    for key, evs in events_by_key.items():
+        stack = []
+        for r in sorted(evs, key=lambda r: r["ts"]):
+            if r["event"] == "OPEN":
+                stack.append(r)
+            elif stack:
+                stack.pop()  # this CLOSE settles the newest open
+        unmatched_opens.extend(stack)
+    if not unmatched_opens:
+        return
+
+    user = resolve_user_address()
+    if not user:
+        return
+    try:
+        fills = _requests.post("https://api.hyperliquid.xyz/info",
+                               json={"type": "userFills", "user": user}, timeout=15).json()
+        state = _requests.post("https://api.hyperliquid.xyz/info",
+                               json={"type": "clearinghouseState", "user": user}, timeout=15).json()
+    except Exception as e:
+        logger.warning(f"[ledger-reconcile] exchange fetch failed (will retry next start): {e}")
+        return
+    if not isinstance(fills, list):
+        logger.warning(f"[ledger-reconcile] userFills returned {type(fills).__name__} — skipping")
+        return
+
+    live_coins = {p.get("position", {}).get("coin") for p in state.get("assetPositions", [])
+                  if float((p.get("position") or {}).get("szi", 0) or 0) != 0}
+    close_dir = {"long": "Close Long", "short": "Close Short"}
+
+    # Window per (coin, side): a backfill is only trustworthy when exactly ONE
+    # closing fill sits between this open and the next open on the same coin+side.
+    # More than one (pyramid-era net/aggregate closes, split fills) → skip: the
+    # ledger alone can't attribute which open the fill settled.
+    next_open_ts: Dict[tuple, Dict[int, int]] = {}
+    max_open_ts: Dict[tuple, int] = {}
+    for key, evs in events_by_key.items():
+        open_ts_list = sorted(r["ts"] for r in evs if r["event"] == "OPEN")
+        if open_ts_list:
+            max_open_ts[key] = open_ts_list[-1]
+        nxt = next_open_ts.setdefault(key, {})
+        for i, t in enumerate(open_ts_list):
+            nxt[t] = open_ts_list[i + 1] if i + 1 < len(open_ts_list) else 0
+
+    appended = 0
+    for o in sorted(unmatched_opens, key=lambda r: r["ts"], reverse=True):
+        coin, side, ots = o["coin"], o["side"], int(o["ts"])
+        # Skip ONLY the open that is the current live position (newest open on
+        # this coin+side, if that coin is live on-exchange). Its window is
+        # unbounded and has no close fill after it, so windowing already skips
+        # it — this guard is explicit for clarity. OLDER unmatched opens on a
+        # live coin were genuinely closed then re-entered (no_pyramid), so they
+        # are real missing CLOSEs and fall through to be backfilled if clean.
+        if coin in live_coins and ots == max_open_ts.get((coin, side)):
+            logger.warning(f"[ledger-reconcile] {coin}_{side} has no CLOSE but is the current live position — skipping")
+            continue
+        want = close_dir.get(side)
+        window_end = next_open_ts.get((coin, side), {}).get(ots, 0)
+        cands = [f for f in fills
+                 if f.get("coin") == coin and f.get("dir") == want
+                 and ots < int(f.get("time") or 0)
+                 and (not window_end or int(f.get("time") or 0) < window_end)]
+        if not cands:
+            logger.warning(f"[ledger-reconcile] {coin}_{side} no CLOSE in ledger and no closing fill in window — cannot backfill")
+            continue
+        if len(cands) > 1:
+            logger.warning(f"[ledger-reconcile] {coin}_{side} has {len(cands)} closing fills in window — ambiguous, skipping")
+            continue
+        f = cands[0]
+        entry_px_check = float(o.get("entry_px") or 0)
+        if entry_px_check > 0:
+            open_sz = float(o.get("notional_usd") or 0) / entry_px_check
+            fill_sz = float(f.get("sz") or 0)
+            if open_sz > 0 and abs(fill_sz - open_sz) / open_sz > 0.20:
+                logger.warning(f"[ledger-reconcile] {coin}_{side} fill size {fill_sz} vs open ~{open_sz:.4f} — size mismatch, skipping")
+                continue
+        entry_px = float(o.get("entry_px") or 0)
+        lev = int(o.get("leverage") or 1) or 1
+        if entry_px <= 0:
+            continue
+        exit_px = float(f["px"])
+        notional = round(float(o.get("notional_usd") or (float(f.get("sz") or 0) * entry_px)), 4)
+        # Identical formula to executor.record_close (verified against
+        # ledger CLOSE rows): leveraged P/L net of a 2x-taker-fee estimate.
+        spot_pct = ((exit_px - entry_px) if side == "long" else (entry_px - exit_px)) / entry_px * 100
+        spot_pct = round(spot_pct, 4)
+        fees_pct = 0.025 * 2 * lev
+        realized_pct = round(spot_pct * lev - fees_pct, 4)
+        gross_usd = notional * spot_pct / 100.0
+        fee_usd = round(notional * (fees_pct / max(lev, 1)) / 100.0, 4)
+        net_usd = round(gross_usd - fee_usd, 4)
+        ts_ms = int(f["time"])
+        rec = {
+            "event": "CLOSE",
+            "ts": ts_ms,
+            "ts_iso": datetime.fromtimestamp(ts_ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "coin": coin,
+            "side": side,
+            "entry_px": entry_px,
+            "exit_px": exit_px,
+            "notional_usd": notional,
+            "realized_pnl_pct": realized_pct,
+            "realized_pnl_usd": net_usd,
+            "spot_pct": spot_pct,
+            "hold_minutes": None,
+            "leverage": lev,
+            "fee_usd": fee_usd,
+            "funding_cost_usd": None,
+            "exit_reason": "backfilled at startup: exchange fill had no recorded CLOSE",
+            "exit_type": None,
+            "backfilled": True,
+        }
+        try:
+            with open(LEDGER_FILE, "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+            appended += 1
+            logger.warning(
+                f"[ledger-reconcile] backfilled missing CLOSE for {coin}_{side}: "
+                f"exit {exit_px} @ {rec['ts_iso']} ({realized_pct:+.2f}% leveraged, {net_usd:+.4f} USDC)")
+        except Exception as e:
+            logger.error(f"[ledger-reconcile] append failed for {coin}_{side}: {e}")
+
+    if appended:
+        log_event({"event": "ledger_reconcile", "backfilled_closes": appended})
+
+
+_reconcile_ledger_closes()
 
 # Startup grace: the prewarm burst above + the cold-cache first scan (every
 # coin's candles fetched fresh) + any tail from the just-killed process all hit
@@ -273,7 +485,179 @@ def _sync_account_state():
 # AI close-check on coins we already hold so we don't research a "hold" every
 # scan. Resets on restart (a fresh close-check on startup is harmless/useful).
 _last_research_by_coin: dict = {}
+_research_lock = threading.Lock()
 
+
+def _process_coin(perception, ctx):
+    """Research + execute a single trigger; safe to run on a worker thread.
+
+    The slow LLM call is isolated per coin (a fresh event loop per _call_ai),
+    the HL client is a thread-safe Session, and shared mutable state (memory,
+    _last_research_by_coin) is individually locked. `ctx` carries the per-scan
+    snapshot (now_ms, held_coins, ...) computed once on the main thread so
+    every worker reads a consistent view of that scan.
+    """
+    global _last_progress_ts
+    now_ms = ctx["now_ms"]
+    held_coins = ctx["held_coins"]
+    held_research_ms = ctx["held_research_ms"]
+    cooldown_ms = ctx["cooldown_ms"]
+    recent_trades_by_coin = ctx["recent_trades_by_coin"]
+    _blocklist = ctx["blocklist"]
+    _cfg_cd = ctx["cfg_cd"]
+    coin = perception['coin']
+    score = perception.get('composite_score', 0)
+
+    # Watchdog heartbeat: every coin processed proves the loop is alive,
+    # so a healthy 10min+ research phase can't trip the 600s re-exec.
+    _last_progress_ts = time.time()
+
+    # Persist perceptions so memory/dashboard track real signal volume.
+    try:
+        memory.record_perception(perception)
+    except Exception:
+        pass
+
+    if coin in held_coins:
+        # Held position: research only every held_research_interval_min
+        # so the AI can still issue a CLOSE without paying for a "hold"
+        # PASS on every scan. (A re-entry is gate-blocked anyway.)
+        with _research_lock:
+            last_research = _last_research_by_coin.get(coin, 0)
+        if (now_ms - last_research) < held_research_ms:
+            remaining_min = _remaining_minutes(held_research_ms - (now_ms - last_research))
+            logger.info(f"{coin}: held — next AI close-check in {remaining_min}min — skip")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": "HELD_THROTTLE",
+                       "score": round(float(score), 1),
+                       "trigger_score": round(float(score), 1)})
+            return
+        # Infancy hold: skip the AI close-check while the position is
+        # younger than min_ai_close_hold_min (0=off). Measured churn
+        # 2026-06-11/12: the FIRST 10-min close-check reversed the AI's
+        # own fresh entry 3x (TON 2x, ZEC 1x, each ~-1% ROE incl. fees) —
+        # flip-flopping on entry noise. DSL stop + backup SL still
+        # protect an infant position; only the AI's second-guess waits.
+        min_hold_min = float(_cfg_cd.get("min_ai_close_hold_min", 0) or 0)
+        if min_hold_min > 0:
+            from hermes_trader.agents import dsl_exit as _dsl
+            _tr = (_dsl._active_positions.get(f"{coin}_long")
+                   or _dsl._active_positions.get(f"{coin}_short"))
+            if _tr is not None:
+                age_min = (time.time() - _tr.entry_time) / 60
+                if age_min < min_hold_min:
+                    logger.info(f"{coin}: held {age_min:.0f}min < min_hold "
+                                f"{min_hold_min:.0f}min — infancy, skip close-check")
+                    return
+    else:
+        # Blocklisted + not held → coin_filter will reject any entry, so
+        # skip the paid LLM research entirely (this coin keeps triggering
+        # every scan otherwise). Held blocklisted coins took the held
+        # branch above and still get their AI close-check.
+        if coin in _blocklist:
+            logger.info(f"{coin}: on coin blocklist — skip research")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": "BLOCKLISTED",
+                       "score": round(float(score), 1),
+                       "trigger_score": round(float(score), 1)})
+            return
+        # Not held but executed within cooldown_min → re-entry would be
+        # gate-blocked, so skip the paid AI call.
+        last_ms = recent_trades_by_coin.get(coin)
+        if last_ms and (now_ms - last_ms) < cooldown_ms:
+            remaining_min = _remaining_minutes(cooldown_ms - (now_ms - last_ms))
+            logger.info(f"{coin}: pre-research cooldown ({remaining_min}min remaining) — skip")
+            log_event({"event": "ta_skip", "coin": coin,
+                       "signal": "COOLDOWN",
+                       "score": round(float(score), 1),
+                       "trigger_score": round(float(score), 1)})
+            return
+    # TA filter — cheap statistical gate before the paid AI call.
+    ta = analyze_perception(perception)
+    if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
+        logger.info(f"{coin}: TA {ta['signal']} (score {ta['score']:.0f}) — skip AI research")
+        log_event({"event": "ta_skip", "coin": coin,
+                   "signal": ta['signal'],
+                   "score": round(float(ta.get('score', 0)), 1),
+                   "trigger_score": round(float(score), 1)})
+        return
+    gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
+    logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
+    # Record the paid-research time so the held-coin throttle above can
+    # pace the next AI close-check on this position. Locked: read on the
+    # main thread by the skip-check and written by whichever worker finishes
+    # research on this coin first.
+    with _research_lock:
+        _last_research_by_coin[coin] = now_ms
+
+    try:
+        analysis = research(coin, perception)
+        logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
+        # Store the full LLM reasoning verbatim — no character cap.
+        # The feed shows the complete rationale.
+        _r = (analysis.get('reasoning') or '').strip()
+        log_event({"event": "research", "coin": coin,
+                   "verdict": analysis['verdict'],
+                   "confidence": round(float(analysis['confidence']), 2),
+                   "reasoning": _r,
+                   "news_risk": analysis.get('news_risk'),
+                   "entry_px": analysis.get('entry_px'),
+                   "stop_px": analysis.get('stop_px'),
+                   "tp_px": analysis.get('tp_px')})
+
+        # All verdict→action routing lives in executor.route_verdict
+        # (unit-tested) so no verdict can be silently dropped again.
+        routed = route_verdict(analysis)
+        action = routed["action"]
+        result = routed["result"] or {}
+        if action == "execute":
+            logger.info(f"Trade result: {result}")
+            executed = bool(result.get("executed"))
+            # Surface the regime decision so the log answers "why did a
+            # counter-regime trade fire?" — via is one of aligned /
+            # neutral / confidence / composite / trigger:<name> / blocked.
+            mr = (result.get("gate_results") or {}).get("market_regime") or {}
+            log_event({"event": "execute", "coin": coin,
+                       "side": analysis['side'],
+                       "executed": executed,
+                       "detail": result.get("order_id")
+                       or result.get("reason")
+                       or result.get("blocked_by"),
+                       "blocked_by": result.get("blocked_by") if not executed else None,
+                       "size_usd": result.get("size_usd"),
+                       "entry_px": result.get("entry_px"),
+                       "stop_px": result.get("stop_px"),
+                       "tp_px": result.get("tp_px"),
+                       "regime": mr.get("regime"),
+                       "funding_regime": mr.get("funding"),
+                       "regime_via": mr.get("via"),
+                       "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
+        elif action == "close":
+            logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
+            log_event({"event": "ai_close", "coin": coin,
+                       "executed": bool(result.get("ok")),
+                       "detail": result.get("order_id")
+                       or result.get("noop")
+                       or result.get("error"),
+                       "reasoning": (analysis.get("reasoning") or "")})
+        elif action == "none":
+            logger.info(f"Trade result: {routed}")
+            log_event({"event": "pass", "coin": coin,
+                       "reasoning": (analysis.get("reasoning") or "")[:500],
+                       "chronos_median": routed.get("chronos_median_pct"),
+                       "chronos_aligned_if_long": routed.get("chronos_aligned_if_long"),
+                       "chronos_aligned_if_short": routed.get("chronos_aligned_if_short"),
+                       "chronos_error": routed.get("chronos_error")})
+        elif action == "unknown":
+            log_event({"event": "error", "coin": coin,
+                       "error": f"unhandled verdict {routed['verdict']!r}"})
+    except Exception as e:
+        # repr(e) not str(e): a bare exception (e.g. some httpx errors)
+        # stringifies to "" and produced blank "Error processing X:" lines.
+        detail = repr(e) if str(e) == "" else str(e)
+        logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
+        log_event({"event": "error", "coin": coin,
+                   "error": f"{type(e).__name__}: {detail}"})
 
 while True:
     try:
@@ -392,6 +776,58 @@ while True:
                     evt["realized_pnl_pct"] = res.get("realized_pnl_pct")
                     evt["fees_pct"] = res.get("fees_pct")
                 log_event(evt)
+
+            # Trailing TP: adjust server-side TP upward if DSL trailing rules say to push it up.
+            # Runs every heartbeat (~60s); only fires when trailing level > current TP + min_move.
+            try:
+                from hermes_trader.agents.dsl_exit import _active_positions
+                from hermes_trader.client.exchange import adjust_tp_order
+                from hermes_trader.client.hl_client import fetch_account_state, resolve_user_address
+                config_tp = (_cfg.get("trailing_tp") or {}).get("min_move_usd", 0.05)
+                for key, tracker in list(_active_positions.items()):
+                    mark = mids.get(tracker.coin)
+                    if mark is None:
+                        continue
+                    new_tp = tracker.compute_trailing_tp(mark)
+                    if new_tp is None:
+                        continue
+                    if tracker.current_tp_px is None:
+                        logger.info(f"[dsl-trail-tp] {tracker.coin}: no existing TP order to adjust, skipping")
+                        continue
+                    user = resolve_user_address()
+                    if not user:
+                        logger.warning("[dsl-trail-tp] no user address; cannot adjust TP")
+                        break
+                    state = fetch_account_state(user, include_hip3=True)
+                    pos_size = None
+                    for p in state.get("asset_positions", []) or []:
+                        pos = p.get("position", {})
+                        if pos.get("coin") == tracker.coin:
+                            pos_size = abs(float(pos.get("szi", 0)))
+                            break
+                    if pos_size is None or pos_size <= 0:
+                        logger.warning(f"[dsl-trail-tp] {tracker.coin}: no position found, cannot adjust TP")
+                        continue
+                    adj = adjust_tp_order(
+                        coin=tracker.coin,
+                        is_long_position=tracker.is_long(),
+                        size=pos_size,
+                        old_tp_px=tracker.current_tp_px,
+                        new_tp_px=new_tp,
+                    )
+                    if adj.get("ok"):
+                        tracker.current_tp_px = new_tp
+                        log_event({
+                            "event": "dsl_trail_tp",
+                            "coin": tracker.coin,
+                            "side": tracker.side,
+                            "old_tp": tracker.current_tp_px - (new_tp - tracker.current_tp_px),
+                            "new_tp": new_tp,
+                        })
+                    else:
+                        logger.warning(f"[dsl-trail-tp] {tracker.coin}: adjust failed: {adj.get('error')}")
+            except Exception as tp_e:
+                logger.warning(f"[dsl-trail-tp] adjustment pass failed: {tp_e}")
         except Exception as e:
             logger.error(f"[dsl] monitor pass failed: {e}")
             log_event({"event": "error", "scope": "dsl_monitor", "error": str(e)})
@@ -416,6 +852,7 @@ while True:
 
         logger.info("Scanning markets...")
         results = scan_once(universe=universe, min_score=min_score, config=config)
+        _last_progress_ts = time.time()  # scan survived; research heartbeats per coin
         logger.info(f"Scan found {len(results)} triggers")
         # Per-cycle heartbeat — proof of life even when nothing triggers.
         # `coin_scores` carries the composite score for each trigger so the
@@ -439,13 +876,6 @@ while True:
         # exits in real time; the AI close-check is the slower structural-flip
         # judgment and only needs an occasional refresh.
         held_research_ms = float(_cfg_cd.get("held_research_interval_min", 10)) * 60_000
-        # Re-research throttle for NON-held, non-traded coins: a coin that keeps
-        # triggering but keeps PASSing (or whose trade gets gate/margin-rejected)
-        # used to be researched EVERY scan — burning LLM tokens/credits on a setup
-        # that won't meaningfully change in 60s (e.g. XLM PASS'd every cycle). Skip
-        # re-research for this window regardless of verdict. The scan still re-detects
-        # it; we just don't re-pay the LLM until the cooldown lapses.
-        research_cooldown_ms = float(_cfg_cd.get("research_cooldown_min", 15)) * 60_000
         # Newest trade timestamp per coin (NOT oldest — see the method docstring;
         # the prior inline `setdefault` kept the oldest, so a coin traded twice
         # in the window paid for redundant LLM research every cycle).
@@ -458,157 +888,38 @@ while True:
         _blocklist = set(_cfg_cd.get("coin_blocklist", []) or [])
         now_ms = int(time.time() * 1000)
 
-        for perception in results:
-            coin = perception['coin']
-            score = perception.get('composite_score', 0)
-
-            # Persist perceptions so memory/dashboard track real signal volume.
-            try:
-                memory.record_perception(perception)
-            except Exception:
-                pass
-
-            if coin in held_coins:
-                # Held position: research only every held_research_interval_min
-                # so the AI can still issue a CLOSE without paying for a "hold"
-                # PASS on every scan. (A re-entry is gate-blocked anyway.)
-                last_research = _last_research_by_coin.get(coin, 0)
-                if (now_ms - last_research) < held_research_ms:
-                    remaining_min = _remaining_minutes(held_research_ms - (now_ms - last_research))
-                    logger.info(f"{coin}: held — next AI close-check in {remaining_min}min — skip")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "HELD_THROTTLE",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-                # Infancy hold: skip the AI close-check while the position is
-                # younger than min_ai_close_hold_min (0=off). Measured churn
-                # 2026-06-11/12: the FIRST 10-min close-check reversed the AI's
-                # own fresh entry 3x (TON 2x, ZEC 1x, each ~-1% ROE incl. fees) —
-                # flip-flopping on entry noise. DSL stop + backup SL still
-                # protect an infant position; only the AI's second-guess waits.
-                min_hold_min = float(_cfg_cd.get("min_ai_close_hold_min", 0) or 0)
-                if min_hold_min > 0:
-                    from hermes_trader.agents import dsl_exit as _dsl
-                    _tr = (_dsl._active_positions.get(f"{coin}_long")
-                           or _dsl._active_positions.get(f"{coin}_short"))
-                    if _tr is not None:
-                        age_min = (time.time() - _tr.entry_time) / 60
-                        if age_min < min_hold_min:
-                            logger.info(f"{coin}: held {age_min:.0f}min < min_hold "
-                                        f"{min_hold_min:.0f}min — infancy, skip close-check")
-                            continue
-            else:
-                # Blocklisted + not held → coin_filter will reject any entry, so
-                # skip the paid LLM research entirely (this coin keeps triggering
-                # every scan otherwise). Held blocklisted coins took the held
-                # branch above and still get their AI close-check.
-                if coin in _blocklist:
-                    logger.info(f"{coin}: on coin blocklist — skip research")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "BLOCKLISTED",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-                # Not held but executed within cooldown_min → re-entry would be
-                # gate-blocked, so skip the paid AI call.
-                last_ms = recent_trades_by_coin.get(coin)
-                if last_ms and (now_ms - last_ms) < cooldown_ms:
-                    remaining_min = _remaining_minutes(cooldown_ms - (now_ms - last_ms))
-                    logger.info(f"{coin}: pre-research cooldown ({remaining_min}min remaining) — skip")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "COOLDOWN",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-                # Re-research throttle: already researched recently (any verdict) →
-                # don't re-pay the LLM until research_cooldown_min lapses.
-                last_research = _last_research_by_coin.get(coin, 0)
-                if (now_ms - last_research) < research_cooldown_ms:
-                    remaining_min = _remaining_minutes(research_cooldown_ms - (now_ms - last_research))
-                    logger.info(f"{coin}: re-research throttle ({remaining_min}min remaining) — skip")
-                    log_event({"event": "ta_skip", "coin": coin,
-                               "signal": "RESEARCH_THROTTLE",
-                               "score": round(float(score), 1),
-                               "trigger_score": round(float(score), 1)})
-                    continue
-
-            # TA filter — cheap statistical gate before the paid AI call.
-            ta = analyze_perception(perception)
-            if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
-                logger.info(f"{coin}: TA {ta['signal']} (score {ta['score']:.0f}) — skip AI research")
-                log_event({"event": "ta_skip", "coin": coin,
-                           "signal": ta['signal'],
-                           "score": round(float(ta.get('score', 0)), 1),
-                           "trigger_score": round(float(score), 1)})
-                continue
-            gate = 'CONFIRMED' if ta['signal'] == 'CONFIRMED' else f"{ta['signal']}+burst"
-            logger.info(f"Researching {coin} (trigger {score:.1f}, TA {gate})...")
-            # Record the paid-research time so the held-coin throttle above can
-            # pace the next AI close-check on this position.
-            _last_research_by_coin[coin] = now_ms
-
-            try:
-                analysis = research(coin, perception)
-                logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
-                # Store the full LLM reasoning verbatim — no character cap.
-                # The feed shows the complete rationale.
-                _r = (analysis.get('reasoning') or '').strip()
-                log_event({"event": "research", "coin": coin,
-                           "verdict": analysis['verdict'],
-                           "confidence": round(float(analysis['confidence']), 2),
-                           "reasoning": _r,
-                           "news_risk": analysis.get('news_risk'),
-                           "entry_px": analysis.get('entry_px'),
-                           "stop_px": analysis.get('stop_px'),
-                           "tp_px": analysis.get('tp_px')})
-
-                # All verdict→action routing lives in executor.route_verdict
-                # (unit-tested) so no verdict can be silently dropped again.
-                routed = route_verdict(analysis)
-                action = routed["action"]
-                result = routed["result"] or {}
-                if action == "execute":
-                    logger.info(f"Trade result: {result}")
-                    executed = bool(result.get("executed"))
-                    # Surface the regime decision so the log answers "why did a
-                    # counter-regime trade fire?" — via is one of aligned /
-                    # neutral / confidence / composite / trigger:<name> / blocked.
-                    mr = (result.get("gate_results") or {}).get("market_regime") or {}
-                    log_event({"event": "execute", "coin": coin,
-                               "side": analysis['side'],
-                               "executed": executed,
-                               "detail": result.get("order_id")
-                               or result.get("reason")
-                               or result.get("blocked_by"),
-                               "blocked_by": result.get("blocked_by") if not executed else None,
-                               "size_usd": result.get("size_usd"),
-                               "entry_px": result.get("entry_px"),
-                               "stop_px": result.get("stop_px"),
-                               "tp_px": result.get("tp_px"),
-                               "regime": mr.get("regime"),
-                               "funding_regime": mr.get("funding"),
-                               "regime_via": mr.get("via"),
-                               "counter_regime": mr.get("counter_trend") or mr.get("against_funding")})
-                elif action == "close":
-                    logger.info(f"Closed {coin} per AI CLOSE verdict: {result}")
-                    log_event({"event": "ai_close", "coin": coin,
-                               "executed": bool(result.get("ok")),
-                               "detail": result.get("order_id")
-                               or result.get("noop")
-                               or result.get("error"),
-                               "reasoning": (analysis.get("reasoning") or "")})
-                elif action == "unknown":
-                    log_event({"event": "error", "coin": coin,
-                               "error": f"unhandled verdict {routed['verdict']!r}"})
-            except Exception as e:
-                # repr(e) not str(e): a bare exception (e.g. some httpx errors)
-                # stringifies to "" and produced blank "Error processing X:" lines.
-                detail = repr(e) if str(e) == "" else str(e)
-                logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
-                log_event({"event": "error", "coin": coin,
-                           "error": f"{type(e).__name__}: {detail}"})
-
+        # Research + execute on a bounded thread pool so the (slow) LLM calls
+        # overlap instead of serializing. scan_once returns triggers sorted by
+        # composite_score DESC, so submitting in order preserves priority (the
+        # pool dispatches the highest-score coins first). research_max_workers
+        # =1 keeps today's exact sequential behavior; set it to the LLM
+        # server's slot count to actually parallelize the research phase.
+        _n_research = max(1, len(results))
+        # Clamp workers to [1, n_triggers]; a malformed config value falls back
+        # to 1 (sequential) rather than blowing up the scan.
+        _workers = compute_research_workers(_cfg_cd, _n_research)
+        _ctx = {
+            "now_ms": now_ms,
+            "held_coins": held_coins,
+            "held_research_ms": held_research_ms,
+            "cooldown_ms": cooldown_ms,
+            "recent_trades_by_coin": recent_trades_by_coin,
+            "blocklist": _blocklist,
+            "cfg_cd": _cfg_cd,
+        }
+        if _workers == 1:
+            # Sequential path (default): exactly today's behavior.
+            for perception in results:
+                _process_coin(perception, _ctx)
+        else:
+            logger.info(f"Research phase: {len(results)} trigger(s) on {_workers} worker(s)")
+            with ThreadPoolExecutor(max_workers=_workers, thread_name_prefix="research") as _pool:
+                _futures = [_pool.submit(_process_coin, perception, _ctx) for perception in results]
+                # _process_coin swallows per-coin errors (logged + session event);
+                # .result() still surfaces any uncaught one so it can't be lost.
+                for _fut in as_completed(_futures):
+                    _fut.result()
+                    _last_progress_ts = time.time()
         _last_progress_ts = time.time()  # watchdog: a full cycle completed
         logger.info(f"Sleeping {scan_interval}s until next scan...")
         time.sleep(scan_interval)
