@@ -1,7 +1,14 @@
 # `.agent-config.json` — Reference
 
-Every key the bot reads at trade-time. Hot-reloaded on each trade (no
-restart for most changes), with two exceptions called out below.
+Every key the bot reads at trade-time. **Hot-reloaded** on each trade (no
+restart for most changes). Exceptions:
+
+- **`enable_hip3`** — universe is fetched once at startup; flipping it
+  mid-run requires a loop restart.
+- **`.env.local` (separate file, not this one)** — loaded at process start;
+  changes require a force-recreate.
+- **The container inode trap** (Docker path only) — a rename-based host edit
+  creates a new inode the container won't follow; see the README Quick Start.
 
 For one-shot tuning by account size, use:
 
@@ -15,12 +22,15 @@ scripts/config_preset.py apply --account-size 250      # auto-pick by equity
 
 ## Mode + asset class
 
-### `mode` (string: `"OFF"` | `"LIVE"`)
-- `OFF` — bot scans + researches but executes nothing.
+### `mode` (string: `"OFF"` | `"LIVE"` | `"SHADOW"`)
+- `OFF` — bot scans + researches but executes nothing. Exits on positions
+  already open are still managed (DSL + stop orders).
 - `LIVE` — orders go to real money.
+- `SHADOW` — full pipeline runs; intended trades are logged but never sent.
 
 ### `enable_crypto` (bool, default `true`)
-Scan native HL perps (BTC, ETH, SOL, etc.). **Requires loop restart to take effect** (universe fetched at startup).
+Scan native HL perps (BTC, ETH, SOL, etc.). Hot-reloaded — takes effect on the
+next cycle (filter is applied per-scan, not at startup).
 
 ### `enable_hip3` (bool, default `false`)
 Scan HIP-3 tokenized-equity / commodity perps (`xyz:NVDA`, `km:USOIL`, etc.). Adds ~8 HTTP POSTs per scan. **Requires loop restart to take effect**.

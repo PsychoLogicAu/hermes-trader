@@ -1,7 +1,7 @@
 ---
 name: hermes-trader-agent
-description: Use when operating, maintaining, or debugging hermes-trader — the standalone autonomous Hyperliquid trading system that Hermes Agent drives through its MCP server. Covers the scan/research/execute pipeline, the 11 risk gates, MCP tool wiring, and Hyperliquid order-placement gotchas.
-version: 1.0.0
+description: Use when operating, maintaining, or debugging hermes-trader — the standalone autonomous Hyperliquid trading system that Hermes Agent drives through its MCP server. Covers the scan/research/execute pipeline, the 14 risk gates, MCP tool wiring, and Hyperliquid order-placement gotchas.
+version: 1.1.0
 author: Hermes Agent
 license: MIT
 metadata:

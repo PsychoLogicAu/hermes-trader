@@ -1,5 +1,10 @@
 # Time-series forecasting (Chronos-2 shadow signal)
 chronos-forecasting>=2.0,<3
+
+# Dashboard + operator console (python -m hermes_trader.server)
+fastapi>=0.141
+uvicorn>=0.52
+prometheus-client>=0.26
 python-dotenv>=1.0.0
 requests>=2.31.0
 aiohttp>=3.9.0

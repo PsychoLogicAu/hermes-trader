@@ -1,27 +1,62 @@
 # Hermes-Trader
 
-> Autonomous crypto trading agent on Hyperliquid (perpetuals), operated as a Docker Compose stack. Scans markets, runs cheap TA filters, calls a self-hosted LLM only on confirmed setups, enforces 11+ risk gates, and manages dynamic exits via DSL — all without human intervention.
+> Autonomous crypto trading agent on Hyperliquid (perpetuals), operated as a Docker Compose stack. Scans markets, runs cheap TA filters, calls a self-hosted LLM only on confirmed setups, enforces 14 risk gates, and manages dynamic exits via DSL — all without human intervention.
 
 Originally forked from [Julian-dev28/hermes-trader](https://github.com/Julian-dev28/hermes-trader); this repo has since diverged significantly with new LLM wiring, Docker deployment, advanced risk gates, shadow-mode signals, and trailing TP.
 
 **What it does:**
-Scans 500+ Hyperliquid markets, fires statistical triggers on price/volume/breakout signals, runs a zero-cost multi-timeframe TA filter (`analyze_perception`), and only calls the LLM on CONFIRMED setups (or momentum bursts). The LLM acts as an analyst — not an oracle. An 11-gate risk framework enforces discipline, and a DSL exit engine manages trailing stops, profit locking, and timeouts.
+Scans 500+ Hyperliquid markets, fires statistical triggers on price/volume/breakout signals, runs a zero-cost multi-timeframe TA filter (`analyze_perception`), and only calls the LLM on CONFIRMED setups (or momentum bursts). The LLM acts as an analyst — not an oracle. A 14-gate risk framework enforces discipline, and a DSL exit engine manages trailing stops, profit locking, and timeouts.
 
 ---
 
 ## Quick Start
 
-All commands from the repo root: `/home/oknight/src/hermes-trader`.
+### Prerequisites
+
+- Docker + Docker Compose v2
+- An **LLM endpoint** the bot can reach — see [External LLM](#external-llm).
+  The research step calls any OpenAI-compatible `/chat/completions` server.
+  This deployment runs one on the shared `llama-net` Docker network; if yours
+  lives on the host or another machine, skip the network step below.
+- A Hyperliquid account: main wallet address + an agent/API wallet private key
+
+### First run
 
 ```bash
-# Start (builds if needed)
+# 1. Create the Docker network the stack attaches to
+docker network create llama-net
+
+# 2. Configure credentials + LLM endpoint (edit the real values)
+cp .env.example .env.local
+$EDITOR .env.local        # HYPERLIQUID_*, LLM_BASE_URL, LLM_MODEL
+
+# 3. Configure trading risk params
+cp .agent-config.example.json .agent-config.json
+$EDITOR .agent-config.json   # template ships with mode: OFF (analyse-only)
+
+# 4. Start (builds the image on first run)
 docker compose up -d
 
-# Restart (apply config changes that need rebuild, or if container got stale)
-docker compose down && docker compose up -d
+# 5. Tail logs — expect the startup grace delay and the scan interval line
+docker compose logs -f hermes-trader
+```
+
+The bot runs in **`OFF` mode by default**: it scans, researches, and manages
+any exits, but opens no new positions. Verify one or two cycles look sane
+(logs, `docker compose ps`), then flip `mode` to `LIVE` in
+`.agent-config.json` when you're ready (hot-reloaded — see below).
+
+### Everyday commands
+
+```bash
+# Restart container (after rename-based config edits — see inode trap below)
+docker compose restart hermes-trader
 
 # Stop
 docker compose down
+
+# Rebuild + re-run (after code changes)
+docker compose build hermes-trader && docker compose up -d --force-recreate hermes-trader
 
 # Tail logs live
 docker compose logs -f hermes-trader
@@ -31,6 +66,28 @@ docker compose ps
 ```
 
 Logs: `trader-logs/trader.log` (daily rotation, date-stamped backups).
+
+### Config hot-reload (and the inode trap)
+
+`.agent-config.json` is volume-mounted and **re-read every cycle** (~60s), so
+edits take effect within a cycle — *if* the container's bind mount still points
+at the same inode.
+
+- **Safe (in-place) edits**: Python `open(path, 'w')` overwrites, `echo >>`
+  appends, the `hermes config` CLI. No restart needed.
+- **Inode trap**: editors that write a temp file and rename over the original
+  (`sed -i`, many editor save flows) create a *new* inode; the container keeps
+  serving the old file and your change silently does nothing. Fix:
+  `docker compose restart hermes-trader` (~15s).
+- **Verify what the container sees**:
+  `docker exec hermes-trader grep max_trade_notional_usd /app/.agent-config.json`
+
+`.env.local` (credentials, LLM endpoint) is different — it is loaded at process
+start, so changes need `docker compose up -d --force-recreate hermes-trader`.
+
+Full operating procedures (deploying code, changing the LLM, testing, the 14
+risk gates, invariants, troubleshooting, ledger queries) are in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
 ---
 
@@ -55,7 +112,7 @@ The LLM is never called on a raw trigger. Cheap math gates the expensive model e
 |          hermes-trader — autonomous trading pipeline          |
 |                                                               |
 |  Scan → TA Filter → AI Research → Risk Gates → Execute → DSL Monitor ──▶ Auto-Close
-|        (cheap)         (expensive)     (11+ gates)           (per-tick, trailing TP)
+|        (cheap)         (expensive)     (14 gates)          (per-tick, trailing TP)
 |               |
 |               └── Hyperfeed Discovery
 |                   Leaderboard • Smart Money • OI Anomaly • Whale Tracking
@@ -67,8 +124,8 @@ The LLM is never called on a raw trigger. Cheap math gates the expensive model e
 ```
 ┌──────────────┐    ┌──────────────┐    ┌─────────────────┐    ┌──────────────┐    ┌──────────────┐
 │  Perception │───>│  TA Filter   │───>│   AI Research   │───>│  Risk Gates  │───>│   Executor  │
-│   Scanner   │    │  (TA Filter) │    │ (local LLM API) │    │  (11+ gates) │    │ HL + DSL TP │
-│ 5m/1h/4h    │    │  EMA/RSI/ATR│    │ Verdict + Price │    │  gates       │    │ SL / Trailing│
+│   Scanner   │    │  (TA Filter) │    │ (local LLM API) │    │  (14 gates) │    │ HL + DSL TP │
+│ 5m/1h/4h    │    │  EMA/RSI/ATR│    │ Verdict + Price │    │ (14 gates)   │    │ SL / Trailing│
 │ Volume-N    │    └──────────────┘    └─────────────────┘    └──────────────┘    └──────────────┘
 └─────────────┘
      │
@@ -82,7 +139,7 @@ Key differences from the original repo:
 - **LLM:** Self-hosted via `llama-net` (Qwen-based), not OpenRouter.
 - **Deployment:** Docker Compose container (`hermes-trader`), not direct Python/`restart.sh`.
 - **Signals:** Shadow-mode signal suite (GEX, whale flow, FINRA short volume, news catalyst) wired into research and enforcement.
-- **Risk gates:** Enhanced with high-confidence bypasses (`bypass_low_volume`, `bypass_late_trend_chase`), funding-regime overlays, and trailing TP.
+- **Risk gates:** 14 gates, enhanced with high-confidence bypasses (`bypass_low_volume`, `bypass_late_trend_chase`), funding-regime overlays, and trailing TP.
 
 ---
 
@@ -100,10 +157,26 @@ Key differences from the original repo:
 
 ### Local LLM Integration
 
-- Calls a self-hosted Qwen-based model via `llama-net`, configured via:
-  - `.env.local`: `LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL` (default: local endpoint).
+- Calls a self-hosted Qwen-based model via `llama-net`, configured via
+  `.env.local`: `LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL`.
 - Resilient to credit/API outages: no OpenRouter dependency.
-- On a 402 with affordability hint, retries ONCE with a smaller `max_tokens` budget so the bot degrades rather than going blind.
+- On a 402 with affordability hint, retries ONCE with a smaller `max_tokens`
+  budget so the bot degrades rather than going blind.
+
+### External LLM
+
+The research step needs **any OpenAI-compatible `/chat/completions` endpoint**
+reachable from the `hermes-trader` container — its own model server, a hosted
+API, or a local inference server on the shared `llama-net` Docker network.
+It is an external project to this repo; hermes-trader only consumes the URL.
+
+This deployment runs [lemonade](https://github.com/lemonade-sdk/lemonade)
+(`lemond`) on `llama-net`, serving a GGUF model via llama.cpp — a small
+Q4_K_M model (e.g. ~9B, thinking disabled) fits an 8GB GPU with a 32k
+context, which is plenty for the analyst prompt. A reference
+`docker-compose.yml` for the lemonade side, plus the matching `.env.local`
+values (`LLM_BASE_URL=http://lemond:13305/api/v1`), live in
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md#external-llm-reference).
 
 ### Shadow-Mode Signal Suite
 
@@ -150,47 +223,50 @@ Two config files:
 
 | File | Where it goes | You… | When it's read |
 |------|---------------|------|----------------|
-| **`.agent-config.json`** | Repo root (tracked) | **Edit** (don't recreate) | At container restart (volume-mounted into container) |
-| **`.env.local`** | Repo root (gitignored) | **Create** from `.env.example` | At container build/startup |
+| **`.agent-config.json`** | Repo root (gitignored) | **Create** from `.agent-config.example.json`, then **edit** | Fresh every cycle (hot-reloaded — see [Quick Start](#config-hot-reload-and-the-inode-trap)) |
+| **`.env.local`** | Repo root (gitignored) | **Create** from `.env.example` | At process start — force-recreate after changes |
 
 ### `.env.local`
 
-Copy `.env.example` → `.env.local` and set your values:
+Copy `.env.example` → `.env.local` and fill in your real values:
 
 ```bash
-# ── LLM (local via llama-net) ─────────────────────────────────────
-LLM_MODEL=qwen3.6-27b-architect-polaris2-fable-b-nvfp4-mtp
-LLM_API_KEY=your-local-api-key-if-needed
-LLM_BASE_URL=http://your-llm-endpoint/api/v1   # defaults to local llama-net
+# ── Hyperliquid ──────────────────────────────────────────────────────────────
+HYPERLIQUID_WALLET_ADDRESS=0x...          # main account address
+HYPERLIQUID_PRIVATE_KEY=0x...             # agent/API wallet signing key
 
-# ── Hyperliquid ────────────────────────────────────────────────────
-HYPERLIQUID_WALLET_ADDRESS=0x...          # required
-HYPERLIQUID_PRIVATE_KEY=0x...             # required
+# ── LLM (OpenAI-compatible endpoint) ────────────────────────────────────────
+# A local inference server on llama-net (see External LLM below) or any hosted
+# /chat/completions API.
+LLM_BASE_URL=http://lemond:13305/api/v1
+LLM_API_KEY=local
+LLM_MODEL=<your-model>
 
-# ── News (optional — enables news catalyst in research + gates) ─────
-BRAVE_API_KEY=BSA...                      # optional; without it news_context = "no news"
+# ── News (optional — enables news catalyst in research + gates) ─────────────
+# BRAVE_API_KEY=...
 
-# ── Scan tuning (optional — defaults shown) ────────────────────────
-HERMES_SCAN_INTERVAL=60
-HERMES_MAX_MARKETS=60
-HERMES_BATCH_SIZE=20
-HERMES_BATCH_SLEEP=0.3
-HERMES_WATCHDOG_TIMEOUT_S=600
+# ── Scan tuning (optional — defaults shown) ──────────────────────────────────
+# HERMES_SCAN_INTERVAL=60
+# HERMES_MAX_MARKETS=60
+# HERMES_BATCH_SIZE=20
+# HERMES_BATCH_SLEEP=0.3
 ```
 
 ### `.agent-config.json` — live risk settings
 
-All trading behaviour and risk limits live here. Edited on the host; the container sees it via volume mount. **Restart required** after changes:
+All trading behaviour and risk limits live here. Create it from the template
+(`cp .agent-config.example.json .agent-config.json`) — the template ships with
+`mode: OFF` (analyse-only) — then tune. It is hot-reloaded every cycle; the
+inode trap in the [Quick Start](#config-hot-reload-and-the-inode-trap) decides
+whether you also need a restart. Every key (defaults, ranges, what each gate
+reads) is documented in [`docs/CONFIG.md`](docs/CONFIG.md); operating
+procedures are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
-```bash
-cd /home/oknight/src/hermes-trader && docker compose restart hermes-trader
-```
-
-Current live shape (abridged — full file has all DSL, shadow signal, and gate settings):
+A minimal starting shape:
 
 ```json
 {
-  "mode": "LIVE",
+  "mode": "OFF",
   "enable_crypto": true,
   "enable_hip3": false,
   "equity_fraction_per_trade": 0.08,
@@ -204,67 +280,25 @@ Current live shape (abridged — full file has all DSL, shadow signal, and gate 
   "daily_giveback_min_peak_usd": 25.0,
   "min_ai_confidence": 0.7,
   "counter_regime_min_conf": 0.8,
-  "min_market_volume_usd": 3500000,
+  "min_market_volume_usd": 1000000,
   "min_short_volume_usd": 50000000,
   "cooldown_min": 30,
   "held_research_interval_min": 3,
   "research_cooldown_min": 3,
   "coin_blocklist": ["TON", "TRX"],
-  "max_crypto_long_correlated": 2,
-  "dsl_exit": {
-    "max_loss_pct": 5.0,
-    "max_loss_roe_pct": 30.0,
-    "protect_pct": 1.0,
-    "trailing_tp": {
-      "enabled": true,
-      "trail_pct_from_peak": 0.03,
-      "max_tp_pct_from_entry": 40.0
-    },
-    "phase2_tiers": [
-      {"pct_above_entry": 8.0, "retrace_threshold": 0.35},
-      {"pct_above_entry": 15.0, "retrace_threshold": 0.4}
-    ]
-  },
-  "runner_entry_gate": {
-    "enabled": true,
-    "bypass_late_trend_chase": true,
-    "bypass_late_trend_chase_min_conf": 0.8,
-    "bypass_low_volume": true,
-    "bypass_low_volume_min_conf": 0.85
-  },
-  "atr_risk_sizing": {
-    "enabled": true,
-    "risk_per_trade_pct": 0.02,
-    "sizing_basis": "primary_stop"
-  },
-  "shadow_signals": {
-    "enabled": true,
-    "gex": true,
-    "short_volume": true,
-    "crypto_whale": true,
-    "news": true,
-    "whale_window_min": 15
-  },
-  "chronos_signal": {
-    "enabled": true,
-    "debug": false,
-    "model_id": "amazon/chronos-2",
-    "device": "cpu",
-    "context_length": 100,
-    "forecast_horizon": 48,
-    "cache_ttl_seconds": 300,
-    "timeout_seconds": 30,
-    "quantile_levels": [0.1, 0.5, 0.9],
-    "num_samples": 50
-  }
+  "max_crypto_long_correlated": 2
 }
 ```
+
+The full template (`.agent-config.example.json`) additionally carries
+`dsl_exit.*` (stops, trailing TP, phase tiers), `runner_entry_gate.*`,
+`atr_risk_sizing.*`, `shadow_signals.*`, and `chronos_signal.*`.
 
 Key parameters:
 
 | Key | Meaning |
 |-----|---------|
-| `mode` | `LIVE` = real money; `OFF` = analyse-only (exits still monitored) |
+| `mode` | `LIVE` = real money; `OFF` = analyse-only (exits still monitored); `SHADOW` = full pipeline, no orders |
 | `max_trade_notional_usd` | Hard ceiling per trade notional |
 | `max_concurrent` | Max open positions |
 | `max_total_notional_pct` | Max portfolio notional as multiple of equity |
@@ -275,12 +309,12 @@ Key parameters:
 | `cooldown_min` | Min minutes between trades on the same coin |
 | `min_market_volume_usd` | Liquidity floor (with high-conf bypass option) |
 | `min_short_volume_usd` | Deeper liquidity floor for shorts |
-|| `coin_blocklist` | Never trade these symbols |
-|| `runner_entry_gate.*` | Runner surface gate thresholds (late-chase / low-vol bypass) |
-|| `atr_risk_sizing.*` | ATR-based equal-risk sizing parameters |
-|| `dsl_exit.*` | DSL trailing stop + trailing TP configuration |
-|| `shadow_signals.*` | Toggle individual free signals in the shadow suite |
-|| `chronos_signal.*` | Chronos-2 forecasting shadow signal (shadow-only logging; `enabled` toggles it) |
+| `coin_blocklist` | Never trade these symbols |
+| `runner_entry_gate.*` | Runner surface gate thresholds (late-chase / low-vol bypass) |
+| `atr_risk_sizing.*` | ATR-based equal-risk sizing parameters |
+| `dsl_exit.*` | DSL trailing stop + trailing TP configuration |
+| `shadow_signals.*` | Toggle individual free signals in the shadow suite |
+| `chronos_signal.*` | Chronos-2 forecasting shadow signal (shadow-only logging; `enabled` toggles it) |
 
 ---
 
@@ -308,8 +342,8 @@ docker compose exec hermes-trader sh -c 'cat /app/.agent-config.json | python -c
 
 - **Container not starting**: Check `docker compose logs hermes-trader` for LLM connection errors or config syntax issues.
 - **No trades executing**: Check `runner_gate_blocked` reasons in logs — likely liquidity, late-chase gate, confidence threshold, or daily-loss killswitch.
-- **Config not applying**: Restart the container (`docker compose restart hermes-trader` or full down/up).
-- **LLM unreachable**: Verify `llama-net` exists (`docker network ls`) and the container is connected.
+- **Config not applying**: First check the inode trap (host file vs container view) — `docker exec hermes-trader grep <key> /app/.agent-config.json` — then `docker compose restart hermes-trader`. `.env.local` changes need a full `--force-recreate`.
+- **LLM unreachable**: Verify `llama-net` exists (`docker network ls`) and the LLM endpoint itself answers (see [External LLM](#external-llm)).
 
 ---
 
@@ -323,7 +357,7 @@ hermes-trader/
 │   │   ├── ta_filter.py           # Pre-AI multi-TF TA filter
 │   │   ├── research.py            # AI research pipeline (local LLM)
 │   │   ├── executor.py            # Trade execution + DSL registration
-│   │   ├── risk_gates.py          # 11+ risk gates
+│   │   ├── risk_gates.py          # 14 risk gates
 │   │   ├── dsl_exit.py            # Two-phase trailing stop + trailing TP
 │   │   ├── hyperfeed.py           # Discovery API (leaderboard, whale index)
 │   │   ├── market_regime.py       # Regime detection + funding overlays
@@ -347,10 +381,13 @@ hermes-trader/
 │   └── hermes-mcp-server.py       # MCP server (stdio, 100 tools) — legacy integration
 ├── tests/                         # pytest suite — offline / online / live e2e
 ├── docker-compose.yml             # Docker Compose stack (production)
-├── .agent-config.json             # Live risk settings (volume-mounted into container)
-├── .env.local                     # Credentials, LLM endpoints (gitignored)
-├── .agent-memory.json             # Persistent memory (perceptions, trades)
-├── .dsl-state.json                # DSL tracker state
+├── .env.example                   # Committed placeholder template for .env.local
+├── .env.local                     # Credentials, LLM endpoint (gitignored — copy from .env.example)
+├── .agent-config.example.json     # Committed safe template (mode OFF) for .agent-config.json
+├── .agent-config.json             # Live risk settings (gitignored — copy from .agent-config.example.json)
+├── .agent-memory.json             # Persistent memory (perceptions, trades) (gitignored)
+├── .dsl-state.json                # DSL tracker state (gitignored)
+├── docs/                          # CONFIG.md (key reference), OPERATIONS.md (day-to-day), ARCHITECTURE.md
 └── trader-logs/                   # Daily-rotated logs (gitignored)
 ```
 

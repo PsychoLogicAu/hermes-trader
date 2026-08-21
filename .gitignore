@@ -31,6 +31,7 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
+# .env.example is the committed placeholder template; the real one stays local.
 .env.local
 .env
 .env.old
@@ -89,8 +90,10 @@ ONE_PAGER.md
 THREAD.md
 DISTRIBUTE.md
 
-# Agent config
+# Agent config (live running config — the .example variants stay committed)
 .agent-config.json
+.agent-config.rocket.json
+.agent-config.shadow.json
 .agent-memory.json
 .dsl-state.json
 .positions-snapshot.json
