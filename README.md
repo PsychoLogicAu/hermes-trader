@@ -170,7 +170,7 @@ reachable from the `hermes-trader` container — its own model server, a hosted
 API, or a local inference server on the shared `llama-net` Docker network.
 It is an external project to this repo; hermes-trader only consumes the URL.
 
-This deployment runs [lemonade](https://github.com/hanabi1228/lemonade)
+This deployment runs [lemonade](https://github.com/lemonade-sdk/lemonade)
 (`lemond`) on `llama-net`, serving a GGUF model via llama.cpp — a small
 Q4_K_M model (e.g. ~9B, thinking disabled) fits an 8GB GPU with a 32k
 context, which is plenty for the analyst prompt. A reference

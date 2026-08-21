@@ -192,7 +192,7 @@ The research step calls any **OpenAI-compatible** `/chat/completions` endpoint
 separate project from this repo; this repo only needs it to be reachable from
 the Docker network.
 
-This deployment runs [lemonade](https://github.com/hanabi1228/lemonade)
+This deployment runs [lemonade](https://github.com/lemonade-sdk/lemonade)
 (`lemond`) on the same `llama-net` network, aliased as `lemond`, serving a
 GGUF model via llama.cpp. Reference `docker-compose.yml`:
 
