@@ -26,6 +26,7 @@ import logging.handlers
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from hermes_trader.agents.research_concurrency import compute_research_workers
+from hermes_trader.log_context import CoinLogFormatter, set_coin_context
 
 # Load .env.local (CWD-relative, matches skill restart command).
 env_path = '.env.local'
@@ -48,6 +49,7 @@ _args, _unknown = _parser.parse_known_args()
 # Log to both stdout and a file on the shared mount (./trader-logs)
 LOG_DIR = "/app/log"
 LOG_FILE = os.path.join(LOG_DIR, "trader.log")
+LOG_FORMAT = "%(asctime)s %(levelname)s:%(name)s:%(message)s"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Daily rotation with datestamped filenames: trader.log, trader.log.2026-08-06, ...
@@ -56,15 +58,18 @@ log_handler = logging.handlers.TimedRotatingFileHandler(
     LOG_FILE, when='D', interval=1, backupCount=0
 )
 log_handler.suffix = "%Y-%m-%d"
-log_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s")
-)
+log_handler.setFormatter(CoinLogFormatter(LOG_FORMAT))
 
+# Both handlers carry the coin-tagging formatter (CoinLogFormatter prepends
+# "[COIN] " while a worker is researching/executing a coin), so trader.log and
+# docker logs attribute interleaved parallel-research lines. explicit formatters
+# mean basicConfig no longer needs a format string.
+_stdout_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler.setFormatter(CoinLogFormatter(LOG_FORMAT))
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(name)s:%(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
+        _stdout_handler,
         log_handler,
     ]
 )
@@ -489,6 +494,17 @@ _research_lock = threading.Lock()
 
 
 def _process_coin(perception, ctx):
+    # Tag every log line emitted while this coin is researched + executed with
+    # its ticker. research_max_workers > 1 interleaves the workers, so an
+    # untagged "Verdict:" / "Trade result:" / LLM-failure line would be
+    # unattributable. The contextvar is per-thread (a per-task context copy in
+    # the pool), and set_coin_context resets it so the sequential (workers==1,
+    # main-thread) path doesn't leak the last coin into cycle-level logging.
+    with set_coin_context(perception['coin']):
+        _process_coin_run(perception, ctx)
+
+
+def _process_coin_run(perception, ctx):
     """Research + execute a single trigger; safe to run on a worker thread.
 
     The slow LLM call is isolated per coin (a fresh event loop per _call_ai),
