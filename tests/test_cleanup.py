@@ -1952,7 +1952,7 @@ def test_route_verdict_long_calls_execute():
     from hermes_trader.agents.executor import route_verdict
     calls = {}
     def exec_fn(a): calls["exec"] = a; return {"executed": True, "order_id": "1"}
-    def close_fn(c): calls["close"] = c; return {"ok": True}
+    def close_fn(c, reason=""): calls["close"] = c; calls["close_reason"] = reason; return {"ok": True}
     r = route_verdict({"verdict": "LONG", "coin": "BTC", "side": "long"},
                       execute_fn=exec_fn, close_fn=close_fn)
     assert r["action"] == "execute"
@@ -1964,7 +1964,7 @@ def test_route_verdict_short_calls_execute():
     seen = {}
     r = route_verdict({"verdict": "SHORT", "coin": "ETH", "side": "short"},
                       execute_fn=lambda a: seen.setdefault("e", a) or {"executed": True},
-                      close_fn=lambda c: seen.setdefault("c", c))
+                      close_fn=lambda c, reason="": seen.setdefault("c", c))
     assert r["action"] == "execute" and "e" in seen and "c" not in seen
 
 
@@ -1974,7 +1974,7 @@ def test_route_verdict_close_calls_close():
     calls = {}
     r = route_verdict({"verdict": "CLOSE", "coin": "DOGE"},
                       execute_fn=lambda a: calls.setdefault("e", a),
-                      close_fn=lambda c: calls.setdefault("c", c) or {"ok": True})
+                      close_fn=lambda c, reason="": calls.setdefault("c", c) or {"ok": True})
     assert r["action"] == "close"
     assert calls.get("c") == "DOGE"
     assert "e" not in calls            # never executes a trade on CLOSE
@@ -1985,7 +1985,7 @@ def test_route_verdict_pass_is_noop():
     calls = {}
     r = route_verdict({"verdict": "PASS", "coin": "BTC"},
                       execute_fn=lambda a: calls.setdefault("e", 1),
-                      close_fn=lambda c: calls.setdefault("c", 1))
+                      close_fn=lambda c, reason="": calls.setdefault("c", 1))
     assert r["action"] == "none"
     assert not calls                   # nothing called
 
@@ -2002,7 +2002,7 @@ def test_route_verdict_pass_with_whale_signal_routes_to_executor(monkeypatch):
         {"verdict": "PASS", "coin": "TRX",
          "whale_signal": {"signal": "oi_funding_anomaly"}},
         execute_fn=lambda a: calls.setdefault("e", a) or {"executed": True},
-        close_fn=lambda c: calls.setdefault("c", c),
+        close_fn=lambda c, reason="": calls.setdefault("c", c),
     )
     assert r["action"] == "execute"
     assert calls.get("e", {}).get("coin") == "TRX"
@@ -2021,7 +2021,7 @@ def test_route_verdict_pass_with_slow_burn_hint_routes_to_executor(monkeypatch):
         {"verdict": "PASS", "coin": "SOL",
          "composite_score": 45.0, "slow_burn_count": 2},
         execute_fn=lambda a: calls.setdefault("e", 1) or {"executed": True},
-        close_fn=lambda c: calls.setdefault("c", 1),
+        close_fn=lambda c, reason="": calls.setdefault("c", 1),
     )
     assert r["action"] == "execute"
     assert calls.get("e") == 1
@@ -2038,7 +2038,7 @@ def test_route_verdict_pass_with_ta_sidestep_hint_routes_to_executor(monkeypatch
         {"verdict": "PASS", "coin": "PURR", "slow_burn_count": 1,
          "composite_score": 0.0},
         execute_fn=lambda a: calls.setdefault("e", a) or {"executed": True},
-        close_fn=lambda c: calls.setdefault("c", c),
+        close_fn=lambda c, reason="": calls.setdefault("c", c),
     )
     assert r["action"] == "execute"
     assert calls.get("e", {}).get("coin") == "PURR"
@@ -2057,7 +2057,7 @@ def test_route_verdict_ta_sidestep_respects_min_slow_burn(monkeypatch):
         {"verdict": "PASS", "coin": "PURR", "slow_burn_count": 1,
          "composite_score": 0.0},
         execute_fn=lambda a: calls.setdefault("e", a) or {"executed": True},
-        close_fn=lambda c: calls.setdefault("c", c),
+        close_fn=lambda c, reason="": calls.setdefault("c", c),
     )
     assert r["action"] == "none"
     assert not calls
@@ -2071,7 +2071,7 @@ def test_route_verdict_plain_pass_still_noop():
     r = route_verdict({"verdict": "PASS", "coin": "BTC",
                        "composite_score": 20.0, "slow_burn_count": 0},
                       execute_fn=lambda a: calls.setdefault("e", 1),
-                      close_fn=lambda c: calls.setdefault("c", 1))
+                      close_fn=lambda c, reason="": calls.setdefault("c", 1))
     assert r["action"] == "none"
     assert not calls
 
@@ -2239,7 +2239,7 @@ def test_route_verdict_unknown_is_flagged_not_dropped():
     calls = {}
     r = route_verdict({"verdict": "YOLO", "coin": "BTC"},
                       execute_fn=lambda a: calls.setdefault("e", 1),
-                      close_fn=lambda c: calls.setdefault("c", 1))
+                      close_fn=lambda c, reason="": calls.setdefault("c", 1))
     assert r["action"] == "unknown"
     assert r["verdict"] == "YOLO"
     assert not calls
@@ -2248,7 +2248,7 @@ def test_route_verdict_unknown_is_flagged_not_dropped():
 def test_route_verdict_lowercase_verdict_normalized():
     from hermes_trader.agents.executor import route_verdict
     r = route_verdict({"verdict": "close", "coin": "X"},
-                      execute_fn=lambda a: None, close_fn=lambda c: {"ok": True})
+                      execute_fn=lambda a: None, close_fn=lambda c, reason="": {"ok": True})
     assert r["action"] == "close"
 
 

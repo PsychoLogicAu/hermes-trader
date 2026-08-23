@@ -11,8 +11,20 @@ services:
       # Persistent HF model cache so Chronos-2 loads from disk (no re-download
       # on rebuild/restart). Seeded from the container on first use.
       - ./hf-cache:/home/trader/.cache/huggingface:rw
+      # Persistent agent state: memory / DSL exit ratchets / positions snapshot.
+      # Must be a DIRECTORY volume, not a single-file mount: the code persists
+      # via os.replace(), which fails over a file bind-mount (EBUSY). The
+      # HERMES_*_FILE overrides below point the loop at /data so a
+      # --force-recreate no longer wipes operational state (cooldowns, the
+      # realized-outcome store, SOD equity baseline, and open-position
+      # stop/trailing-TP ratchets held in .dsl-state.json).
+      - ./agent-state:/data:rw
     env_file:
       - .env.local
+    environment:
+      - HERMES_AGENT_MEMORY_FILE=/data/.agent-memory.json
+      - HERMES_DSL_STATE_FILE=/data/.dsl-state.json
+      - HERMES_POSITIONS_SNAPSHOT_FILE=/data/.positions-snapshot.json
     networks:
       - llama-net
     restart: unless-stopped

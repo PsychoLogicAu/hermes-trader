@@ -2010,7 +2010,7 @@ def register_routes(app: FastAPI) -> None:
         if not coin:
             raise HTTPException(400, "coin required")
         from hermes_trader.agents.executor import close_position_market
-        return JSONResponse(close_position_market(coin))
+        return JSONResponse(close_position_market(coin, "operator_close"))
 
     @app.post("/api/dashboard/operator/mode")
     async def operator_mode(request: Request) -> JSONResponse:
@@ -2124,7 +2124,7 @@ def register_routes(app: FastAPI) -> None:
                 for p in targets:
                     coin = p["coin"]
                     try:
-                        r = close_position_market(coin)
+                        r = close_position_market(coin, f"operator_close:{target}")
                         ok = bool(r.get("ok") or r.get("executed"))
                         results.append(f"  {coin:<14} {('✓' if ok else '✗')} uPnL={p['uPnL']:+.2f}")
                     except Exception as e:
@@ -2134,7 +2134,7 @@ def register_routes(app: FastAPI) -> None:
 
             # Single-coin close (preserve original behavior)
             coin = parts[1] if ":" in parts[1] else parts[1].upper()
-            result = close_position_market(coin)
+            result = close_position_market(coin, "operator_close")
             return JSONResponse({"response": f"close {coin}: {result}", "kind": "action"})
 
         # ── positions: live list grouped by winners / losers ───────────
@@ -2236,7 +2236,7 @@ def register_routes(app: FastAPI) -> None:
             closed = []
             for c in open_coins:
                 try:
-                    r = close_position_market(c)
+                    r = close_position_market(c, "operator_flatten_all")
                     closed.append(f"  {c}: {'✓' if (r.get('ok') or r.get('executed')) else '✗'}")
                 except Exception as e:
                     closed.append(f"  {c}: ✗ {e}")

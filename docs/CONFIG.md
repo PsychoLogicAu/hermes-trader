@@ -247,6 +247,9 @@ Logs the free signals per candidate **without affecting trades** — forward val
 ### `gex_signal` / `momentum_reentry`
 Gated experiments (see commit history). `momentum_reentry` backtested net-negative → OFF.
 
+### `chronos_mismatch_gate` `{enabled, shadow_mode, min_conf, min_composite, min_abs_median_pct}`
+Direction-mismatch conviction gate (the 15th gate). When the entry side contradicts the coin's cached Chronos-2 forecast (long vs negative median / short vs positive, beyond `min_abs_median_pct`, default 0.5%), the trade must clear elevated conviction: `confidence >= min_conf` (0.90 — same bar as the late-trend-chase bypass) OR `composite >= min_composite` (60). No usable forecast (cold cache) or a directionally-neutral forecast = no opinion = pass. **SHADOW by default**: `shadow_mode: true` makes it structurally pass and the executor logs `[gate][SHADOW] chronos_mismatch WOULD HAVE BLOCKED …` at WARNING — it cannot alter live execution. Flip `shadow_mode` to `false` (one knob, hot-read per cycle) to make it block.
+
 ### Structural-override gates (LONG-only — upgrade an AI PASS on strong TA/whale)
 `force_execute_composite` (bar), `composite_force_execute` (forcing AI-rejects = adverse selection → OFF), `breakout_force_execute`, `whale_force_execute`, `force_execute_slow_burn_count`.
 
