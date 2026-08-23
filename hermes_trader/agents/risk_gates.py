@@ -31,6 +31,7 @@ class GateContext:
         whale_signal_fired: bool = False,
         binary_news_match: str = "",
         peak_daily_pnl: float = 0.0,
+        chronos_median_pct: Optional[float] = None,
     ):
         self.confidence = confidence
         self.current_positions = current_positions
@@ -56,6 +57,11 @@ class GateContext:
         # The headline + matched term that tripped the binary-news gate, for
         # log visibility ("which article blocked this?").
         self.binary_news_match = binary_news_match
+        # Median move of this coin's (warm) Chronos-2 forecast, % vs last close.
+        # Side-independent; fed by maybe_execute via peek_chronos (cache-only,
+        # never computes). None = no usable forecast → chronos_mismatch_gate
+        # has no opinion and passes.
+        self.chronos_median_pct = chronos_median_pct
 
 
 def confidence_gate(ctx: GateContext, min_confidence: float) -> GateResult:
@@ -390,6 +396,49 @@ def _cfg(config: Dict[str, Any], key: str, default: Any) -> Any:
     return config[camel] if camel in config else default
 
 
+def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Chronos direction-mismatch conviction gate (SHADOW by default).
+
+    When the entry side contradicts the cached Chronos-2 forecast (long with
+    median_pct < 0, short with median_pct > 0, beyond `min_abs_median_pct`),
+    the trade must carry elevated conviction: conf >= `min_conf` (0.90 — the
+    same bar as the late-trend-chase bypass) OR composite >= `min_composite`
+    (60). A counter-forecast scalp at 0.82 confidence is exactly the PURR
+    failure mode this gate is meant to surface.
+
+    SHADOW MODE: with `shadow_mode` true (default) the gate STRUCTURALLY
+    returns pass=True and only carries a `shadow_would_block` marker, which
+    the executor logs loudly. It cannot alter live execution until the
+    operator flips shadow_mode to false in .agent-config.json — one knob.
+
+    Fail-safe: no forecast (cold cache, model not loaded, in_prompt off) or a
+    directionally-neutral forecast (within the deadband) = no opinion = pass.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", True)):
+        return {"pass": True}
+    med = ctx.chronos_median_pct
+    if med is None:
+        return {"pass": True}
+    deadband = float(cfg.get("min_abs_median_pct", 0.5) or 0.5)
+    if abs(med) < deadband:
+        return {"pass": True}
+    mismatch = ((ctx.trade_side == "long" and med < 0)
+                or (ctx.trade_side == "short" and med > 0))
+    if not mismatch:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"chronos_mismatch ({ctx.trade_side} vs forecast {med:+.2f}%; "
+              f"conf {ctx.confidence:.2f} < {min_conf:.2f}, "
+              f"composite {ctx.composite_score:.1f} < {min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def eval_all_gates(
     ctx: GateContext,
     config: Optional[Dict[str, Any]] = None,
@@ -452,6 +501,10 @@ def eval_all_gates(
         float(_cfg(effective_config, "crowded_with_min_conf", 0.0) or 0.0),
     )
     results["news"] = news_blackout_gate(ctx)
+    # Shadow by default (see gate docstring): structurally passes and logs a
+    # would-block until shadow_mode is flipped in .agent-config.json.
+    results["chronos_mismatch"] = chronos_mismatch_gate(
+        ctx, effective_config.get("chronos_mismatch_gate") or {})
 
     block_reasons = []
     blocked = False

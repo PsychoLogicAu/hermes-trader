@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
@@ -831,6 +831,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             binary_news_match = news_text[:140]
 
     trade_side = analysis.get("side", "long") or "long"
+    # Cache-only Chronos read for the mismatch gate: the research prompt
+    # (_chronos_block) computes this same forecast per coin, so this is a
+    # cache hit — peek never computes and never blocks. None (cold cache /
+    # disabled) simply means the gate has no opinion.
+    try:
+        from hermes_trader.agents.chronos_signal import peek_chronos
+        _csig = peek_chronos(analysis["coin"])
+        _chronos_med = _csig.median_pct if _csig else None
+    except Exception as _pe:
+        logger.debug(f"[executor] chronos peek failed for {analysis['coin']}: {_pe}")
+        _chronos_med = None
     ctx = GateContext(
         confidence=analysis["confidence"],
         current_positions=positions,
@@ -850,9 +861,23 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # counter-regime gate. Missing config fails closed.
         whale_signal_fired=bool(analysis.get("whale_signal")) and bool(config.get("whale_regime_bypass", False)),
         peak_daily_pnl=memory.peak_daily_pnl(),
+        chronos_median_pct=_chronos_med,
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
+
+    # The mismatch gate runs shadow by default: it passes, but carries a
+    # shadow_would_block marker when a counter-forecast entry would have been
+    # vetoed at the live bar. Log it loudly so we can count false-positives
+    # before ever flipping shadow_mode off.
+    _cm = gate_output["results"].get("chronos_mismatch") or {}
+    if _cm.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] chronos_mismatch WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
+            f"NOT blocking (shadow mode)")
 
     if gate_output["blocked"]:
         # ── Capital-rotation (Phase-1 lever) — SHADOW by default ─────────────
@@ -900,7 +925,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                         # it never bypasses a real veto. _rotation_retry=True blocks a
                         # second rotation so this can't loop.
                         logger.warning(f"[rotation][LIVE] {_d.reason} — closing {_d.evict_coin}")
-                        _cr = close_position_market(_d.evict_coin)
+                        _cr = close_position_market(_d.evict_coin, "rotation_evict")
                         if _cr.get("ok"):
                             logger.warning(f"[rotation][LIVE] evicted {_d.evict_coin} "
                                            f"(rl {_cr.get('realized_pnl_pct')}%) → retrying {analysis['coin']}")
@@ -1216,7 +1241,8 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     if verdict in ("LONG", "SHORT"):
         return {"action": "execute", "verdict": verdict, "result": execute_fn(analysis)}
     if verdict == "CLOSE":
-        return {"action": "close", "verdict": verdict, "result": close_fn(coin)}
+        _reason = f"ai_close: {str(analysis.get('reasoning') or '')[:200]}"
+        return {"action": "close", "verdict": verdict, "result": close_fn(coin, _reason)}
     if verdict == "PASS":
         # A hedging AI PASS can still carry a structural-override HINT: a whale
         # accumulation signal, or a strong slow-burn composite. maybe_execute
@@ -1405,9 +1431,27 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     return ""
 
 
+def _exit_type(reason: str) -> Optional[str]:
+    """Coarse exit class from the leading token of a close reason string.
+
+    "max_loss (7.05% spot / …)" → "max_loss"; "ai_close: …" → "ai_close";
+    "operator_close:losing" → "operator_close"; "" → None.
+    """
+    if not reason:
+        return None
+    return reason.split(" ", 1)[0].split(":", 1)[0]
+
+
 @_serialized
-def close_position_market(coin: str) -> Dict[str, Any]:
+def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
     """Market-close any open perp position for `coin`. Deregisters the DSL tracker on success.
+
+    `exit_reason` (optional, caller-supplied) is recorded verbatim on the
+    outcome store and the append-only ledger so a CLOSE row answers "why did
+    this exit?" without log archaeology (DSL reasons arrive e.g. as
+    "max_loss (…% spot / …% ROE)"; kill-switch / rotation / operator / AI
+    closes supply their own tokens). Empty string = reason unknown — the
+    ledger row then carries exit_reason=null, exit_type=null (back-compat).
 
     Returns include `entry_px`, `fill_px`, and `realized_pnl_pct` (leveraged,
     net of taker fees) whenever the close fills with a parseable avgPx — so the
@@ -1520,6 +1564,11 @@ def close_position_market(coin: str) -> Dict[str, Any]:
                     "fee_usd": round(_fee_usd, 4),
                     "leverage": leverage,
                     "closed_at": _closed_at,
+                    # why this exit happened (DSL reason verbatim, or the
+                    # caller's token) + a coarse class for easy grouping:
+                    # "max_loss (…% spot …)" → "max_loss".
+                    "exit_reason": exit_reason or None,
+                    "exit_type": _exit_type(exit_reason),
                     # forward-backtest fields:
                     "entry_time": _entry_time,
                     "hold_minutes": _hold_min,
@@ -1552,6 +1601,8 @@ def close_position_market(coin: str) -> Dict[str, Any]:
                         leverage=leverage,
                         fee_usd=round(_fee_usd, 4),
                         funding_cost_usd=_funding_cost_usd,
+                        exit_reason=exit_reason or None,
+                        exit_type=_exit_type(exit_reason),
                     )
                 except Exception as _lc_e:
                     logger.debug(f"[executor] ledger record_close failed (non-fatal): {_lc_e}")

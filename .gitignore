@@ -126,3 +126,6 @@ hf-cache/
 
 # Sizing-monitor state (daily cap/revert watchdog) — machine-managed
 .ratchet-state.json
+
+# Persistent agent state dir (bind-mounted to /data in the container)
+agent-state/

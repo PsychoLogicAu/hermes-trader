@@ -103,9 +103,11 @@ for the lemonade setup this deployment uses.
 
 ## Risk gates
 
-14 gates, evaluated pre-execution, **all of them every cycle** (no
+15 gates, evaluated pre-execution, **all of them every cycle** (no
 short-circuit — results are collected for telemetry). Any `pass: False`
 blocks the trade; the `reason` strings land in the log's `blocked_by`.
+(14 can block; `chronos_mismatch` is shadow-only by default — it passes and
+logs would-blocks until `chronos_mismatch_gate.shadow_mode` is set false.)
 
 1. **Confidence** — LLM confidence ≥ `min_ai_confidence` (with a regime-aligned
    floor override via `aligned_min_conf`)
@@ -125,6 +127,12 @@ blocks the trade; the `reason` strings land in the log's `blocked_by`.
 13. **Market regime** — counter-trend blocked unless confidence ≥
     `counter_regime_min_conf` (with crowd/squeeze overlays)
 14. **News** — binary news risk (Fed/CPI/earnings) stands the bot down
+15. **Chronos mismatch** — entry side contradicts the cached Chronos-2
+    forecast (long vs negative median / short vs positive, beyond
+    `min_abs_median_pct`) unless confidence ≥ `chronos_mismatch_gate.min_conf`
+    (0.90) or composite ≥ `min_composite` (60). **SHADOW by default**:
+    `shadow_mode: true` makes it structurally pass and log would-blocks —
+    it never blocks. Flip `shadow_mode` to `false` to go live.
 
 ## Key rules
 

@@ -742,7 +742,7 @@ while True:
                 if not _coin:
                     continue
                 try:
-                    _res = close_position_market(_coin)
+                    _res = close_position_market(_coin, "killswitch_daily_loss")
                     logger.warning(f"[killswitch] flattened {_coin}: ok={_res.get('ok')}")
                 except Exception as _e:
                     logger.error(f"[killswitch] failed to flatten {_coin}: {_e}")
@@ -769,7 +769,7 @@ while True:
                 lpct = ex.get("leveraged_pct", ex["unrealized_pct"] * lev)
                 logger.info(f"[dsl] Closing {coin} {ex.get('side','?')} ({lev}x): "
                             f"{ex['reason']} (margin {lpct:+.2f}% · spot {ex['unrealized_pct']:+.2f}%)")
-                res = close_position_market(coin)
+                res = close_position_market(coin, ex["reason"])
                 # The close response carries authoritative realized PnL when
                 # the order filled with a parseable avgPx — prefer it over the
                 # tick-time estimate, which is gross of fees and off by the

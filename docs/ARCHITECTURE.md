@@ -145,7 +145,7 @@ One scan cycle (default 60s, env-tunable via `HERMES_SCAN_INTERVAL`):
      f. Log `execute` event with side, executed flag, order_id, blocked_by.
 ```
 
-### The 14 risk gates
+### The 15 risk gates
 
 All evaluated; results recorded for telemetry. Trade blocks if any returns
 `{pass: False}`. **All config keys are `snake_case`** — legacy camelCase
@@ -168,6 +168,7 @@ used by the old MCP-server status display.
 | `equity_risk` | Total open notional ≤ `max_total_notional_pct × equity` |
 | `market_regime` | Counter-trend trades blocked unless confidence ≥ `counter_regime_min_conf`. Per-asset-class proxy: BTC for crypto, `xyz:SP500` for equity, own ticker for commodities. |
 | `news` | No binary news risk in research's news_context (Fed/CPI/earnings/etc.) |
+| `chronos_mismatch` | Entry side contradicts the cached Chronos-2 forecast (long vs negative median / short vs positive, beyond `chronos_mismatch_gate.min_abs_median_pct`) unless conf ≥ `min_conf` (0.90) or composite ≥ `min_composite` (60). **Shadow by default** (`shadow_mode: true`): structurally passes and the executor logs a would-block. |
 
 ### Why the two-stage AI gating
 
