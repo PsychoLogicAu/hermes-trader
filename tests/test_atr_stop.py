@@ -143,6 +143,61 @@ def test_loss_cooldown_blocks_reentry(monkeypatch):
         ex.memory._cooldowns.pop("TON", None)
 
 
+def test_consecutive_loss_count_resets_on_win():
+    """Streak = trailing consecutive losing closes for the coin (newest first);
+    a win or breakeven resets it; other coins don't interleave."""
+    from hermes_trader.agents.memory import AgentMemory
+    # Fresh instance, _initialized False → flush() is a guarded no-op: no disk.
+    m = AgentMemory()
+    m.record_close({"coin": "STK", "realized_pnl_pct": -5.0})
+    assert m.consecutive_loss_count("STK") == 1
+    m.record_close({"coin": "STK", "realized_pnl_pct": 2.0})
+    assert m.consecutive_loss_count("STK") == 0
+    m.record_close({"coin": "STK", "realized_pnl_pct": -3.0})
+    m.record_close({"coin": "OTH", "realized_pnl_pct": -9.0})
+    m.record_close({"coin": "STK", "realized_pnl_pct": -4.0})
+    assert m.consecutive_loss_count("STK") == 2
+    assert m.consecutive_loss_count("OTH") == 1
+    assert m.consecutive_loss_count("NONE") == 0
+
+
+def test_loss_cooldown_arms_on_second_consecutive_loss_only():
+    """One loss: NOT armed (standard cooldown_min window applies). Two straight
+    losses: armed for loss_cooldown_min. A win in between resets the streak;
+    a profitable close never arms; loss_cooldown_min=0 disables it."""
+    from hermes_trader.agents import executor as ex
+    from hermes_trader.agents.memory import AgentMemory
+    m = AgentMemory()  # flush guarded no-op — nothing touches disk
+    cfg = {"loss_cooldown_min": 180}
+
+    m.record_close({"coin": "STK", "realized_pnl_pct": -5.0})
+    assert ex.arm_loss_cooldown_if_due(m, "STK", -5.0, cfg) == "streak_below_threshold"
+    assert m.loss_cooldown_remaining_min("STK") == 0.0
+
+    m.record_close({"coin": "STK", "realized_pnl_pct": -6.0})
+    assert ex.arm_loss_cooldown_if_due(m, "STK", -6.0, cfg) == "armed_180min"
+    assert m.loss_cooldown_remaining_min("STK") > 150.0
+
+    # Win resets: after L, W, L the streak is 1 again — not armed.
+    m.record_close({"coin": "STK", "realized_pnl_pct": 4.0})
+    m.record_close({"coin": "STK", "realized_pnl_pct": -5.0})
+    assert ex.arm_loss_cooldown_if_due(m, "STK", -5.0, cfg) == "streak_below_threshold"
+
+    # Profitable / breakeven closes never arm.
+    m2 = AgentMemory()
+    m2.record_close({"coin": "STK", "realized_pnl_pct": 1.0})
+    assert ex.arm_loss_cooldown_if_due(m2, "STK", 1.0, cfg) == "no_loss"
+    m2.record_close({"coin": "STK", "realized_pnl_pct": 0.0})
+    assert ex.arm_loss_cooldown_if_due(m2, "STK", 0.0, cfg) == "no_loss"
+
+    # loss_cooldown_min=0 → off, even at a long enough streak.
+    m3 = AgentMemory()
+    m3.record_close({"coin": "STK", "realized_pnl_pct": -5.0})
+    m3.record_close({"coin": "STK", "realized_pnl_pct": -5.0})
+    assert ex.arm_loss_cooldown_if_due(m3, "STK", -5.0, {"loss_cooldown_min": 0}) == "disabled"
+    assert m3.loss_cooldown_remaining_min("STK") == 0.0
+
+
 def test_degraded_read_filter_protects_daily_pnl(monkeypatch):
     """A >25% equity spike within 180s must be IGNORED (partial-dex read);
     the same value re-asserted after 180s must be ACCEPTED (real move)."""

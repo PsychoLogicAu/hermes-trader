@@ -359,6 +359,28 @@ class AgentMemory:
                 return c
         return None
 
+    def consecutive_loss_count(self, coin: str) -> int:
+        """Count `coin`'s trailing consecutive losing closes (most recent first).
+
+        A win or breakeven close resets the streak to 0. Returns 0 when the
+        coin has no closes yet. Used to arm the extended loss cooldown only
+        after `LOSS_COOLDOWN_MIN_CONSECUTIVE` straight losses (a single loss
+        stays governed by the standard same-coin cooldown)."""
+        with self._lock:
+            streak = 0
+            for c in reversed(self._closes):
+                if c.get("coin") != coin:
+                    continue
+                try:
+                    pnl = float(c.get("realized_pnl_pct", 0) or 0)
+                except (TypeError, ValueError):
+                    pnl = 0.0
+                if pnl < 0:
+                    streak += 1
+                else:
+                    break
+            return streak
+
     def get_closes(self, limit: int = 200) -> List[Dict[str, Any]]:
         return self._closes[-limit:]
 
