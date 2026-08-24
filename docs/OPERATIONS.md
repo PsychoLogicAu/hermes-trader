@@ -73,14 +73,17 @@ docker compose up -d --force-recreate hermes-trader
 
 Code is **baked into the image** (not bind-mounted). Procedure:
 
-1. Confirm the book is clean (no open positions) or accept the risk.
-2. Commit the change.
-3. `docker compose build hermes-trader`
-4. `docker compose up -d --force-recreate hermes-trader`
-5. Verify inside the container that the new code is present:
+1. Commit the change.
+2. `docker compose build hermes-trader`
+3. `docker compose up -d --force-recreate hermes-trader`
+4. Verify inside the container that the new code is present:
    `docker exec hermes-trader grep <new_symbol> /app/hermes_trader/...`
-6. Watch `docker compose logs -f hermes-trader` for ~30s — expect the startup
+5. Watch `docker compose logs -f hermes-trader` for ~30s — expect the startup
    grace delay, the scan interval line, and zero errors.
+
+**No clean-book requirement:** open positions survive a force-recreate —
+`rehydrate_from_exchange` re-synthesizes DSL trackers from the live exchange on
+the first cycle after restart. Do not close positions just to deploy.
 
 A plain `restart` will NOT pick up code changes.
 
