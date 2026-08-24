@@ -1008,7 +1008,25 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         filled_size = float(order_res.get("total_sz") or 0)
     except (TypeError, ValueError):
         filled_size = 0.0
-    entry_px = filled_px if filled_px > 0 else mid_price
+    # ok-without-fill-detail means the IOC matched nothing (no avgPx in the
+    # filled status). Refuse rather than book: an OPEN row + DSL tracker for a
+    # position the exchange never held is the same defect class as the
+    # 2026-08-23 phantom CLOSE rows — bookkeeping without an exchange fill.
+    # The order itself was a no-op (IOC cancelled on the exchange); if HL did
+    # in fact fill, rehydrate_from_exchange re-synthesizes the tracker next
+    # cycle from the live position, so nothing is lost.
+    if filled_px <= 0:
+        logger.warning(f"[executor] {coin} {trade_side}: IOC returned ok with no "
+                       f"fill detail (no avgPx) — refusing to book a tracker/OPEN "
+                       f"for a fill the exchange may not have made. If HL did "
+                       f"fill, rehydrate_from_exchange re-synthesizes the tracker "
+                       f"next cycle.")
+        return {
+            "executed": False, "mode": mode, "analysis_id": analysis["id"],
+            "reason": "no_fill (IOC returned ok with no fill detail — nothing booked)",
+            "gate_results": gate_output["results"],
+        }
+    entry_px = filled_px
     if filled_size > 0:
         size_in_coin = filled_size
     position_notional = abs(size_in_coin) * entry_px
@@ -1457,6 +1475,12 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
     net of taker fees) whenever the close fills with a parseable avgPx — so the
     trading loop can log the actual realized PnL instead of an estimate based
     on the pre-trade mid.
+
+    A result with NO fill evidence (ok:True, no avgPx — the reduce-only order
+    matched nothing) is verified against the exchange before the tracker is
+    dropped: position still open → `noop: no_fill_position_still_open`,
+    tracker + SL/TP kept; confirmed flat → `noop:
+    no_fill_position_already_flat`. A no-op close never books realized PnL.
     """
     user = resolve_user_address()
     if not user:
@@ -1508,12 +1532,76 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
                             "entry_px": entry_px, "leverage": leverage}
 
     if res.get("ok"):
-        deregister_position(coin, side)
-        # Cancel the now-stranded reduce-only SL/TP trigger bracket so stale
-        # orders don't pile up and reject a future reduce-only order on this coin.
-        cancel_open_orders_for_coin(coin)
         fill_px = res.get("avg_px")
+        # A close with NO fill evidence (ok:True but no avgPx — the reduce-only
+        # order matched nothing because the position was already gone) must be
+        # verified against the exchange before it is treated as a close. Without
+        # this, a no-op close of a position that's already flat still drops the
+        # tracker, cancels the SL/TP bracket, and reports ok:True — and anything
+        # downstream that books a realized row on that result would record a
+        # close the exchange never saw (2026-08-23: the ARB-short rows with no
+        # OPEN and no matching fill).
+        if not (fill_px and entry_px > 0):
+            post = fetch_account_state(user, include_hip3=True) or {}
+            # A failed read looks exactly like a flat account (empty
+            # asset_positions). Require positive equity to trust the read:
+            # on a read failure the tracker + SL/TP bracket MUST stay —
+            # rehydrate_from_exchange reconciles next cycle.
+            post_equity = 0.0
+            try:
+                post_equity = float(post.get("equity") or 0)
+            except (TypeError, ValueError):
+                post_equity = 0.0
+            if post_equity <= 0:
+                logger.error(f"[executor] {coin} close: no fill evidence AND "
+                             f"post-close account read failed/empty — cannot "
+                             f"confirm flat; tracker + bracket KEPT (reconciles "
+                             f"next cycle)")
+                out["noop"] = "no_fill_postread_failed"
+                return out
+            post_pos = next(
+                (p for p in post.get("asset_positions", [])
+                 if p.get("position", {}).get("coin") == coin),
+                None,
+            )
+            post_szi = 0.0
+            if post_pos:
+                try:
+                    post_szi = float(post_pos["position"].get("szi", "0") or 0)
+                except (TypeError, ValueError):
+                    post_szi = 0.0
+            if post_szi != 0:
+                # Still open — the order simply didn't match. Keep the tracker
+                # and its SL/TP; monitor_exits re-evaluates next tick.
+                logger.warning(f"[executor] {coin} close: no fill evidence and "
+                               f"position still {post_szi:g} — no-op, tracker kept")
+                out["noop"] = "no_fill_position_still_open"
+                return out
+            # Confirmed flat: drop the stale tracker and stranded bracket.
+            deregister_position(coin, side)
+            cancel_open_orders_for_coin(coin)
+            out["noop"] = "no_fill_position_already_flat"
+            return out
+
+        # Partial-fill check: an IOC can match less than the requested size if
+        # the book thins between the L2 read and the fill. total_sz absent (0)
+        # = size unknown → treat as a full close (legacy behavior).
+        try:
+            _filled_sz = float(res.get("total_sz") or 0)
+        except (TypeError, ValueError):
+            _filled_sz = 0.0
+        _requested_sz = abs(szi)
+        _partial = 0 < _filled_sz < _requested_sz
+        _closed_sz = _filled_sz if _partial else _requested_sz
+        if not _partial:
+            # Full close — drop the tracker and clear the stranded reduce-only
+            # SL/TP bracket so stale orders don't reject a future reduce-only
+            # order on this coin.
+            deregister_position(coin, side)
+            cancel_open_orders_for_coin(coin)
         if fill_px and entry_px > 0:
+            # Book the realized slice at the actual fill price (avg_px), not the
+            # pre-trade mid, on exactly what closed.
             # Spot move from the perspective of the position: long earns when
             # mark rises, short earns when mark falls.
             if is_long:
@@ -1532,7 +1620,7 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
             # Single chokepoint → covers DSL, AI-close, and kill-switch exits.
             # Wrapped: a bookkeeping failure must never abort a close.
             try:
-                _notional_entry = abs(szi) * entry_px
+                _notional_entry = _closed_sz * entry_px
                 _closed_at = int(time.time() * 1000)
                 # Pull the entry-context snapshot (entry time + signals at entry +
                 # enforcement) so this outcome row is self-contained for the forward
@@ -1556,7 +1644,7 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
                 memory.record_close({
                     "coin": coin, "side": side,
                     "entry_px": entry_px, "exit_px": fill_px,
-                    "size_coin": abs(szi), "notional_usd": round(_notional_entry, 4),
+                    "size_coin": _closed_sz, "notional_usd": round(_notional_entry, 4),
                     "spot_pct": out["spot_pct"],
                     "realized_pnl_pct": out["realized_pnl_pct"],   # leveraged, net fees
                     "realized_pnl_usd": round(_net_pnl_usd, 4),

@@ -475,23 +475,101 @@ def test_dsl_rehydrate_from_exchange(monkeypatch, tmp_path):
 
 
 def test_dsl_close_helper_deregisters(monkeypatch, tmp_path):
-    """close_position_market deregisters the tracker on a successful close."""
+    """close_position_market deregisters the tracker when the post-close
+    re-read confirms the exchange is flat (no-fill-evidence path)."""
     from hermes_trader.agents import dsl_exit, executor
     dsl_exit, _ = _isolate_dsl_state(monkeypatch, tmp_path)
     dsl_exit.register_position("ETH", "long", 100.0)
 
     monkeypatch.setattr(executor, "resolve_user_address", lambda: "0xUSER")
-    monkeypatch.setattr(executor, "fetch_account_state", lambda u, **kw: {
-        "asset_positions": [{"position": {"coin": "ETH", "szi": "0.5", "entryPx": "100"}}],
-    })
+    # Pre-close snapshot shows the open position; the no-fill verification
+    # re-read (second call) shows the book flat → safe to drop the tracker.
+    states = iter([
+        {"asset_positions": [{"position": {"coin": "ETH", "szi": "0.5", "entryPx": "100"}}]},
+        {"equity": 1000.0, "asset_positions": []},
+    ])
+    monkeypatch.setattr(executor, "fetch_account_state", lambda u, **kw: next(states))
     monkeypatch.setattr(executor, "get_hl_price", lambda c: 99.0)
     monkeypatch.setattr(executor, "place_hl_order",
                         lambda is_buy, size, mid_price, coin, **kw: {"ok": True, "order_id": "x1"})
+    monkeypatch.setattr(executor, "cancel_open_orders_for_coin", lambda c: 0)
 
     res = executor.close_position_market("ETH")
     assert res["ok"] is True
     assert res["side"] == "long"
+    assert res["noop"] == "no_fill_position_already_flat"
     assert "ETH_long" not in dsl_exit._active_positions
+    assert "realized_pnl_pct" not in res   # no fill evidence → no PnL booked
+
+
+def test_close_noop_keeps_tracker_when_position_still_open(monkeypatch, tmp_path):
+    """A reduce-only close with NO fill evidence AND the position still open on
+    the exchange is a no-op: tracker + SL/TP stay, nothing is booked. (The
+    2026-08-23 incident: CLOSE rows were written for an ARB short that the
+    exchange never held.)"""
+    from hermes_trader.agents import dsl_exit, executor
+    dsl_exit, _ = _isolate_dsl_state(monkeypatch, tmp_path)
+    dsl_exit.register_position("ETH", "long", 100.0)
+
+    monkeypatch.setattr(executor, "resolve_user_address", lambda: "0xUSER")
+    # Both the pre-read and the no-fill verification re-read show it still open.
+    monkeypatch.setattr(executor, "fetch_account_state", lambda u, **kw: {
+        "equity": 1000.0,
+        "asset_positions": [{"position": {"coin": "ETH", "szi": "0.5", "entryPx": "100"}}],
+    })
+    monkeypatch.setattr(executor, "get_hl_price", lambda c: 99.0)
+    # ok:True with no avgPx — the IOC matched nothing.
+    monkeypatch.setattr(executor, "place_hl_order",
+                        lambda is_buy, size, mid_price, coin, **kw: {"ok": True})
+    ledger_rows = []
+    monkeypatch.setattr(executor, "record_close", lambda **kw: ledger_rows.append(kw))
+    cancelled = []
+    monkeypatch.setattr(executor, "cancel_open_orders_for_coin",
+                        lambda c: cancelled.append(c) or 0)
+
+    res = executor.close_position_market("ETH")
+    assert res["ok"] is True
+    assert res["noop"] == "no_fill_position_still_open"
+    assert "ETH_long" in dsl_exit._active_positions      # tracker kept
+    assert ledger_rows == []                             # no realized-PnL row
+    assert cancelled == []                               # SL/TP bracket left alone
+    assert "realized_pnl_pct" not in res
+
+
+def test_close_partial_fill_books_slice_keeps_tracker(monkeypatch, tmp_path):
+    """An IOC close that matches LESS than requested books the realized slice
+    on what actually filled (total_sz) and keeps the tracker for the residual —
+    never full-position PnL on a partial close."""
+    from hermes_trader.agents import dsl_exit, executor
+    dsl_exit, _ = _isolate_dsl_state(monkeypatch, tmp_path)
+    dsl_exit.register_position("ARB", "short", 0.11684, leverage=10)
+
+    monkeypatch.setattr(executor, "resolve_user_address", lambda: "0xUSER")
+    monkeypatch.setattr(executor, "fetch_account_state", lambda u, **kw: {
+        "asset_positions": [{"position": {"coin": "ARB", "szi": "-1000", "entryPx": "0.11684"}}],
+    })
+    monkeypatch.setattr(executor, "get_hl_price", lambda c: 0.10522)
+    # Fills 400 of the 1000 requested (book thinned).
+    monkeypatch.setattr(executor, "place_hl_order",
+                        lambda is_buy, size, mid_price, coin, **kw: {
+                            "ok": True, "order_id": "999",
+                            "avg_px": 0.10522, "total_sz": 400.0,
+                        })
+    recorded = []
+    monkeypatch.setattr(executor.memory, "record_close", lambda c: recorded.append(c))
+    monkeypatch.setattr(executor.memory, "pop_entry_context", lambda coin, side: {})
+    ledger_rows = []
+    monkeypatch.setattr(executor, "record_close", lambda **kw: ledger_rows.append(kw))
+    monkeypatch.setattr(executor, "cancel_open_orders_for_coin", lambda c: 0)
+
+    res = executor.close_position_market("ARB")
+    assert res["ok"] is True
+    assert res["fill_px"] == 0.10522
+    # Notional booked on the 400 that filled (400 × 0.11684 = 46.736), not 116.84.
+    assert ledger_rows and ledger_rows[0]["notional_usd"] == round(400.0 * 0.11684, 4)
+    assert recorded and recorded[0]["size_coin"] == 400.0
+    # Residual still open → tracker kept (DSL closes it next tick), bracket intact.
+    assert "ARB_short" in dsl_exit._active_positions
 
 
 def test_close_position_market_computes_realized_pnl_from_fill(monkeypatch, tmp_path):
@@ -518,6 +596,7 @@ def test_close_position_market_computes_realized_pnl_from_fill(monkeypatch, tmp_
     recorded = []
     monkeypatch.setattr(executor.memory, "record_close", lambda c: recorded.append(c))
     monkeypatch.setattr(executor.memory, "pop_entry_context", lambda coin, side: {})
+    monkeypatch.setattr(executor, "cancel_open_orders_for_coin", lambda c: 0)
 
     res = executor.close_position_market("ARB")
     assert res["ok"] is True
@@ -534,6 +613,22 @@ def test_close_position_market_computes_realized_pnl_from_fill(monkeypatch, tmp_
     assert abs(recorded[0]["fee_usd"] - 0.0584) < 0.001
     assert abs(recorded[0]["realized_pnl_usd"] - 11.5616) < 0.01
     assert "ARB_short" not in dsl_exit._active_positions
+
+
+def test_maybe_execute_no_fill_books_nothing(monkeypatch):
+    """An IOC entry that returns ok with NO fill detail must not register a
+    tracker or book a ledger OPEN — the exchange may never have held the
+    position (2026-08-23: 16 fixture OPEN rows with order_id OID1 were written
+    for BTC the exchange never traded)."""
+    ex, _, _ = _exec_baseline(monkeypatch)
+    monkeypatch.setattr(ex, "place_hl_order",
+                        lambda *a, **k: {"ok": True, "order_id": "OID-NOFILL"})
+    ledger_rows = []
+    monkeypatch.setattr(ex, "record_open", lambda **kw: ledger_rows.append(kw))
+    r = ex.maybe_execute(_analysis())
+    assert r["executed"] is False
+    assert "no_fill" in r["reason"]
+    assert ledger_rows == []
 
 
 # ── market regime + gate ─────────────────────────────────────────────────

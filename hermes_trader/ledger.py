@@ -21,7 +21,17 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 _LOG_DIR = "/app/log"
-LEDGER_FILE = os.path.join(_LOG_DIR, "trades.jsonl")
+# Override with HERMES_LEDGER_FILE when the default is not the live ledger.
+# Tests MUST set this (tests/conftest.py): the 2026-06-15 incident pattern —
+# memory/config/DSL state got env overrides after a pytest run clobbered live
+# state files — was applied to the ledger late: on 2026-08-23 a pytest run in
+# the container wrote fixture OPEN/CLOSE rows (order_id OID1, ARB short @
+# 0.11684) into the live /app/log/trades.jsonl because this path was the only
+# state file with no test isolation.
+LEDGER_FILE = os.environ.get(
+    "HERMES_LEDGER_FILE",
+    os.path.join(_LOG_DIR, "trades.jsonl"),
+)
 
 
 def _append_event(event_type: str, data: Dict[str, Any]) -> None:
