@@ -366,6 +366,22 @@ def cmd_version():
     print(f"  Hermes-Trader v{__version__}\n")
 
 
+def cmd_duel():
+    """A/B report: the primary LLM vs the duelist LLM on the same prompts."""
+    from hermes_trader.agents import duel_store
+    if not duel_store.duelist_enabled():
+        print_banner()
+        print("  Model duel: DISABLED")
+        print()
+        print("  Set the duelist endpoint to enable A/B evaluation, e.g.:")
+        print("    LLM_DUEL_BASE_URL=...   LLM_DUEL_MODEL=...   LLM_DUEL_API_KEY=...")
+        print("  (base_url/api_key fall back to the primary LLM_* values)")
+        print()
+        return
+    duel_store.print_report()
+    print()
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 COMMANDS = {
@@ -379,6 +395,7 @@ COMMANDS = {
     "start": cmd_start,
     "stop": cmd_stop,
     "version": cmd_version,
+    "duel": cmd_duel,
 }
 
 
@@ -393,6 +410,7 @@ def main():
         print("    execute            Execute trade from last analysis")
         print("    status             Show agent state, positions, config")
         print("    trades             Show trade history")
+        print("    duel               A/B report: primary vs duelist LLM")
         print("    account            Show HL account state")
         print("    config [K=V ...]   Show or set config values")
         print("    start              Start autonomous scanning loop")

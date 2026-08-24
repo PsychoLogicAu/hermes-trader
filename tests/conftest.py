@@ -24,3 +24,13 @@ os.environ["HERMES_AGENT_MEMORY_FILE"] = os.path.join(_tmp, ".agent-memory.json"
 os.environ["HERMES_AGENT_CONFIG_FILE"] = os.path.join(_tmp, ".agent-config.json")
 os.environ["HERMES_DSL_STATE_FILE"] = os.path.join(_tmp, ".dsl-state.json")
 os.environ["HERMES_LEDGER_FILE"] = os.path.join(_tmp, "trades.jsonl")
+# 2026-08-25: the model-duel store (A/B LLM evaluation) got the same treatment —
+# HERMES_DUEL_FILE is read at duel_store.py import time, and research.py
+# imports it, so an unset var would let a test that calls research() write
+# paired-verdict rows into the live ~/.hermes-trader-duel.jsonl.
+os.environ["HERMES_DUEL_FILE"] = os.path.join(_tmp, ".hermes-trader-duel.jsonl")
+# Force the duelist OFF regardless of the dev shell: with a duelist model
+# exported, any test touching research() would fire a second (real) LLM call.
+# DELETE (not empty-string) so a dev-shell export can't leak through — a test
+# that wants the duelist enables it via monkeypatch.setenv.
+os.environ.pop("LLM_DUEL_MODEL", None)

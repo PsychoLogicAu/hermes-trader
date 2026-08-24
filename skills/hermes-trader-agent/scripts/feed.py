@@ -80,6 +80,16 @@ def _fmt_event(e: dict) -> str:
         v = e.get("verdict")
         c = e.get("confidence", 0)
         return f"[{ts}] ?  research   {e.get('coin')} → {v} (conf {c})"
+    if ev == "duel":
+        mark = "✓" if e.get("agree") else "≈"
+        line = (f"[{ts}] {mark}  duel       {e.get('coin')}  "
+                f"primary {e.get('primary_verdict')} vs duelist "
+                f"{e.get('duelist_verdict')}  ({e.get('duelist_model') or '?'})")
+        # Latency (ms) on both calls — only present on events written after
+        # tracking shipped; omit the suffix rather than print "?".
+        if e.get("primary_ms") is not None or e.get("duelist_ms") is not None:
+            line += f"  {e.get('primary_ms', '?')}ms / {e.get('duelist_ms', '?')}ms"
+        return line
     if ev == "execute":
         ok = "✓" if e.get("executed") else "✗"
         return (f"[{ts}] {ok}  execute    {e.get('coin')} {e.get('side','?')}  "
