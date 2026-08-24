@@ -79,6 +79,9 @@ python-service/logs/
 sentient-trader-mcp/dist/
 sentient-trader-mcp/*.egg-info/
 
+# pip/editable build artifacts
+*.egg-info/
+
 # Dev/scratch scripts
 python-service/backtest_67c.py
 python-service/test_tiered_kelly.py

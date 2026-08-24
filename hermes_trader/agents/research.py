@@ -16,6 +16,12 @@ from typing import Any, Dict, List
 import httpx
 
 from hermes_trader.agents.config_store import read_agent_config
+from hermes_trader.agents.duel_store import (
+    call_duelist,
+    duelist_config,
+    duelist_enabled,
+    record_duel,
+)
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.system_prompt import build_system_prompt
 from hermes_trader.client.hl_client import (
@@ -400,11 +406,26 @@ def _build_user_message(
     ])
 
 
-def _call_ai(system_prompt: str, user_message: str) -> str:
-    """Call the LLM API (runs the async client in a fresh event loop)."""
-    api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
-    base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-    model = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+def _call_ai(
+    system_prompt: str,
+    user_message: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Call the LLM API (runs the async client in a fresh event loop).
+
+    Endpoint resolution: explicit args win, otherwise the primary LLM_* env
+    vars. The duelist (duel_store.call_duelist) uses its own LLM_DUEL_* values
+    through this same code path — the prompt is byte-identical, which is what
+    makes the A/B verdicts comparable.
+    """
+    if api_key is None:
+        api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
+    if base_url is None:
+        base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
+    if model is None:
+        model = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
 
     if not api_key:
         logger.warning("[research] LLM_API_KEY not set — returning empty response")
@@ -415,6 +436,72 @@ def _call_ai(system_prompt: str, user_message: str) -> str:
         return loop.run_until_complete(_async_do_call(api_key, base_url, model, system_prompt, user_message))
     finally:
         loop.close()
+
+
+def _duelist_verdict(
+    system_prompt: str,
+    user_message: str,
+    coin: str,
+    perception: Dict[str, Any],
+    primary_verdict: str,
+    primary_confidence: float,
+    primary_ms: int = 0,
+) -> Dict[str, Any] | None:
+    """Run the A/B duelist: the SAME prompt to the second model, recorded but
+    never used. Returns the parsed verdict dict (for the session-log event +
+    the entry-context snapshot), or None when the duelist is disabled/failed.
+
+    Best-effort end to end: a duelist outage logs a warning and returns None —
+    the primary path above has already produced the verdict that executes, so
+    nothing downstream depends on this.
+    """
+    try:
+        if not duelist_enabled():
+            return None
+        cfg = duelist_config()
+        _dl_t0 = time.monotonic()
+        dl_text = call_duelist(cfg["api_key"], cfg["base_url"], cfg["model"],
+                               system_prompt, user_message)
+        duelist_ms = int((time.monotonic() - _dl_t0) * 1000)
+        # Empty text = the duelist call failed (402/429/timeout — call_duelist
+        # swallows errors and returns ""). parse_verdict would tag it
+        # verdict=PASS/ai_down, which would log a bogus "AGREE" row against a
+        # primary that said PASS. A failed duelist is "no observation", not an
+        # opinion — record nothing.
+        if not (dl_text or "").strip():
+            logger.warning(f"[duel] {coin}: duelist returned no text — not recorded")
+            return None
+        dl_parsed = parse_verdict(dl_text, coin, perception)
+        row = {
+            "coin": coin,
+            "perception_id": perception.get("id", "unknown"),
+            "mode": str(read_agent_config().get("mode", "OFF")),
+            "primary_model": os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "")),
+            "duelist_model": cfg["model"],
+            "primary_verdict": primary_verdict,
+            "primary_confidence": primary_confidence,
+            "duelist_verdict": dl_parsed["verdict"],
+            "duelist_confidence": dl_parsed["confidence"],
+            "duelist_side": dl_parsed["side"],
+            "duelist_reasoning": (dl_parsed["reasoning"] or "")[:300],
+            # Wall time of each LLM call (ms) — the same prompt to both
+            # models, so latency is a directly comparable A/B dimension
+            # (a faster model with equal accuracy can change cycle budget).
+            "primary_ms": int(primary_ms or 0),
+            "duelist_ms": duelist_ms,
+        }
+        record_duel(row)
+        logger.info(
+            f"[duel] {coin}: primary {primary_verdict} "
+            f"(conf {primary_confidence:.2f}, {row['primary_ms']}ms) "
+            f"vs duelist {row['duelist_verdict']} "
+            f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms) — "
+            f"{'AGREE' if row['duelist_verdict'] == primary_verdict else 'SPLIT'}"
+        )
+        return row
+    except Exception as e:  # noqa: BLE001 — the primary verdict is already in hand
+        logger.warning(f"[duel] duelist hook failed for {coin} (non-fatal): {e!r}")
+        return None
 
 
 async def _async_do_call(
@@ -666,8 +753,37 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         dex_equity=dex_equity, recent_candles=c1h,
     )
 
+    ai_t0 = time.monotonic()
     ai_text = _call_ai(system_prompt, user_message)
+    primary_ms = int((time.monotonic() - ai_t0) * 1000)
     parsed = parse_verdict(ai_text, coin, perception)
+
+    # A/B duelist: the SAME prompt to the second model, recorded but never
+    # used. Runs AFTER the primary verdict so a duelist outage (slow 9B server
+    # included) can never delay or break execution. `duelist_at_entry` is
+    # carried into the analysis dict → executor's entry-context snapshot →
+    # the outcome store's close row, which is the join the A/B report
+    # (duel_store.aggregate) keys on.
+    duelist_row = _duelist_verdict(
+        system_prompt, user_message, coin, perception,
+        parsed["verdict"], parsed["confidence"],
+        primary_ms=primary_ms,
+    )
+    if duelist_row is not None:
+        try:
+            from hermes_trader.session_log import append as _log_event
+            _log_event({
+                "event": "duel", "coin": coin,
+                "primary_verdict": duelist_row["primary_verdict"],
+                "duelist_verdict": duelist_row["duelist_verdict"],
+                "primary_model": duelist_row["primary_model"],
+                "duelist_model": duelist_row["duelist_model"],
+                "agree": duelist_row["duelist_verdict"] == duelist_row["primary_verdict"],
+                "primary_ms": duelist_row["primary_ms"],
+                "duelist_ms": duelist_row["duelist_ms"],
+            })
+        except Exception:
+            pass
 
     analysis = {
         "id": str(uuid.uuid4()),
@@ -687,6 +803,20 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         # Failure-PASS marker — must survive this whitelist or the executor's
         # override guard never sees it (it didn't, on first deploy).
         "ai_down": bool(parsed.get("ai_down")),
+        # A/B duelist verdict (None when the duelist is disabled/failed). Must
+        # survive this whitelist: the executor snapshots it into the entry
+        # context so the close row can attribute the same trade to the second
+        # model. Carries only verdict-level data — the full reasoning lives in
+        # the duel JSONL to keep the analysis (and the memory file) lean.
+        "duelist_at_entry": (
+            {
+                "model": duelist_row["duelist_model"],
+                "verdict": duelist_row["duelist_verdict"],
+                "confidence": duelist_row["duelist_confidence"],
+                "side": duelist_row["duelist_side"],
+            }
+            if duelist_row is not None else None
+        ),
         "created_at": int(time.time() * 1000),
         # Carry forward so risk gates can read own-coin signal strength.
         "composite_score": float(perception.get("composite_score", 0) or 0),

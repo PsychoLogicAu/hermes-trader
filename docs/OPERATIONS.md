@@ -74,7 +74,9 @@ docker compose up -d --force-recreate hermes-trader
 Code is **baked into the image** (not bind-mounted). Procedure:
 
 1. Commit the change.
-2. `docker compose build hermes-trader`
+2. `scripts/build.sh` (builds with this host's uid/gid — the image bakes in
+   the container user at build time, so a plain `docker compose build` would
+   default to 1000:1000)
 3. `docker compose up -d --force-recreate hermes-trader`
 4. Verify inside the container that the new code is present:
    `docker exec hermes-trader grep <new_symbol> /app/hermes_trader/...`

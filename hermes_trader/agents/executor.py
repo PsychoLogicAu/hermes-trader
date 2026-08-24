@@ -1194,6 +1194,12 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             "override_bar": override_composite,
             "forced_override": analysis.get("verdict") == "LONG"
                                and "[structural override]" in (analysis.get("reasoning") or ""),
+            # A/B duelist: the second model's verdict on the SAME prompt, so the
+            # close row can score it on this exact trade. None when disabled.
+            "duelist": analysis.get("duelist_at_entry"),
+            # Join key back to the perception (+ the duel log row that holds
+            # both models' full reasoning for this trade).
+            "perception_id": analysis.get("perception_id"),
         })
     except Exception as _ec_e:
         logger.debug(f"[executor] entry-context capture failed (non-fatal): {_ec_e}")
@@ -1715,6 +1721,11 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
                                       if (fill_px and mid_price) else None),
                     "regime_at_entry": _ec.get("regime"),
                     "is_hip3": ":" in coin,
+                    # A/B duelist: the second model's verdict at entry (see
+                    # research.py's duelist_at_entry). The duel report computes
+                    # its hypothetical P&L from this + the realized fields.
+                    "duelist_at_entry": _ec.get("duelist"),
+                    "perception_id": _ec.get("perception_id"),
                     # funding carry: rate_hr × hold_hrs × notional × side (long pays
                     # when rate>0). Estimate (entry-rate held constant over the hold).
                     "funding_cost_usd": _funding_cost_usd,

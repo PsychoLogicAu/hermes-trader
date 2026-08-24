@@ -33,7 +33,8 @@ docker info                   # Docker must be running
 ## 1. Build the image and load it into kind
 
 ```bash
-# from the repo root
+# from the repo root — default build args (user 1000:1000) match the
+# fsGroup: 1000 in the statefulset
 docker build -t hermes-trader:local .
 kind create cluster --name hermes
 kind load docker-image hermes-trader:local --name hermes
