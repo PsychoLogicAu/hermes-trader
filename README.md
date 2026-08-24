@@ -55,8 +55,9 @@ docker compose restart hermes-trader
 # Stop
 docker compose down
 
-# Rebuild + re-run (after code changes)
-docker compose build hermes-trader && docker compose up -d --force-recreate hermes-trader
+# Rebuild + re-run (after code changes) — build.sh matches the container
+# user to this host's uid/gid so the bind-mounted volume dirs stay writable
+scripts/build.sh && docker compose up -d --force-recreate hermes-trader
 
 # Tail logs live
 docker compose logs -f hermes-trader
@@ -177,6 +178,29 @@ context, which is plenty for the analyst prompt. A reference
 `docker-compose.yml` for the lemonade side, plus the matching `.env.local`
 values (`LLM_BASE_URL=http://lemond:13305/api/v1`), live in
 [`docs/OPERATIONS.md`](docs/OPERATIONS.md#external-llm-reference).
+
+### Model Duel (A/B LLM Evaluation)
+
+A second LLM can be run against the **exact same research prompt** as a pure
+observer — A/B evaluation of model performance. The duelist never executes and
+never gates: it runs after the primary verdict, so its slowness or outages can
+neither delay nor break trading, and a failed call simply logs no observation.
+
+- **Enable**: set `LLM_DUEL_MODEL` in `.env.local` (one line; base URL and API
+  key inherit the primary `LLM_*` values, so dueling a different model on the
+  same server needs nothing else). Feature is dormant unless the model is set.
+- **Record**: every paired call appends to `~/.hermes-trader-duel.jsonl`
+  (both verdicts, confidences, reasoning excerpts, agree/split) and emits a
+  `duel` event to the session log (`✓ agree` / `≈ split`).
+- **Score**: the duelist's verdict is snapshotted into the trade's entry
+  context, so when a position closes the close row carries it. The report then
+  computes the duelist's *hypothetical* P&L on the same trades: concurs with
+  the live side → same P&L; opposes → mirrored; PASS/CLOSE → 0 (a win only if
+  the live side lost).
+- **Read**: `hermes duel` prints paired-call agreement plus both models'
+  realized stats (trades, win rate, P&L, avg win/loss). The primary is
+  unaffected and always scores every close; the duelist scores only the closes
+  it has a verdict for.
 
 ### Shadow-Mode Signal Suite
 
