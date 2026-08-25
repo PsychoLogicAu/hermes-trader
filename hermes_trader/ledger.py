@@ -58,9 +58,17 @@ def record_open(
     order_id: str | None,
     leverage: int,
     analysis_id: str | None = None,
+    perception_id: str | None = None,
     config_snapshot: Dict[str, Any] | None = None,
 ) -> None:
-    """Record an opening trade."""
+    """Record an opening trade.
+
+    perception_id is the join key to the duel perception log
+    (duel-logs/hermes-trader-duel.jsonl) — the A/B LLM evaluation artifact.
+    Without it, ledger rows could only be mapped to duel rows via the capped,
+    ephemeral analyses[] bridge in .agent-memory.json, which decays after
+    MAX_ANALYSES rollover and makes old rows permanently unjoinable.
+    """
     _append_event("OPEN", {
         "coin": coin,
         "side": side,
@@ -69,6 +77,7 @@ def record_open(
         "order_id": order_id,
         "leverage": leverage,
         "analysis_id": analysis_id,
+        "perception_id": perception_id,
         "config_snapshot": config_snapshot,
     })
 
@@ -88,8 +97,14 @@ def record_close(
     funding_cost_usd: float | None = None,
     exit_reason: str | None = None,
     exit_type: str | None = None,
+    perception_id: str | None = None,
 ) -> None:
-    """Record a closing trade with full realized details."""
+    """Record a closing trade with full realized details.
+
+    perception_id carries the join key back to the duel perception log so
+    closed rows can be mapped to the paired A/B verdict directly (no
+    .agent-memory.json bridge).
+    """
     _append_event("CLOSE", {
         "coin": coin,
         "side": side,
@@ -105,4 +120,5 @@ def record_close(
         "funding_cost_usd": funding_cost_usd,
         "exit_reason": exit_reason,
         "exit_type": exit_type,
+        "perception_id": perception_id,
     })

@@ -1140,6 +1140,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             order_id=order_res.get("order_id"),
             leverage=leverage,
             analysis_id=analysis.get("id"),
+            perception_id=analysis.get("perception_id"),
             config_snapshot={
                 "regime": _regime,
                 "exit_policy_label": _ex_label,
@@ -1747,6 +1748,7 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
                         funding_cost_usd=_funding_cost_usd,
                         exit_reason=exit_reason or None,
                         exit_type=_exit_type(exit_reason),
+                        perception_id=_ec.get("perception_id"),
                     )
                 except Exception as _lc_e:
                     logger.debug(f"[executor] ledger record_close failed (non-fatal): {_lc_e}")
