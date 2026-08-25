@@ -57,6 +57,7 @@ def simulate(coin, candles, max_lev, *, policy, cfg, equity, equity_fraction,
                       if open_t["side"] == "long"
                       else (open_t["entry_px"] - exit_px) / open_t["entry_px"])
                 open_t["exit_px"] = exit_px
+                open_t["exit_bar"] = i + 1
                 open_t["pnl_usd"] = open_t["notional"] * (gp - fee)
                 open_t["reason"] = reason
                 trades.append(open_t)
@@ -103,7 +104,8 @@ def simulate(coin, candles, max_lev, *, policy, cfg, equity, equity_fraction,
         rt = ride_retrace if use_ride else retrace_threshold
         open_t = {"coin": coin, "side": side, "entry_px": next_bar.o,
                   "notional": notional, "leverage": lev, "exit_px": None,
-                  "pnl_usd": 0.0, "reason": "", "is_reentry": is_reentry}
+                  "entry_bar": i + 1, "pnl_usd": 0.0, "reason": "",
+                  "is_reentry": is_reentry}
         open_dsl = DSL(side=side, entry_px=next_bar.o, entry_bar=i + 1,
                        peak_px=next_bar.o, max_loss_pct=max_loss_pct,
                        protect_pct=pp, retrace_threshold=rt)
