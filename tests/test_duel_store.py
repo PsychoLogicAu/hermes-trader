@@ -86,6 +86,16 @@ def _read_events(p):
 def test_dormant_when_no_duelist_model(monkeypatch):
     monkeypatch.delenv("LLM_DUEL_MODEL", raising=False)
     monkeypatch.delenv("LLM_DUKE_MODEL", raising=False)
+    # The duelist URL/key must also be cleared: test_cleanup imports
+    # hermes_trader.server, whose import-time _load_env_local_early() does
+    # os.environ.setdefault() from .env.local — which now carries
+    # LLM_DUEL_BASE_URL. conftest pops the vars before collection, but that
+    # import re-leaks them mid-session, and duelist_config() reads env at CALL
+    # time, so test order would otherwise decide the outcome.
+    monkeypatch.delenv("LLM_DUEL_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_DUKE_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_DUEL_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_DUKE_API_KEY", raising=False)
     monkeypatch.setenv("LLM_MODEL", "primary-model")
     assert not ds.duelist_enabled()
     cfg = ds.duelist_config()

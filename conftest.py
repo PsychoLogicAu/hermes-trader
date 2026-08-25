@@ -33,3 +33,13 @@ os.environ["HERMES_AGENT_MEMORY_FILE"] = os.path.join(_tmp, ".agent-memory.json"
 os.environ["HERMES_AGENT_CONFIG_FILE"] = os.path.join(_tmp, ".agent-config.json")
 os.environ["HERMES_DSL_STATE_FILE"] = os.path.join(_tmp, ".dsl-state.json")
 os.environ["HERMES_LEDGER_FILE"] = os.path.join(_tmp, "trades.jsonl")
+os.environ["HERMES_DUEL_FILE"] = os.path.join(_tmp, ".hermes-trader-duel.jsonl")
+# The model-duel feature (2026-08-25) reads LLM_DUEL_* at call time, and the
+# .env.local setdefault above leaks the live values into the test env. DELETE
+# them (not empty-string) so a dev shell or .env.local export can't make a
+# test fire a real second LLM call; a test that wants the duelist enables it
+# via monkeypatch.setenv.
+os.environ.pop("LLM_DUEL_MODEL", None)
+os.environ.pop("LLM_DUKE_MODEL", None)
+os.environ.pop("LLM_DUEL_BASE_URL", None)
+os.environ.pop("LLM_DUEL_API_KEY", None)
