@@ -228,6 +228,26 @@ def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["chronos_error"] = str(e)
 
 
+def build_open_config_snapshot(regime: str, exit_policy_label: str,
+                               sl_atr_mult: float, tp_atr_mult: float) -> Dict[str, Any]:
+    """Build the OPEN-row config snapshot for the append-only ledger.
+
+    Cooldown windows are read FRESH from .agent-config.json (not a cached
+    module-level copy) because the file hot-reloads every cycle, and the
+    snapshot's whole job is to let a future incident be reconstructed
+    without guessing what was in effect at entry time.
+    """
+    _live = read_agent_config()
+    return {
+        "regime": regime,
+        "exit_policy_label": exit_policy_label,
+        "sl_atr_mult": sl_atr_mult,
+        "tp_atr_mult": tp_atr_mult,
+        "cooldown_min": _live.get("cooldown_min"),
+        "loss_cooldown_min": _live.get("loss_cooldown_min"),
+    }
+
+
 @_serialized
 def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Dict[str, Any]:
     """Execute an analysis through risk gates and into the market.
@@ -1096,12 +1116,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             leverage=leverage,
             analysis_id=analysis.get("id"),
             perception_id=analysis.get("perception_id"),
-            config_snapshot={
-                "regime": _regime,
-                "exit_policy_label": _ex_label,
-                "sl_atr_mult": _sl_mult,
-                "tp_atr_mult": TP_ATR_MULT,
-            },
+            config_snapshot=build_open_config_snapshot(
+                _regime, _ex_label, _sl_mult, TP_ATR_MULT),
         )
     except Exception as _le:
         logger.debug(f"[executor] ledger record_open failed (non-fatal): {_le}")
