@@ -122,6 +122,9 @@ log.txt
 # Hermes trader logs (datestamped, rotated, unlimited)
 trader-logs/
 
+# Duel A/B log (bind-mounted, runtime JSONL)
+duel-logs/
+
 # HuggingFace model cache (mounted into container; binary, re-downloadable)
 hf-cache/
 

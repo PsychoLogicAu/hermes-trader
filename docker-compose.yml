@@ -8,6 +8,10 @@ services:
       - .env.local:/app/.env.local:ro
       - .agent-config.json:/app/.agent-config.json:ro
       - ./trader-logs:/app/log:rw
+      # A/B model-duel log (duel_store.py appends; HERMES_DUEL_FILE below).
+      # Directory mount per the EBUSY rule; the file is pre-created host-side
+      # (scripts/build.sh) so append-only writes work.
+      - ./duel-logs:/app/duel-logs:rw
       # Persistent HF model cache so Chronos-2 loads from disk (no re-download
       # on rebuild/restart). Seeded from the container on first use.
       - ./hf-cache:/home/trader/.cache/huggingface:rw
@@ -25,6 +29,9 @@ services:
       - HERMES_AGENT_MEMORY_FILE=/data/.agent-memory.json
       - HERMES_DSL_STATE_FILE=/data/.dsl-state.json
       - HERMES_POSITIONS_SNAPSHOT_FILE=/data/.positions-snapshot.json
+      # Model-duel A/B log — on a bind mount so it survives rebuilds
+      # (default ~/.hermes-trader-duel.jsonl sits on the writable layer).
+      - HERMES_DUEL_FILE=/app/duel-logs/hermes-trader-duel.jsonl
     networks:
       - llama-net
     restart: unless-stopped
