@@ -43,13 +43,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# Env var names (DUKE prefix kept as an alias: this is the second,
-# observation-only model). Read at CALL time — mirroring _call_ai's primary
-# LLM_* handling — so a test can monkeypatch the env and a running process
-# picks up a new duelist model without a restart.
-_DUEL_URL_VARS = ("LLM_DUEL_BASE_URL", "LLM_DUKE_BASE_URL")
-_DUEL_MODEL_VARS = ("LLM_DUEL_MODEL", "LLM_DUKE_MODEL")
-_DUEL_KEY_VARS = ("LLM_DUEL_API_KEY", "LLM_DUKE_API_KEY")
+# Env var names (DUEL prefix: this is the second, observation-only model).
+# Read at CALL time — mirroring _call_ai's primary LLM_* handling — so a
+# test can monkeypatch the env and a running process picks up a new duelist
+# model without a restart.
+_DUEL_URL_VARS = ("LLM_DUEL_BASE_URL",)
+_DUEL_MODEL_VARS = ("LLM_DUEL_MODEL",)
+_DUEL_KEY_VARS = ("LLM_DUEL_API_KEY",)
 
 # Overridable for tests (mirrors HERMES_LEDGER_FILE / HERMES_AGENT_MEMORY_FILE).
 _DUEL_FILE = os.environ.get(

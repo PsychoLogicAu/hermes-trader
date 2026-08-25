@@ -40,6 +40,5 @@ os.environ["HERMES_DUEL_FILE"] = os.path.join(_tmp, ".hermes-trader-duel.jsonl")
 # test fire a real second LLM call; a test that wants the duelist enables it
 # via monkeypatch.setenv.
 os.environ.pop("LLM_DUEL_MODEL", None)
-os.environ.pop("LLM_DUKE_MODEL", None)
 os.environ.pop("LLM_DUEL_BASE_URL", None)
 os.environ.pop("LLM_DUEL_API_KEY", None)

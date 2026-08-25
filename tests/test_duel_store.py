@@ -85,7 +85,6 @@ def _read_events(p):
 
 def test_dormant_when_no_duelist_model(monkeypatch):
     monkeypatch.delenv("LLM_DUEL_MODEL", raising=False)
-    monkeypatch.delenv("LLM_DUKE_MODEL", raising=False)
     # The duelist URL/key must also be cleared: test_cleanup imports
     # hermes_trader.server, whose import-time _load_env_local_early() does
     # os.environ.setdefault() from .env.local — which now carries
@@ -93,9 +92,7 @@ def test_dormant_when_no_duelist_model(monkeypatch):
     # import re-leaks them mid-session, and duelist_config() reads env at CALL
     # time, so test order would otherwise decide the outcome.
     monkeypatch.delenv("LLM_DUEL_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_DUKE_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_DUEL_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_DUKE_API_KEY", raising=False)
     monkeypatch.setenv("LLM_MODEL", "primary-model")
     assert not ds.duelist_enabled()
     cfg = ds.duelist_config()
@@ -118,13 +115,6 @@ def test_duelist_model_only_inherits_primary_endpoint(monkeypatch):
     assert cfg["model"] == "duel-model"
     assert cfg["base_url"] == "http://primary.test/v1"
     assert cfg["api_key"] == "pk"
-
-
-def test_duke_alias(monkeypatch):
-    monkeypatch.delenv("LLM_DUEL_MODEL", raising=False)
-    monkeypatch.setenv("LLM_DUKE_MODEL", "duke-model")
-    assert ds.duelist_enabled()
-    assert ds.duelist_config()["model"] == "duke-model"
 
 
 # ── store ──────────────────────────────────────────────────────────────────
