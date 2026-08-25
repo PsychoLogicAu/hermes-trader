@@ -203,51 +203,6 @@ def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
     return (False, "")
 
 
-# Extended loss cooldown arms only after this many STRAIGHT losing closes on
-# the same coin (a win resets the streak). One loss stays governed by the
-# standard `cooldown_min` same-coin window.
-LOSS_COOLDOWN_MIN_CONSECUTIVE = 2
-
-
-def arm_loss_cooldown_if_due(mem, coin: str, realized_pnl_pct: float,
-                             cfg: Dict[str, Any]) -> str:
-    """Arm the extended loss cooldown when `coin` has just lost
-    `LOSS_COOLDOWN_MIN_CONSECUTIVE` closes in a row (a win resets the streak).
-
-    The streak is read from `mem`'s persisted close history, so the caller
-    must `record_close` the just-booked close first. Duration is
-    `loss_cooldown_min` (0 = off). Returns the action taken:
-    "no_loss" | "streak_below_threshold" | "disabled" | "armed_<N>min".
-    """
-    try:
-        realized_pnl_pct = float(realized_pnl_pct or 0)
-    except (TypeError, ValueError):
-        realized_pnl_pct = 0.0
-    if realized_pnl_pct >= 0:
-        return "no_loss"
-    streak = mem.consecutive_loss_count(coin)
-    if streak < LOSS_COOLDOWN_MIN_CONSECUTIVE:
-        logger.info(
-            f"[executor] loss cooldown NOT armed on {coin}: "
-            f"single loss #{streak} of {LOSS_COOLDOWN_MIN_CONSECUTIVE} "
-            f"(closed {realized_pnl_pct:.2f}%) — standard cooldown_min "
-            f"window applies")
-        return "streak_below_threshold"
-    lc_min = float(cfg.get("loss_cooldown_min", 0) or 0)
-    if lc_min <= 0:
-        logger.info(
-            f"[executor] loss cooldown disabled (loss_cooldown_min=0); "
-            f"would have armed after {streak} consecutive losses on {coin}")
-        return "disabled"
-    until = int(time.time() * 1000 + lc_min * 60_000)
-    mem.set_loss_cooldown(coin, until)
-    logger.info(
-        f"[executor] loss cooldown armed on {coin}: "
-        f"{lc_min:.0f}min after {streak} consecutive losses "
-        f"(last closed {realized_pnl_pct:.2f}%)")
-    return f"armed_{lc_min:.0f}min"
-
-
 def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
     """Attach compact Chronos fields to a trade result dict.
 
@@ -1754,18 +1709,18 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
                     logger.debug(f"[executor] ledger record_close failed (non-fatal): {_lc_e}")
             except Exception as _rc_e:
                 logger.warning(f"[outcome-store] record_close failed for {coin} (non-fatal): {_rc_e}")
-            # Loss cooldown: `LOSS_COOLDOWN_MIN_CONSECUTIVE` straight losing
-            # closes on this coin arm an extended re-entry block (config
-            # `loss_cooldown_min`, 0 = off). Anti-revenge rule — TON was churned
-            # 3x in one day because the standard cooldown expired and the AI
-            # re-bought the same falling name each time. A SINGLE loss does NOT
-            # arm it: the standard `cooldown_min` window governs re-entry, and
-            # a win in between resets the streak. The streak is derived from
-            # the persisted close history (record_close ran above), so it
-            # survives restarts. A bookkeeping failure must never abort a close.
-            try:
-                arm_loss_cooldown_if_due(
-                    memory, coin, out["realized_pnl_pct"], read_agent_config())
-            except Exception as e:
-                logger.warning(f"[executor] loss-cooldown arm failed for {coin}: {e}")
+            # Loss cooldown: a losing close arms an extended re-entry block on
+            # this coin (config `loss_cooldown_min`, 0 = off). Anti-revenge rule:
+            # TON was churned 3x in one day because the standard cooldown expired
+            # and the AI re-bought the same falling name each time.
+            if out["realized_pnl_pct"] < 0:
+                try:
+                    lc_min = float(read_agent_config().get("loss_cooldown_min", 0) or 0)
+                    if lc_min > 0:
+                        until = int(time.time() * 1000 + lc_min * 60_000)
+                        memory.set_loss_cooldown(coin, until)
+                        logger.info(f"[executor] loss cooldown armed on {coin}: "
+                                    f"{lc_min:.0f}min (closed {out['realized_pnl_pct']:.2f}%)")
+                except Exception as e:
+                    logger.warning(f"[executor] loss-cooldown arm failed for {coin}: {e}")
     return out
