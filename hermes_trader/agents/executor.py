@@ -464,25 +464,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             "analysis_id": analysis["id"], "reason": "pass_no_override",
         }
 
-    _runner_cfg = config.get("runner_entry_gate") or {}
-    _sidestep_bypasses_runner = (
-        bool(analysis.get("sidestep_override"))
-        and bool(_runner_cfg.get("bypass_sidestep_overrides", False))
-    )
-    if not _sidestep_bypasses_runner:
-        runner_block = _runner_entry_block_reason(analysis, config)
-        if runner_block:
-            coin = analysis.get("coin") or "unknown"
-            side = analysis.get("side", "long") or "long"
-            result = {
-                "executed": False, "mode": mode,
-                "analysis_id": analysis["id"], "reason": runner_block,
-            }
-            _attach_chronos_to_result(result, coin, side)
-            return result
-
     # Loss cooldown: refuse re-entry on a coin whose last close was a LOSS and
     # whose extended block hasn't expired (armed in close_position_market).
+    # Checked BEFORE the runner entry gate: the runner gate is an entry-quality
+    # filter (fresh impulse only) while the cooldown is an anti-revenge RULE —
+    # when both would block, the trade result should say WHY the rule fired,
+    # not the quality filter that happened to run first (2026-08-26 ZEC: the
+    # 180min cooldown was armed but the log read runner_gate_blocked, which
+    # looked like the cooldown "wasn't working" — it was, just masked).
     _lc_remaining = memory.loss_cooldown_remaining_min(analysis["coin"])
     if _lc_remaining > 0:
         # Momentum-continuation re-entry: if the name has reclaimed above where it
@@ -502,6 +491,23 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 "reason": (f"loss_cooldown ({analysis['coin']} closed at a loss recently — "
                            f"{_lc_remaining:.0f}min remaining)"),
             }
+
+    _runner_cfg = config.get("runner_entry_gate") or {}
+    _sidestep_bypasses_runner = (
+        bool(analysis.get("sidestep_override"))
+        and bool(_runner_cfg.get("bypass_sidestep_overrides", False))
+    )
+    if not _sidestep_bypasses_runner:
+        runner_block = _runner_entry_block_reason(analysis, config)
+        if runner_block:
+            coin = analysis.get("coin") or "unknown"
+            side = analysis.get("side", "long") or "long"
+            result = {
+                "executed": False, "mode": mode,
+                "analysis_id": analysis["id"], "reason": runner_block,
+            }
+            _attach_chronos_to_result(result, coin, side)
+            return result
 
     # Idempotency: don't double-execute
     already = next(

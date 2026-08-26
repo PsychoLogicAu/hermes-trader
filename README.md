@@ -163,6 +163,10 @@ Key differences from the original repo:
 - Resilient to credit/API outages: no OpenRouter dependency.
 - On a 402 with affordability hint, retries ONCE with a smaller `max_tokens`
   budget so the bot degrades rather than going blind.
+- **Output budget**: `LLM_MAX_TOKENS` (primary research call) and
+  `LLM_DUEL_MAX_TOKENS` (duelist; inherits `LLM_MAX_TOKENS` when unset),
+  both defaulting to 32768. They cap completion tokens only — the
+  prompt/context window is the model server's `ctx_size`, not this setting.
 
 ### External LLM
 

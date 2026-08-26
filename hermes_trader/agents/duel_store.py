@@ -68,12 +68,32 @@ def _first_env(*names: str) -> str:
     return ""
 
 
+DEFAULT_MAX_TOKENS = 32768
+
+
+def resolve_max_tokens(env_name: str, fallback: int = DEFAULT_MAX_TOKENS) -> int:
+    """The env var's completion-token budget (fallback when unset/invalid/non-positive).
+
+    Read at CALL time (same pattern as the LLM_* endpoint vars) so an
+    operator can retune it without a rebuild. It caps the response length
+    ONLY — it is NOT a prompt/context limit; the model server's ctx_size is
+    the hard cap on input+output (2026-08-25 incident: the duelist returned
+    200 OK at n_tokens=4191, well under the then-hardcoded 8192).
+    """
+    raw = os.environ.get(env_name, "").strip()
+    if raw.isdigit():
+        v = int(raw)
+        if v > 0:
+            return v
+    return fallback
+
+
 def duel_file() -> str:
     """Current duel-log path (read at call time so tests can redirect)."""
     return os.environ.get("HERMES_DUEL_FILE", _DUEL_FILE)
 
 
-def duelist_config() -> Dict[str, str]:
+def duelist_config() -> Dict[str, Any]:
     """The duelist endpoint, resolved from env.
 
     Only the MODEL is duelist-specific and REQUIRED — base_url/api_key fall
@@ -89,6 +109,12 @@ def duelist_config() -> Dict[str, str]:
         "api_key": _first_env(*_DUEL_KEY_VARS)
         or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
         "model": _first_env(*_DUEL_MODEL_VARS),
+        # LLM_DUEL_MAX_TOKENS, falling back to the primary's LLM_MAX_TOKENS,
+        # then to DEFAULT_MAX_TOKENS — mirrors the base_url/api_key fallback
+        # (setting one var controls both models).
+        "max_tokens": resolve_max_tokens(
+            "LLM_DUEL_MAX_TOKENS", resolve_max_tokens("LLM_MAX_TOKENS")
+        ),
     }
 
 
@@ -152,6 +178,7 @@ def call_duelist(
     system_prompt: str,
     user_message: str,
     timeout_s: float = 120.0,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """POST the SAME prompt to the duelist endpoint. Returns the raw text (""
     on any failure) and NEVER raises — a duelist outage must not cost the
@@ -163,10 +190,15 @@ def call_duelist(
     if not api_key:
         logger.warning("[duel] duelist LLM_API_KEY not set — skipping duelist call")
         return ""
+    if max_tokens is None:
+        max_tokens = resolve_max_tokens(
+            "LLM_DUEL_MAX_TOKENS", resolve_max_tokens("LLM_MAX_TOKENS")
+        )
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(
-            _async_duel_call(api_key, base_url, model, system_prompt, user_message, timeout_s)
+            _async_duel_call(api_key, base_url, model, system_prompt, user_message,
+                             timeout_s, max_tokens)
         )
     except Exception as e:  # noqa: BLE001 — the primary path must survive any duelist fault
         logger.debug(f"[duel] duelist call failed (non-fatal): {type(e).__name__}: {e}")
@@ -182,6 +214,7 @@ async def _async_duel_call(
     system_prompt: str,
     user_message: str,
     timeout_s: float,
+    max_tokens: int,
 ) -> str:
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
         url = base_url.rstrip("/") + "/chat/completions"
@@ -202,7 +235,7 @@ async def _async_duel_call(
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 
-        resp = await _post(8192)
+        resp = await _post(max_tokens)
         if resp.status_code == 402:
             m = re.search(r"can only afford (\d+)", resp.text or "")
             if m and int(m.group(1)) >= 500:

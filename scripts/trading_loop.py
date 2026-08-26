@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 from hermes_trader.agents.perception import scan_once
 from hermes_trader.agents.ta_filter import analyze_perception
 from hermes_trader.agents.research import research
-from hermes_trader.agents.executor import close_position_market, maybe_execute, monitor_exits, route_verdict
+from hermes_trader.agents.executor import close_position_market, maybe_execute, monitor_exits, momentum_reentry_allowed, route_verdict
 from hermes_trader.agents.dsl_exit import active_position_coins, rehydrate_from_exchange
 from hermes_trader.agents.config import get_config
 from hermes_trader.agents.config_store import read_agent_config
@@ -493,6 +493,85 @@ _last_research_by_coin: dict = {}
 _research_lock = threading.Lock()
 
 
+def _forced_held_reeval(perceptions, cfg_cd, held_coins):
+    """Guaranteed LLM re-evaluation for QUIET held positions.
+
+    The normal close-check cadence (held branch in _process_coin_run) only fires
+    when a coin SHOWS UP in the scan results AND passes the TA filter. A held
+    coin that stops triggering — flat tape, no wick, no burst — goes silent and
+    never gets a second opinion until something moves. 2026-08-26 ZEC short:
+    held ~8h 21:17→05:17Z, ZERO LLM close-checks in the window (it simply
+    stopped triggering), died on the 480min stale-flat backstop at -12.66%
+    when a 2h "no progress" exit would have saved ~$0.9.
+
+    So: every scan, each HELD coin that did NOT surface in this scan's triggers
+    and hasn't been researched for at least `held_reval_min_age_min` (0 = off,
+    default 120) gets a synthetic perception routed through the SAME
+    _process_coin path — same research() prompt, same CLOSE/hold/PASS routing,
+    same gates. A re-entry verdict on a held coin is blocked by the no_pyramid
+    gate anyway; the CLOSE verdict is what matters here ("yeah this is going
+    nowhere" → close). The held branch's 3min `held_research_interval_min`
+    throttle still paces it, so the worst case is one extra paid check per
+    held coin per interval.
+
+    Mids are fetched lazily (one allMids call) only when there is at least one
+    quiet held coin to check — the common case (no held positions, or every
+    held coin triggered this scan) costs nothing.
+    """
+    try:
+        # Missing key → the documented default (120min), NOT off. Only an
+        # explicit 0 disables forced re-eval. (cfg.get(k, 120) alone would
+        # yield 120 for a missing key but 0 for an explicit null — keep the
+        # default applied to both so the knob can't be silently disabled.)
+        _raw_age = cfg_cd.get("held_reval_min_age_min")
+        if _raw_age is None:
+            _raw_age = 120
+        min_age_min = float(_raw_age or 0)
+        if min_age_min <= 0:
+            return []
+        now_ms = int(time.time() * 1000)
+        seen = {p["coin"] for p in perceptions}
+        candidates = sorted(held_coins - seen)
+        if not candidates:
+            return []
+        mids = {}
+        try:
+            mids = get_all_hl_mids(include_hip3=True)
+        except Exception as e:
+            logger.warning(f"[held-reval] mid fetch failed, skipping this pass: {e}")
+            return []
+        forced = []
+        for coin in candidates:
+            mid = mids.get(coin)
+            if mid is None or float(mid) <= 0:
+                continue  # no price (dex hiccup) — retry next scan
+            with _research_lock:
+                last = _last_research_by_coin.get(coin, 0)
+            quiet_min = max(0, (now_ms - last) // 60_000)
+            if quiet_min < min_age_min:
+                continue  # researched recently (triggered or forced) — not quiet yet
+            forced.append({
+                "id": "forced-reval-" + coin.lower(),
+                "coin": coin,
+                "type": "perp",
+                "composite_score": 0,
+                "triggers": [{"name": "heldReeval", "fired": True,
+                              "reason": (f"no market trigger this scan — scheduled "
+                                         f"re-evaluation of the position we already "
+                                         f"hold ({quiet_min}min since last check); "
+                                         f"CLOSE it if it is going nowhere")}],
+                "whale_signal": None,
+                "mid": float(mid),
+            })
+            logger.info(f"[held-reval] forced re-eval: {coin} quiet {quiet_min}min, no scan trigger")
+        return forced
+    except Exception as e:
+        # Never let the re-eval pass take the loop down; the normal path is
+        # unaffected either way.
+        logger.warning(f"[held-reval] skipped: {type(e).__name__}: {e}")
+        return []
+
+
 def _process_coin(perception, ctx):
     # Tag every log line emitted while this coin is researched + executed with
     # its ticker. research_max_workers > 1 interleaves the workers, so an
@@ -588,6 +667,27 @@ def _process_coin_run(perception, ctx):
                        "score": round(float(score), 1),
                        "trigger_score": round(float(score), 1)})
             return
+        # Not held but inside the 180min LOSS cooldown → the executor's
+        # loss-cooldown gate would refuse the re-entry anyway (unless the
+        # momentum re-entry bypass fires — preserved here so enabling
+        # momentum_reentry later doesn't starve that path), so skip the paid
+        # AI call. (2026-08-26 ZEC: this check was missing — 321 paid
+        # researches burned across 08-25/26 inside active loss-cooldown
+        # windows, every one correctly blocked at execution, every one
+        # wasted; the log only showed whatever gate fired first.)
+        _lc_remaining = memory.loss_cooldown_remaining_min(coin)
+        if _lc_remaining > 0:
+            _last_close = memory.last_close_for(coin) or {}
+            _mr_ok, _mr_why = momentum_reentry_allowed(
+                _last_close.get("exit_px"), _last_close.get("side"),
+                perception.get("mid"), score, _cfg_cd)
+            if not _mr_ok:
+                logger.info(f"{coin}: pre-research loss-cooldown ({_lc_remaining:.0f}min remaining) — skip")
+                log_event({"event": "ta_skip", "coin": coin,
+                           "signal": "LOSS_COOLDOWN",
+                           "score": round(float(score), 1),
+                           "trigger_score": round(float(score), 1)})
+                return
     # TA filter — cheap statistical gate before the paid AI call.
     ta = analyze_perception(perception)
     if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):
@@ -910,7 +1010,13 @@ while True:
         # pool dispatches the highest-score coins first). research_max_workers
         # =1 keeps today's exact sequential behavior; set it to the LLM
         # server's slot count to actually parallelize the research phase.
-        _n_research = max(1, len(results))
+        # Guaranteed re-evaluation for held coins that went QUIET (never
+        # triggered this scan, no close-check for `held_reval_min_age_min`).
+        # Runs AFTER the scan so `results` is known; empty list when nothing
+        # qualifies, and the helper is failure-safe (never raises).
+        _forced = _forced_held_reeval(results, _cfg_cd, held_coins)
+        _worklist = list(results) + _forced
+        _n_research = max(1, len(_worklist))
         # Clamp workers to [1, n_triggers]; a malformed config value falls back
         # to 1 (sequential) rather than blowing up the scan.
         _workers = compute_research_workers(_cfg_cd, _n_research)
@@ -925,12 +1031,12 @@ while True:
         }
         if _workers == 1:
             # Sequential path (default): exactly today's behavior.
-            for perception in results:
+            for perception in _worklist:
                 _process_coin(perception, _ctx)
         else:
-            logger.info(f"Research phase: {len(results)} trigger(s) on {_workers} worker(s)")
+            logger.info(f"Research phase: {len(_worklist)} trigger(s) ({len(_forced)} forced re-eval) on {_workers} worker(s)")
             with ThreadPoolExecutor(max_workers=_workers, thread_name_prefix="research") as _pool:
-                _futures = [_pool.submit(_process_coin, perception, _ctx) for perception in results]
+                _futures = [_pool.submit(_process_coin, perception, _ctx) for perception in _worklist]
                 # _process_coin swallows per-coin errors (logged + session event);
                 # .result() still surfaces any uncaught one so it can't be lost.
                 for _fut in as_completed(_futures):
