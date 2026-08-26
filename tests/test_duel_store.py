@@ -117,6 +117,94 @@ def test_duelist_model_only_inherits_primary_endpoint(monkeypatch):
     assert cfg["api_key"] == "pk"
 
 
+# ── output budget (max_tokens) ────────────────────────────────────────────
+
+def test_max_tokens_defaults_to_32768(monkeypatch):
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 32768
+    assert ds.duelist_config()["max_tokens"] == 32768
+
+
+def test_max_tokens_duelist_inherits_primary(monkeypatch):
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("LLM_MAX_TOKENS", "1234")
+    assert ds.duelist_config()["max_tokens"] == 1234
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "777")
+    assert ds.duelist_config()["max_tokens"] == 777
+
+
+def test_max_tokens_invalid_falls_back(monkeypatch):
+    for bad in ("not-a-number", "-5", "0", "  "):
+        monkeypatch.setenv("LLM_MAX_TOKENS", bad)
+        assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 32768
+
+
+def _fake_httpx(monkeypatch, captured, content="x"):
+    """httpx.AsyncClient stub capturing the POST body (same shape as the
+    duelist prompt-identity test below)."""
+    async def fake_post(url, json, headers):
+        captured["url"] = url
+        captured["json"] = json
+
+        class R:
+            status_code = 200
+            is_success = True
+            text = ""
+            def json(self):
+                return {"choices": [{"message": {"content": content}}]}
+        return R()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+
+def test_duel_post_uses_env_max_tokens(monkeypatch):
+    """The on-the-wire max_tokens must follow LLM_DUEL_MAX_TOKENS /
+    LLM_MAX_TOKENS at call time — the 2026-08-25 incident assumed the
+    hardcoded 8192 was a binding cap; it was only an output budget."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured)
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert captured["json"]["max_tokens"] == 32768
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert captured["json"]["max_tokens"] == 2048
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "1024")
+    ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert captured["json"]["max_tokens"] == 1024
+
+
+def test_research_post_uses_llm_max_tokens(monkeypatch):
+    import asyncio
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    loop = asyncio.new_event_loop()
+    try:
+        out = loop.run_until_complete(
+            research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert out == "ok"
+        assert captured["json"]["max_tokens"] == 32768
+        monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+        loop.run_until_complete(
+            research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert captured["json"]["max_tokens"] == 4096
+    finally:
+        loop.close()
+
+
 # ── store ──────────────────────────────────────────────────────────────────
 
 def test_record_and_load_roundtrip(_isolated_duel_file):
@@ -348,7 +436,7 @@ def _patch_research_network(monkeypatch, primary_text, duelist_text):
 
     monkeypatch.setattr(research, "_call_ai", fake_call_ai)
 
-    def fake_duelist(key, base_url, model, system_prompt, user_message, timeout_s=120.0):
+    def fake_duelist(key, base_url, model, system_prompt, user_message, timeout_s=120.0, max_tokens=None):
         assert key == "dk" and base_url == "http://duel.test/v1" and model == "duel-model"
         assert system_prompt == "SYS"  # same prompt, both models
         assert user_message == "USER-PROMPT"

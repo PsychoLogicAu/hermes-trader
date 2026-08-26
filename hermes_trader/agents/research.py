@@ -21,6 +21,7 @@ from hermes_trader.agents.duel_store import (
     duelist_config,
     duelist_enabled,
     record_duel,
+    resolve_max_tokens,
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.system_prompt import build_system_prompt
@@ -542,7 +543,8 @@ def _duelist_verdict(
         cfg = duelist_config()
         _dl_t0 = time.monotonic()
         dl_text = call_duelist(cfg["api_key"], cfg["base_url"], cfg["model"],
-                               system_prompt, user_message)
+                               system_prompt, user_message,
+                               max_tokens=cfg["max_tokens"])
         duelist_ms = int((time.monotonic() - _dl_t0) * 1000)
         # Empty text = the duelist call failed (402/429/timeout — call_duelist
         # swallows errors and returns ""). parse_verdict would tag it
@@ -604,7 +606,11 @@ async def _async_do_call(
     """
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
 
-        # 8192 gives reasoning models room to think AND output JSON without truncating.
+        # Completion budget: operator-tunable via LLM_MAX_TOKENS (default
+        # 32768, read at call time). It caps the RESPONSE length only — the
+        # prompt size is governed by the model server's context window.
+        default_max_toks = resolve_max_tokens("LLM_MAX_TOKENS")
+
         async def _post(max_toks: int):
             url = base_url.rstrip("/") + "/chat/completions"
             return await client.post(
@@ -622,7 +628,7 @@ async def _async_do_call(
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 
-        resp = await _post(8192)
+        resp = await _post(default_max_toks)
         if resp.status_code == 402:
             # "...You requested up to 2048 tokens, but can only afford 842..."
             m = re.search(r"can only afford (\d+)", resp.text or "")
