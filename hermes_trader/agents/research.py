@@ -313,6 +313,85 @@ def _build_user_message(
     else:
         whale_block = "Whale accumulation flag: not flagged for this coin"
 
+    # Band-snapback COUNTER-signal block: a wick that poked OUT of the
+    # moving-average band and snapped back INSIDE is a short-term mean-reversion
+    # tell in the fade direction (lower poke + snap-back → LONG; upper poke +
+    # snap-back → SHORT). Fed to the LLM as a VETO/weighting signal, NOT a
+    # standalone entry. The OOS edge is better than a coin flip but fee-thin, so
+    # its value is telling the LLM "don't fade this" — the observed dumb-trade
+    # mode was the LLM taking the OPPOSITE side of an imminent snapback (e.g.
+    # shorting into a lower-poke snap-back that wanted to revert long).
+    _snap = next((t for t in perception.get("triggers", [])
+                  if t.get("name") == "bandSnapback"), None)
+    if _snap and _snap.get("fired"):
+        _snap_reason = _snap.get("reason", "")
+        _snap_side = "SHORT" if _snap_reason.startswith("short") else "LONG"
+        _opp = "LONG" if _snap_side == "SHORT" else "SHORT"
+        snapback_block = (
+            "Band snapback counter-signal (a wick poked OUT of the moving-average band and "
+            f"snapped back INSIDE → a short-term mean reversion is set up to the {_snap_side}):"
+            f"\n  - signal detail: {_snap_reason}"
+            "\n  - How to weight it: this is a COUNTER-signal, not an entry. Its out-of-sample "
+            "backtest edge is better than a coin flip but thin (fees eat most of it as a "
+            f"standalone trade). If your own analysis is leaning the OPPOSITE side (you're "
+            f"about to go {_opp} while the snapback points {_snap_side}), treat that as a red "
+            "flag: you'd be fading an imminent mean-reversion. Require strong independent "
+            "confirmation (higher-TF trend, funding, structure) before taking that opposite "
+            f"side. Use this signal to raise confidence in the {_snap_side} direction and to "
+            "lower confidence in the opposite one — not to open a trade by itself."
+        )
+    elif _snap and _snap.get("reason", "").startswith("band trending"):
+        # Silent but INFORMATIVE: the drift gate vetoes the fade because the
+        # band itself is trending. That direction is exactly the context the
+        # LLM was missing on counter-trend scalps (e.g. shorting while the 1h
+        # band is drifting up with price at its lower edge = fading the local
+        # structure). Render it as band context, with the counter-trend
+        # caveat, rather than hiding it behind "not present".
+        _bt_reason = _snap.get("reason", "")
+        _bt_dir = "DOWN" if "trending DOWN" in _bt_reason else "UP"
+        # Extension check: when price sits BEYOND the drift-side edge (drift
+        # UP -> above the upper edge; drift DOWN -> below the lower edge), a
+        # new entry ON the drift side is chasing the extension — the nearest
+        # mean-reversion move is back toward the band, i.e. AGAINST the entry.
+        # This is the mirror image of the counter-trend case above (LIT short
+        # into an up-drift) and the exact shape of the 00:46 TRUMP short,
+        # which entered with the 1h band 5.1% below its lower edge.
+        _ext_note = ""
+        _m = re.search(
+            r"px\s+([+-]?\d+(?:\.\d+)?)%\s+vs\s+upper\s+edge,\s+"
+            r"([+-]?\d+(?:\.\d+)?)%\s+vs\s+lower\s+edge", _bt_reason)
+        if _m:
+            _px_up, _px_lo = float(_m.group(1)), float(_m.group(2))
+            _ext = _px_up if _bt_dir == "UP" else -_px_lo
+            if _ext >= 1.0:
+                _ext_note = (
+                    f"\n  - price is {_ext:.1f}% BEYOND the drift-side band edge "
+                    f"(extended past the band in the {_bt_dir} direction): a NEW entry on the "
+                    f"{_bt_dir} side here is chasing the extension — the nearest "
+                    "short-term reversion is back toward the band, so your stop sits on the "
+                    "far side of the move. Prefer waiting for a retest of the band edge, or "
+                    "demand a tight invalidation and favorable risk/reward (stop distance < "
+                    "target distance).")
+        snapback_block = (
+            "Band context (no snapback signal — the MA band is TRENDING, which vetoes the "
+            f"short-term fade in this band's timeframe):\n  - band state: {_bt_reason}"
+            f"\n  - How to read it: the band's short-term mean-reversion pressure points WITH "
+            f"the drift ({_bt_dir}). A position AGAINST that direction is a counter-trend "
+            "scalp — it only pays when the local wick wins against an established drift. If "
+            "your thesis is on the opposite side of the band drift, require explicit "
+            "counter-trend evidence (reversal structure, divergence, funding flip) and a tight "
+            "stop; do not size it as a trend position."
+            + _ext_note
+        )
+    else:
+        _other_reason = (_snap or {}).get("reason", "")
+        snapback_block = (
+            "Band snapback counter-signal: not present (no wick poke-and-snapback in the band "
+            f"timeframe this scan"
+            + (f"; band state: {_other_reason}" if _other_reason and _other_reason != "flat" else "")
+            + ")"
+        )
+
     def _fmt_px(p: float) -> str:
         """Adaptive precision so sub-cent coins (HMSTR at $0.000173 etc.) don't
         all read as '0.0002' to the LLM. Without this the AI returned identical
@@ -390,6 +469,8 @@ def _build_user_message(
         structure_block,
         "",
         whale_block,
+        "",
+        snapback_block,
         "",
         _signals_block(coin),
         _chronos_block(coin),

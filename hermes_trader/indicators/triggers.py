@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from hermes_trader.indicators.math import adx, ema, sma, candle_val
+from hermes_trader.indicators.math import adx, atr, ema, sma, candle_val
 from hermes_trader.models.types import Candle, TriggerHit
 
 
@@ -504,6 +504,224 @@ def momentum_continuation_1h(
         "reason": (f"+{trend_pct:.1f}% 12h uptrend, {pullback_pct:.1f}% pullback, EMA-stacked"
                    if fired else f"trend {trend_pct:+.1f}% / pullback {pullback_pct:.1f}% / stacked={stacked}"),
         "fired": fired,
+    }
+
+
+def _band_ma(candles: List[Candle], span: int, ma_type: str = "ema"):
+    """Rolling moving average of the HIGHs (upper edge) and LOWs (lower edge).
+
+    `span` is the MA length (bars). A SHORT span makes the band hug price
+    tightly (low lag); a LONG span smooths it out (high lag). Effective EMA
+    lag is roughly (span-1)/2 bars.
+
+    Returns (up_ma, lo_ma): each a list with one band-edge value per bar for
+    the WHOLE input (leading NaNs where the MA is not yet warm — SMA only;
+    EMA is seeded at the first bar). The band CURVES with price — it is a
+    moving average, not a single straight fitted line. ma_type: 'ema' | 'sma'.
+    """
+    highs = [candle_val(c, "h") for c in candles]
+    lows = [candle_val(c, "l") for c in candles]
+    fn = ema if ma_type == "ema" else sma
+    return fn(highs, span), fn(lows, span)
+
+
+def _project_band_edge(edge_series: List[float]) -> float:
+    """Linearly project the last true band-edge reading forward ONE bar.
+
+    The MA edge only has TRUE readings up to the bar before the poke. Judging
+    a poke on bar i against the bar i-1 reading uses a stale position
+    whenever the band has a gradient — which is exactly the residual lag
+    `band_span` tuning can't fully remove (the gate still allows a drifting
+    band in chop). This extends the band's last true step one bar:
+
+        slope = edge[-1] - edge[-2]
+        projected = edge[-1] + slope
+
+    Identical for EMA and SMA bands, and it uses ONLY true readings (never
+    the poke bar's own high/low — a band edge that included the poking wick
+    would make the "did it cross" test circular). A flat band projects to
+    itself; a band trending at +0.1/bar projects 0.1 above its last reading.
+    """
+    if len(edge_series) < 2:
+        return float(edge_series[-1]) if edge_series else float("nan")
+    return edge_series[-1] + (edge_series[-1] - edge_series[-2])
+
+
+def band_snapback(
+    candles: List[Candle],
+    window: int = 48,
+    max_drift_pct: float = 1.5,
+    min_poke_atr: float = 0.5,
+    ma_type: str = "ema",
+    band_span: Optional[int] = None,
+    max_project_atr: Optional[float] = 0.25,
+    include_partial: bool = True,
+    current_px: Optional[float] = None,
+) -> TriggerHit:
+    """Wick poke-out + snapback into a moving-average band (fade the poke).
+
+    The band edges are the ROLLING `ma_type` average of the HIGHs (upper edge)
+    and LOWs (lower edge) over `band_span` bars — a CURVED band that hugs price,
+    not a single straight fitted line. `band_span` (default: `window`) is the
+    LAG dial: a short span makes the band react fast and stick close to price;
+    a long span smooths it out. Keep `band_span <= window` (SMA needs that to
+    stay warm at the drift reference).
+
+    A poke is judged against the band edge AT the poke bar: the last true MA
+    reading (bar before the poke — no lookahead) is linearly projected one
+    bar forward at the edge's own last gradient (the last two true band
+    values extended), so a drifting band is judged at its current position,
+    not a stale one. The projection never uses the poking wick itself.
+    The drift gate still uses the true lagged readings.
+
+    The projection is capped at `max_project_atr` * ATR of movement per bar
+    (default 0.25): a 1-bar slope is genuinely unreliable in the
+    accelerating-band tail, and measured overshoot there maxes at ~0.5 ATR
+    while the poke threshold is 0.5 ATR, so the cap is invisible in normal
+    bars and only bites in the tail. `None`/0 disables it.
+
+    The setup is only valid in CHOP: the drift gate vetoes when the band edge
+    itself has drifted more than `max_drift_pct` over `window` bars. In a trend
+    the band follows price, so a poke-out is CONTINUATION, not
+    mean-reversion — the drift gate keeps this from fading breakouts. The
+    drift gate measures the (band_span-shaped) band edge over the FULL window,
+    so shrinking band_span to cut lag does NOT weaken trend detection.
+
+    In chop, a bar whose wick pierces the band edge by >= `min_poke_atr` * ATR
+    while the price closes (or currently sits) back INSIDE the band proposes a
+    mean-reversion: LONG on a lower poke, SHORT on an upper poke.
+
+    Surfacing BYPASS (weight 0, like uptrend/downtrendMomentum): the AI +
+    risk gates adjudicate direction/execution. Interval is configured by the
+    caller (15m/1h are the primary timeframes; 5m works too).
+
+    include_partial=True (live scan): the last candle is the in-progress bar —
+    its close is the current price; the poke bar is the last CLOSED bar
+    (candles[-2]). include_partial=False (backtest replay): every candle is
+    closed, the poke bar is candles[-1], and `current_px` (default: the poke
+    bar's close) is the price at the decision moment.
+    """
+    name = "bandSnapback"
+    flat = {"name": name, "score": 0, "reason": "flat", "fired": False}
+    span = window if band_span is None else max(2, int(band_span))
+
+    # 2*window: the window right before the poke gives the band edges, and an
+    # equal window BEFORE THAT gives the drift reference (how far the band
+    # itself has moved). EMA is warm from bar 0; SMA needs window bars, so
+    # 2*window makes both types have a valid edge at the drift reference.
+    need = 2 * window + (1 if include_partial else 0)
+    if len(candles) < need:
+        return {**flat, "reason": "insufficient_history"}
+
+    if include_partial:
+        poke = candles[-2]
+        px = candle_val(candles[-1], "c")
+        fit = candles[-(2 * window + 2):-2]
+    else:
+        poke = candles[-1]
+        px = current_px if current_px is not None else candle_val(poke, "c")
+        fit = candles[-(2 * window + 1):-1]
+
+    if px <= 0 or len(fit) < 2 * window:
+        return {**flat, "reason": "insufficient_history"}
+
+    # MA edges at the poke-bar edge (fit[-1]) and the drift reference
+    # (window bars back — the FULL window, independent of band_span, so the
+    # chop/trend gate is unaffected by the lag dial).
+    up_ma, lo_ma = _band_ma(fit, span, ma_type)
+    upper_edge, lower_edge = up_ma[-1], lo_ma[-1]
+    if not math.isfinite(upper_edge) or not math.isfinite(lower_edge):
+        return {**flat, "reason": "ma_not_warm"}
+    upper_ref, lower_ref = up_ma[-1 - window], lo_ma[-1 - window]
+
+    # De-lagged band edges at the POKING bar: project the last true reading
+    # one bar forward at the edge's own last gradient (linear extrapolation
+    # of the last two true MA values — no poke-bar data, no MA-type branching).
+    # The poke + snapback check below uses THESE; the DRIFT GATE still uses
+    # the true lagged values (how far the band actually moved).
+    upper_proj = _project_band_edge(up_ma)
+    lower_proj = _project_band_edge(lo_ma)
+
+    mid = candle_val(poke, "c") or px
+    if mid <= 0 or upper_edge <= lower_edge:
+        return {**flat, "reason": "degenerate_band"}
+
+    # CHOP GATE: the band itself must be near-flat over the window, else a
+    # poke-out is continuation in a trend, not a snapback setup.
+    drift_pct = max(abs(upper_edge - upper_ref), abs(lower_edge - lower_ref)) / mid * 100
+    if drift_pct > max_drift_pct:
+        # Directional context for the LLM (silent but informative): the drift
+        # gate vetoes the FADE because the band is trending — so short-term
+        # mean-reversion pressure points WITH the band's drift, and going
+        # against it is a counter-trend scalp. Keep "trending" in the string
+        # (near-miss logging and tests key off it); the sign + band position
+        # are what the research prompt renders as band context.
+        drift_signed = ((upper_edge - upper_ref) + (lower_edge - lower_ref)) / 2 / mid * 100
+        direction = "UP" if drift_signed >= 0 else "DOWN"
+        return {
+            "name": name, "score": 0,
+            "reason": (f"band trending {direction} ({drift_pct:.1f}% drift > "
+                       f"{max_drift_pct:.1f}% over window; px "
+                       f"{(mid / upper_edge - 1) * 100:+.1f}% vs upper edge, "
+                       f"{(mid / lower_edge - 1) * 100:+.1f}% vs lower edge)"),
+            "fired": False,
+        }
+
+    a = atr(fit[-window:] + [poke], 14)
+    atr_val = a[-1]
+    if not math.isfinite(atr_val) or atr_val <= 0:
+        return {**flat, "reason": "no_atr"}
+    min_depth = min_poke_atr * atr_val
+
+    # Projection CAP: clamp the de-lagged delta to max_project_atr * ATR.
+    # Measured on real 15m/1h data (gate-OK regime), the 1-bar extrapolation
+    # overshoots the true edge at p99 by ~0.2 ATR and maxes at ~0.5 ATR —
+    # so a 0.25 ATR cap is invisible in normal bars and bites only in the
+    # accelerating-band tail, where a 1-bar slope is genuinely unreliable.
+    # ATR<=0 already returned above, so the divisor is safe here.
+    if max_project_atr and max_project_atr > 0:
+        cap = max_project_atr * atr_val
+        delta_up = upper_proj - upper_edge
+        delta_lo = lower_proj - lower_edge
+        if delta_up > cap:
+            upper_proj = upper_edge + cap
+        elif delta_up < -cap:
+            upper_proj = upper_edge - cap
+        if delta_lo > cap:
+            lower_proj = lower_edge + cap
+        elif delta_lo < -cap:
+            lower_proj = lower_edge - cap
+
+    ph, pl = candle_val(poke, "h"), candle_val(poke, "l")
+
+    side = None
+    depth = 0.0
+    # Poke judged against the PROJECTED (de-lagged) edge at the poke bar;
+    # snapback requires price back inside that same projected edge.
+    if pl < lower_proj - min_depth:        # wick pierced below the lower band edge
+        if px >= lower_proj:               # price back inside the band
+            side, depth = "long", lower_proj - pl
+    elif ph > upper_proj + min_depth:      # wick pierced above the upper band edge
+        if px <= upper_proj:
+            side, depth = "short", ph - upper_proj
+    if side is None:
+        return {**flat, "reason": (
+            f"no snapback (drift {drift_pct:.1f}%, band edge "
+            f"{lower_proj / mid * 100 - 100:+.2f}%/{upper_proj / mid * 100 - 100:+.2f}%, "
+            f"px {px / mid * 100 - 100:+.2f}%)")}
+
+    depth_atr = depth / atr_val
+    score = min(10.0, depth_atr / max(min_poke_atr, 1e-9) * 3.3)  # 10 at ~3x threshold
+    side_word = "lower" if side == "long" else "upper"
+    span_note = "" if span == window else f"/span{span}"
+    return {
+        "name": name,
+        "score": score,
+        "reason": (f"{side} — {side_word} wick {depth_atr:.1f}x ATR past "
+                   f"projected {ma_type.upper()}{span_note}-band edge "
+                   f"(de-lagged 1 bar), snapped back inside "
+                   f"(drift {drift_pct:.1f}%)"),
+        "fired": True,
     }
 
 

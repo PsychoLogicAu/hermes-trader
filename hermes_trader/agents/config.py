@@ -29,6 +29,9 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         "uptrendMomentum": 0.0,
         "downtrendMomentum": 0.0,
         "dailyMover": 0.0,
+        # Band snapback — SURFACING BYPASS (weight 0): a wick poke-out + snapback
+        # into a flat MA band (rolling avg of highs/low...[truncated]
+        "bandSnapback": 0.0,
     },
     "thresholds": {
         "sigmaThreshold": 2.0,
