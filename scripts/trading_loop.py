@@ -519,7 +519,14 @@ def _forced_held_reeval(perceptions, cfg_cd, held_coins):
     held coin triggered this scan) costs nothing.
     """
     try:
-        min_age_min = float(cfg_cd.get("held_reval_min_age_min", 120) or 0)
+        # Missing key → the documented default (120min), NOT off. Only an
+        # explicit 0 disables forced re-eval. (cfg.get(k, 120) alone would
+        # yield 120 for a missing key but 0 for an explicit null — keep the
+        # default applied to both so the knob can't be silently disabled.)
+        _raw_age = cfg_cd.get("held_reval_min_age_min")
+        if _raw_age is None:
+            _raw_age = 120
+        min_age_min = float(_raw_age or 0)
         if min_age_min <= 0:
             return []
         now_ms = int(time.time() * 1000)
