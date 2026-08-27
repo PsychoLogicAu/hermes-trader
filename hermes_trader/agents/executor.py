@@ -905,6 +905,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Band counter-trend breach shadow gate: same would-block pattern. Fires
+    # on the GRASS shape — a counter-trend bounce/dip entry extended beyond
+    # the opposite edge of a drifting MA band. Logs loudly while shadow_mode
+    # is on so we can count false positives before it can block anything.
+    _bc = gate_output["results"].get("band_counter_breach") or {}
+    if _bc.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] band_counter_breach WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     if gate_output["blocked"]:
         # ── Capital-rotation (Phase-1 lever) — SHADOW by default ─────────────
         # Phase-1 finding: 94% of missed movers die at the 300% cap / max_concurrent

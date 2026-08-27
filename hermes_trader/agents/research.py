@@ -373,6 +373,38 @@ def _build_user_message(
                     "far side of the move. Prefer waiting for a retest of the band edge, or "
                     "demand a tight invalidation and favorable risk/reward (stop distance < "
                     "target distance).")
+            else:
+                # Counter-trend edge breach — the MIRROR the drift-side note above misses:
+                # the band drifts ONE way but price is extended PAST THE OPPOSITE edge.
+                # 1h band trending DOWN while price bounces ABOVE the upper edge = top of a
+                # relief rally (the start-of-downswing shape); a NEW LONG there buys the
+                # bounce against the drift and the nearest reversion is back toward the band.
+                # This is the exact shape the LLM misread as "drift already priced in →
+                # continuation" (GRASS long 2026-08-26 19:07, 1h band DOWN 6.4% drift,
+                # price +6.6% above the upper edge).
+                if _bt_dir == "DOWN":
+                    _ct_ext, _ct_edge = _px_up, "upper"
+                    _ct_shape = ("a bounce ABOVE the upper edge of a DOWN-drifting band — the "
+                                 "TOP of a relief rally, i.e. the START of the next down-swing, "
+                                 "not a continuation")
+                else:  # UP
+                    _ct_ext, _ct_edge = -_px_lo, "lower"
+                    _ct_shape = ("a dip BELOW the lower edge of an UP-drifting band — the BOTTOM "
+                                 "of a pullback, i.e. the START of the next up-swing, not a "
+                                 "continuation")
+                if _ct_ext >= 1.0:
+                    _ext_note = (
+                        f"\n  - price is {_ct_ext:.1f}% beyond the {_ct_edge} band edge on the "
+                        f"OPPOSITE side of the band's drift: this is {_ct_shape}. The band's "
+                        f"short-term mean-reversion pressure points WITH the drift ({_bt_dir}), "
+                        f"so price extended past the {_ct_edge} edge is OVER-extended against the "
+                        "drift — a NEW entry on the bounce/dip side here is a counter-trend chase, "
+                        "and the nearest short-term reversion is back toward the band, AGAINST the "
+                        "entry (stop on the far side of the move). Do NOT read 'price is beyond "
+                        f"the band edge' as 'the {_bt_dir} drift is already priced in → "
+                        "continuation': it is the OPPOSITE — the extension is what reverts. Prefer "
+                        "waiting for the band edge to be reclaimed or a confirmed retest, or "
+                        "explicit reversal structure, before entering the opposite-of-drift side.")
         snapback_block = (
             "Band context (no snapback signal — the MA band is TRENDING, which vetoes the "
             f"short-term fade in this band's timeframe):\n  - band state: {_bt_reason}"

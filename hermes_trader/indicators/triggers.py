@@ -725,6 +725,83 @@ def band_snapback(
     }
 
 
+def band_state(
+    candles: List[Candle],
+    window: int = 48,
+    max_drift_pct: float = 1.5,
+    ma_type: str = "ema",
+    band_span: Optional[int] = None,
+    include_partial: bool = True,
+    current_px: Optional[float] = None,
+) -> Optional[Dict]:
+    """Band drift state — the drift-gate half of `band_snapback`, extracted.
+
+    Returns None when history is too short or the band is degenerate (no
+    opinion). Otherwise a dict:
+
+      trending       drift_pct > max_drift_pct — the band itself is trending,
+                     the same chop-gate condition that vetoes the snapback fade
+      direction      "UP" | "DOWN" — the band's drift sign (drift_signed)
+      drift_pct      max-edge drift over the FULL window, % of price (the
+                     trigger's chop-gate math, verbatim)
+      drift_signed   signed average edge drift, % of price
+      px_upper_pct   (px / upper_edge - 1) * 100 — positive = price ABOVE the
+                     upper band edge
+      px_lower_pct   (px / lower_edge - 1) * 100 — negative = price BELOW the
+                     lower band edge
+      breach_opposite_pct  % beyond the OPPOSITE-side edge of the drift
+                     (down-drift: px_upper_pct; up-drift: -px_lower_pct),
+                     clamped at 0 — the counter-trend-breach measure
+
+    Framing mirrors band_snapback (include_partial: the last candle is the
+    still-forming bar whose close is the live mid; the fit excludes the last
+    two bars). The `band_counter_breach` risk gate uses this: a COUNTER-trend
+    breach (price extended past the OPPOSITE-side edge of a drifting band) is
+    the deterministic encoding of the shape the research prompt tells the LLM
+    is a reversion, not a continuation (GRASS long 2026-08-26 19:07: 1h band
+    DOWN 6.4% drift, px +6.6% vs upper edge, entered long at 0.82 conf).
+    """
+    span = window if band_span is None else max(2, int(band_span))
+    need = 2 * window + (1 if include_partial else 0)
+    if len(candles) < need:
+        return None
+    if include_partial:
+        px = candle_val(candles[-1], "c")
+        fit = candles[-(2 * window + 2):-2]
+    else:
+        px = current_px if current_px is not None else candle_val(candles[-1], "c")
+        fit = candles[-(2 * window + 1):-1]
+    if px <= 0 or len(fit) < 2 * window:
+        return None
+    up_ma, lo_ma = _band_ma(fit, span, ma_type)
+    upper_edge, lower_edge = up_ma[-1], lo_ma[-1]
+    if not math.isfinite(upper_edge) or not math.isfinite(lower_edge):
+        return None
+    if upper_edge <= lower_edge:
+        return None
+    upper_ref, lower_ref = up_ma[-1 - window], lo_ma[-1 - window]
+    drift_pct = max(abs(upper_edge - upper_ref), abs(lower_edge - lower_ref)) / px * 100
+    drift_signed = ((upper_edge - upper_ref) + (lower_edge - lower_ref)) / 2 / px * 100
+    px_upper_pct = (px / upper_edge - 1) * 100  # >0 = price ABOVE upper edge
+    px_lower_pct = (px / lower_edge - 1) * 100  # <0 = price BELOW lower edge
+    # The counter-trend breach: price extended beyond the OPPOSITE-side edge
+    # of the drift (down-drift + above upper / up-drift + below lower). The
+    # band_counter_breach gate keys on this; 0.0 when the shape is absent.
+    if drift_signed < 0:
+        breach_opposite_pct = max(0.0, px_upper_pct)
+    else:
+        breach_opposite_pct = max(0.0, -px_lower_pct)
+    return {
+        "trending": drift_pct > max_drift_pct,
+        "direction": "UP" if drift_signed >= 0 else "DOWN",
+        "drift_pct": drift_pct,
+        "drift_signed": drift_signed,
+        "px_upper_pct": px_upper_pct,
+        "px_lower_pct": px_lower_pct,
+        "breach_opposite_pct": breach_opposite_pct,
+    }
+
+
 def composite_score(hits: List[TriggerHit], weights: Dict[str, float]) -> float:
     """Weighted composite score from triggered hits, clamped 0-100.
 

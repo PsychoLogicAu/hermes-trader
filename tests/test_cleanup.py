@@ -3282,3 +3282,66 @@ def test_news_blackout_gate_reason_includes_match():
     r = news_blackout_gate(blocked)
     assert r["pass"] is False
     assert "Coin hacked for $1M" in r["reason"]
+
+
+def test_band_context_counter_trend_breach_note():
+    """The GRASS shape: 1h band trending DOWN while price bounces ABOVE the
+    upper edge (top of a relief rally). The old prompt only annotated the
+    drift-side extension, so the LLM read 'price +6.6% above the upper edge of
+    a DOWN-drifting band' as 'drift already priced in -> continuation' and
+    longed the top (2026-08-26 19:07, -9.6% ROE). The counter-trend note must
+    render and explicitly forbid that reading. Uses the EXACT reason string
+    the live scan produced at the entry tick."""
+    from hermes_trader.agents import research
+
+    def _msg(reason):
+        perception = {
+            "type": "perp", "mid": 0.372, "composite_score": 34,
+            "triggers": [{"name": "bandSnapback", "fired": False,
+                          "reason": reason}],
+        }
+        snap = {"ema8": None, "ema21": None, "last_close": 0.372}
+        real_read = research.read_agent_config
+        try:
+            research.read_agent_config = lambda: {}
+            return research._build_user_message(
+                "GRASS", perception, snap, snap, snap, "0.01%/hr", "no news",
+                100.0, [], "LIVE",
+            )
+        finally:
+            research.read_agent_config = real_read
+
+    # (1) The exact GRASS case: DOWN drift, price +6.6% ABOVE the upper edge.
+    grass = ("band trending DOWN (6.4% drift > 1.5% over window; "
+             "px +6.6% vs upper edge, +10.1% vs lower edge)")
+    m = _msg(grass)
+    assert "band trending DOWN (6.4% drift" in m            # state still rendered
+    assert "6.6% beyond the upper band edge on the " \
+           "OPPOSITE side of the band's drift" in m
+    assert "TOP of a relief rally" in m
+    assert "START of the next down-swing" in m
+    assert "Do NOT read" in m and "already priced in" in m
+    assert "counter-trend chase" in m
+
+    # (2) Mirror orientation: UP drift, price below the LOWER edge.
+    up = ("band trending UP (7.0% drift > 1.5% over window; "
+          "px -3.2% vs upper edge, -5.1% vs lower edge)")
+    m2 = _msg(up)
+    assert "5.1% beyond the lower band edge on the " \
+           "OPPOSITE side of the band's drift" in m2
+    assert "BOTTOM of a pullback" in m2
+
+    # (3) Baseline unchanged: drift-side extension (DOWN drift, price below
+    # the lower edge) still renders the ORIGINAL note, not the new one.
+    drift_side = ("band trending DOWN (4.0% drift > 1.5% over window; "
+                  "px -0.3% vs upper edge, -5.9% vs lower edge)")
+    m3 = _msg(drift_side)
+    assert "5.9% BEYOND the drift-side band edge" in m3
+    assert "OPPOSITE side of the band's drift" not in m3
+
+    # (4) Sub-threshold breach: +0.4% past the opposite edge -> no note at all.
+    shallow = ("band trending DOWN (2.0% drift > 1.5% over window; "
+               "px +0.4% vs upper edge, +3.1% vs lower edge)")
+    m4 = _msg(shallow)
+    assert "OPPOSITE side of the band's drift" not in m4
+    assert "BEYOND the drift-side band edge" not in m4
