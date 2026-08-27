@@ -68,7 +68,25 @@ def _first_env(*names: str) -> str:
     return ""
 
 
-DEFAULT_MAX_TOKENS = 32768
+DEFAULT_MAX_TOKENS = 8192
+
+# Qwen3.5-9B sampling profile — "instruct (non-thinking) mode for reasoning
+# tasks" per the model card: temperature=1.0, top_p=0.95, top_k=20,
+# min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0. Used by the
+# duelist (whose recipe serves a Qwen3.5-9B derivative with thinking
+# disabled). Verified accepted by the local llama.cpp server 2026-08-27
+# (HTTP 200, finish=stop) — llama.cpp maps the OpenAI fields onto its native
+# sampling flags, so top_k/min_p go in the standard body, no extra_body.
+# The primary keeps temperature 0.1: it is a fine-tuned trading model, not
+# base Qwen, and its verdicts have been calibrated under 0.1.
+DUELIST_SAMPLING_PROFILE: Dict[str, Any] = {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 1.5,
+    "repetition_penalty": 1.0,
+}
 
 
 def resolve_max_tokens(env_name: str, fallback: int = DEFAULT_MAX_TOKENS) -> int:
@@ -201,7 +219,20 @@ def call_duelist(
                              timeout_s, max_tokens)
         )
     except Exception as e:  # noqa: BLE001 — the primary path must survive any duelist fault
-        logger.debug(f"[duel] duelist call failed (non-fatal): {type(e).__name__}: {e}")
+        # LOUD by design (2026-08-27): this used to be DEBUG — the duelist
+        # doom-loop runaways were invisible in trader.log for weeks, leaving
+        # only the bare "no text" line at the call site. Name the failure:
+        # a ReadTimeout means the server was STILL GENERATING when the
+        # client gave up (the runaway signature — the server log shows the
+        # task completing minutes later); any other fault is a dead/broken
+        # endpoint. Both deserve a line an operator can act on.
+        if isinstance(e, httpx.TimeoutException):
+            logger.warning(
+                f"[duel] duelist call TIMED OUT after {timeout_s:.0f}s (non-fatal) — "
+                f"server was still generating (possible runaway); verdict not recorded"
+            )
+        else:
+            logger.warning(f"[duel] duelist call failed (non-fatal): {type(e).__name__}: {e}")
         return ""
     finally:
         loop.close()
@@ -230,12 +261,28 @@ async def _async_duel_call(
                     ],
                     "stream": False,
                     "max_tokens": max_toks,
-                    "temperature": 0.1,
+                    **DUELIST_SAMPLING_PROFILE,
                 },
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 
-        resp = await _post(max_tokens)
+        try:
+            resp = await _post(max_tokens)
+        except httpx.TimeoutException:
+            # Single retry on timeout (2026-08-27, user-requested). A
+            # ReadTimeout means the server was still generating when the
+            # client gave up — with a doom-loop runaway that can be a slot
+            # held for minutes, so one identical retry is cheap insurance
+            # against catching the endpoint mid-task. Same budget, same
+            # params; the httpx timeout still bounds the worst case at
+            # ~2 x timeout_s, and the second timeout propagates to
+            # call_duelist's LOUD handler below. Non-timeout faults (dead
+            # endpoint, bad JSON) are NOT retried — they're not transient.
+            logger.info(
+                f"[duel] duelist timeout after {timeout_s:.0f}s — retrying once "
+                f"(server may be mid-generation on another task)"
+            )
+            resp = await _post(max_tokens)
         if resp.status_code == 402:
             m = re.search(r"can only afford (\d+)", resp.text or "")
             if m and int(m.group(1)) >= 500:

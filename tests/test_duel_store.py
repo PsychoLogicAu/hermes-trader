@@ -119,11 +119,11 @@ def test_duelist_model_only_inherits_primary_endpoint(monkeypatch):
 
 # ── output budget (max_tokens) ────────────────────────────────────────────
 
-def test_max_tokens_defaults_to_32768(monkeypatch):
+def test_max_tokens_defaults_to_8192(monkeypatch):
     monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
     monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
-    assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 32768
-    assert ds.duelist_config()["max_tokens"] == 32768
+    assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 8192
+    assert ds.duelist_config()["max_tokens"] == 8192
 
 
 def test_max_tokens_duelist_inherits_primary(monkeypatch):
@@ -137,7 +137,7 @@ def test_max_tokens_duelist_inherits_primary(monkeypatch):
 def test_max_tokens_invalid_falls_back(monkeypatch):
     for bad in ("not-a-number", "-5", "0", "  "):
         monkeypatch.setenv("LLM_MAX_TOKENS", bad)
-        assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 32768
+        assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 8192
 
 
 def _fake_httpx(monkeypatch, captured, content="x"):
@@ -177,7 +177,7 @@ def test_duel_post_uses_env_max_tokens(monkeypatch):
     monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
     monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
     ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
-    assert captured["json"]["max_tokens"] == 32768
+    assert captured["json"]["max_tokens"] == 8192
     monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
     ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
     assert captured["json"]["max_tokens"] == 2048
@@ -196,13 +196,202 @@ def test_research_post_uses_llm_max_tokens(monkeypatch):
         out = loop.run_until_complete(
             research._async_do_call("k", "http://x/v1", "m", "S", "U"))
         assert out == "ok"
-        assert captured["json"]["max_tokens"] == 32768
+        assert captured["json"]["max_tokens"] == 8192
         monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
         loop.run_until_complete(
             research._async_do_call("k", "http://x/v1", "m", "S", "U"))
         assert captured["json"]["max_tokens"] == 4096
     finally:
         loop.close()
+
+
+# ── sampling profile + timeout retry (2026-08-27) ─────────────────────────
+
+def test_duel_post_sends_qwen_sampling_profile(monkeypatch):
+    """The duelist payload must carry the model card's instruct-reasoning
+    profile (temperature=1.0, top_p=0.95, top_k=20, min_p=0.0,
+    presence_penalty=1.5, repetition_penalty=1.0) — the old hardcoded
+    temperature=0.1 was a leftover from the OpenRouter era."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured)
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert captured["json"]["temperature"] == 1.0
+    assert captured["json"]["top_p"] == 0.95
+    assert captured["json"]["top_k"] == 20
+    assert captured["json"]["min_p"] == 0.0
+    assert captured["json"]["presence_penalty"] == 1.5
+    assert captured["json"]["repetition_penalty"] == 1.0
+
+
+def test_duel_retries_once_on_timeout(monkeypatch):
+    """A ReadTimeout must trigger exactly one identical retry, then a
+    successful second call wins."""
+    import httpx
+    calls = {"n": 0}
+    body = {"choices": [{"message": {"content": "recovered"}}]}
+
+    class R:
+        status_code = 200
+        is_success = True
+        text = ""
+        def json(self):
+            return body
+
+    async def fake_post(url, json, headers):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("simulated server still generating")
+        return R()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER", timeout_s=0.5)
+    assert out == "recovered"
+    assert calls["n"] == 2  # first attempt timed out, exactly one retry
+
+
+def test_duel_no_retry_on_second_timeout_and_never_raises(monkeypatch):
+    """Two consecutive timeouts = give up after exactly 2 POSTs (no loop),
+    and call_duelist never raises — it returns "" and logs LOUD (the old
+    DEBUG line was how the doom-loop failures stayed invisible)."""
+    import httpx
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            async def fake_post(url, json, headers):
+                raise httpx.ReadTimeout("simulated")
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER", timeout_s=0.5)
+    assert out == ""
+
+
+def test_duel_non_timeout_failure_loud_and_no_retry(monkeypatch, caplog):
+    """A non-timeout fault (e.g. dead endpoint) is not retried and IS
+    logged at WARNING — visible in trader.log, not buried at DEBUG."""
+    import httpx
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            async def fake_post(url, json, headers):
+                calls["n"] += 1
+                raise httpx.ConnectError("simulated dead endpoint")
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with caplog.at_level("WARNING", logger="hermes_trader.agents.duel_store"):
+        out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert out == ""
+    assert calls["n"] == 1  # no retry for non-timeout faults
+    assert any("duelist call failed" in r.message for r in caplog.records)
+
+
+def test_duel_timeout_loud_log(monkeypatch, caplog):
+    """The timeout path's terminal line is WARNING with the runaway hint —
+    the operator-visible half of the 2026-08-27 'make it visible' fix."""
+    import httpx
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            async def fake_post(url, json, headers):
+                raise httpx.ReadTimeout("simulated")
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with caplog.at_level("WARNING", logger="hermes_trader.agents.duel_store"):
+        ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER", timeout_s=0.5)
+    assert any("TIMED OUT" in r.message and "runaway" in r.message
+               for r in caplog.records)
+
+
+def test_primary_call_ai_retries_once_on_timeout(monkeypatch):
+    """_call_ai must survive a timeout, retry ONCE, and return the recovered
+    text — and still return "" (never raise) when both attempts time out.
+    This is the primary path's half of the 2026-08-27 single-retry fix."""
+    import httpx
+    calls = {"n": 0}
+    body = {"choices": [{"message": {"content": "primary-ok"}}]}
+
+    class R:
+        status_code = 200
+        is_success = True
+        text = ""
+        def json(self):
+            return body
+
+    async def fake_post(url, json, headers):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("simulated server still generating")
+        return R()
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    out = research._call_ai("SYS", "USER", api_key="k",
+                            base_url="http://x/v1", model="m")
+    assert out == "primary-ok"
+    assert calls["n"] == 2
+
+
+def test_primary_call_ai_never_raises_on_timeout(monkeypatch, caplog):
+    """Both attempts time out -> _call_ai returns "" (NOT an exception) and
+    logs the terminal 'TIMED OUT on both attempts' WARNING. The caller
+    (research_coin) relies on _call_ai never raising so a slow/dead LLM
+    degrades to PASS-ai_down rather than crashing the worker."""
+    import httpx
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+        async def __aenter__(self):
+            async def fake_post(url, json, headers):
+                raise httpx.ReadTimeout("simulated")
+            self.post = fake_post
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with caplog.at_level("WARNING", logger="hermes_trader.agents.research"):
+        out = research._call_ai("SYS", "USER", api_key="k",
+                                base_url="http://x/v1", model="m")
+    assert out == ""
+    assert any("both attempts" in r.message for r in caplog.records)
 
 
 # ── store ──────────────────────────────────────────────────────────────────

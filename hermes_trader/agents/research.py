@@ -516,6 +516,34 @@ def _call_ai(
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(_async_do_call(api_key, base_url, model, system_prompt, user_message))
+    except httpx.TimeoutException:
+        # Single retry on timeout (2026-08-27, user-requested), matching the
+        # duelist behavior. A ReadTimeout here means the server was still
+        # generating at 120s — either a genuinely slow healthy call or a
+        # runaway; one identical retry is the whole policy (same budget,
+        # same params), bounded at ~2 x 120s. The second timeout falls
+        # through to the generic handler below. This preserves the
+        # historical contract — _call_ai never raises, a failed call yields
+        # "" and parse_verdict's ai_down PASS — while converting a
+        # transiently-busy server from a lost coin to a recovered one.
+        logger.warning(
+            f"[research] LLM call timed out after 120s — retrying once "
+            f"(server may be mid-generation)"
+        )
+        try:
+            return loop.run_until_complete(_async_do_call(api_key, base_url, model, system_prompt, user_message))
+        except httpx.TimeoutException:
+            logger.warning(
+                f"[research] LLM call TIMED OUT on both attempts (~240s total) — "
+                f"coin defaults to PASS ai_down this cycle"
+            )
+            return ""
+    except Exception as e:  # noqa: BLE001 — research worker must survive any LLM fault
+        # Non-timeout fault (ConnectionError to a dead endpoint, bad JSON,
+        # …). LOUD: previously these returned "" via the same silent path
+        # as a 402 — a dead LLM endpoint looked like "no setups".
+        logger.warning(f"[research] LLM call failed (non-fatal): {type(e).__name__}: {e}")
+        return ""
     finally:
         loop.close()
 
