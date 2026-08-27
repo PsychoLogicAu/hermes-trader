@@ -175,10 +175,17 @@ def fetch_hl_candles(
     coin: str,
     interval: str = "5m",
     count: int = 100,
+    fresh: bool = False,
 ) -> List[Candle]:
-    """Fetch candles via HTTP (short-TTL cached per coin+interval+count)."""
+    """Fetch candles via HTTP (short-TTL cached per coin+interval+count).
+
+    `fresh=True` bypasses the READ-side cache (still writes back), so the
+    caller gets the current candle snapshot rather than a sub-TTL cached one.
+    The fast-exit pass uses this so a spike in the still-forming last candle is
+    seen on the next tick instead of waiting out the 90s TTL.
+    """
     cache_key = f"{coin}|{interval}|{count}"
-    if _CANDLE_CACHE_TTL_S > 0:
+    if _CANDLE_CACHE_TTL_S > 0 and not fresh:
         hit = _CANDLE_CACHE.get(cache_key)
         if hit and (time.time() - hit[0]) < _CANDLE_CACHE_TTL_S:
             return hit[1]

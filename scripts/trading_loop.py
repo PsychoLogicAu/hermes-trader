@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 from hermes_trader.agents.perception import scan_once
 from hermes_trader.agents.ta_filter import analyze_perception
 from hermes_trader.agents.research import research
-from hermes_trader.agents.executor import close_position_market, maybe_execute, monitor_exits, momentum_reentry_allowed, route_verdict
+from hermes_trader.agents.executor import close_position_market, fast_exit_pass, maybe_execute, monitor_exits, momentum_reentry_allowed, route_verdict
 from hermes_trader.agents.dsl_exit import active_position_coins, rehydrate_from_exchange
 from hermes_trader.agents.config import get_config
 from hermes_trader.agents.config_store import read_agent_config
@@ -774,6 +774,68 @@ def _process_coin_run(perception, ctx):
         logger.error(f"Error processing {coin}: {type(e).__name__}: {detail}")
         log_event({"event": "error", "coin": coin,
                    "error": f"{type(e).__name__}: {detail}"})
+
+
+# ── Fast-exit daemon (lighter-cadence DSL pass for held positions) ──────────
+# The main-loop DSL monitor pass samples once per full scan cycle (~3 min+
+# under LLM load), so an intrabar spike that round-trips inside one candle
+# can be missed entirely by the mid-only peak (GRASS 2026-08-26: price spiked
+# +1.37% for ~10 min, the sampled peak only reached +0.73%, the phase-2
+# trailing floor never armed, and the position rode out to the 240-min
+# stale_flat_timeout at a loss instead of exiting at a small profit). This
+# daemon closes that gap: while a position is open it re-checks the DSL floors
+# every N seconds, ratcheting each tracker's peak from the FRESH 1m candle
+# high/low (not just the sampled mid) so a wick can no longer be missed.
+#
+# Safety: it only (a) ratchets peaks — a monotonic, additive update — and
+# (b) closes via the same idempotent close_position_market the main loop uses
+# (reduce-only, verified-flat, @serialized + tracker-registry locks), so a
+# rare daemon-vs-mainloop double close is a harmless no-op, never a double-spend.
+def _fast_exit_daemon() -> None:
+    while True:
+        try:
+            fe_cfg = (read_agent_config().get("dsl_exit") or {})
+            interval_s = float(fe_cfg.get("fast_exit_interval_sec", 15) or 15)
+            if interval_s <= 0:
+                # Explicitly disabled via config.
+                time.sleep(30)
+                continue
+            if not active_position_coins():
+                # No position open — sleep and re-poll. This is the normal
+                # idle state; active_position_coins() is an in-memory read.
+                time.sleep(max(5.0, min(interval_s, 30.0)))
+                continue
+            exits = fast_exit_pass()
+            for ex in exits:
+                coin = ex["coin"]
+                lev = ex.get("leverage", 1)
+                lpct = ex.get("leveraged_pct", ex.get("unrealized_pct", 0) * lev)
+                logger.info(f"[dsl-fast] Closing {coin} {ex.get('side','?')} ({lev}x): "
+                            f"{ex['reason']} (margin {lpct:+.2f}% · spot {ex.get('unrealized_pct',0):+.2f}%)")
+                res = close_position_market(coin, ex["reason"])
+                evt = {
+                    "event": "dsl_exit_fast",
+                    "coin": coin,
+                    "side": ex.get("side"),
+                    "leverage": lev,
+                    "reason": ex["reason"],
+                    "unrealized_pct": round(ex.get("unrealized_pct", 0), 4),
+                    "executed": bool(res.get("ok")),
+                    "detail": res.get("order_id") or res.get("noop") or res.get("error"),
+                }
+                if res.get("realized_pnl_pct") is not None:
+                    evt["fill_px"] = res.get("fill_px")
+                    evt["entry_px"] = res.get("entry_px")
+                    evt["realized_pnl_pct"] = res.get("realized_pnl_pct")
+                log_event(evt)
+        except Exception as e:
+            # Never let the daemon die — a bad tick just logs and backs off.
+            logger.error(f"[dsl-fast] pass error: {type(e).__name__}: {e}")
+        time.sleep(max(5.0, min(float((read_agent_config().get("dsl_exit") or {}).get("fast_exit_interval_sec", 15) or 15), 60.0)))
+
+
+threading.Thread(target=_fast_exit_daemon, name="hermes-fast-exit", daemon=True).start()
+logger.info("[dsl-fast] fast-exit daemon started (lighter-cadence DSL checks for held positions)")
 
 while True:
     try:

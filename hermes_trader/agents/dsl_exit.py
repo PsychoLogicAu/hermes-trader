@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
@@ -175,6 +176,41 @@ class DSLTracker:
 
     def is_long(self) -> bool:
         return self.side == "long"
+
+    def ratchet_peak(self, hi: Optional[float], lo: Optional[float]) -> bool:
+        """Ratchet the peak from a candle's extreme (and/or a mid print).
+
+        The mid-only peak (updated in check()) misses intrabar wicks that
+        sample cadence can't see — GRASS 2026-08-26: the position spiked
+        +1.37% inside one 5m candle and back, so the best SAMPLED mid was
+        +0.73%, phase-2 never armed, and the trade rode out to the stale-flat
+        timeout at a loss. Ratcheting from the last candle's high (longs) /
+        low (shorts) means a wick can't be missed: the peak can only ever move
+        in the ratchet direction, so a stale or duplicated extreme is
+        harmless — worst case the floor is set a touch earlier.
+
+        Args:
+            hi: candle high and/or a current mid (a mid >= peak also counts).
+            lo: candle low (shorts' ratchet side).
+        Returns True if the peak moved (and state was persisted).
+        """
+        changed = False
+        with _check_lock:
+            if hi is not None:
+                if self.is_long():
+                    if hi > self.peak_px:
+                        self.peak_px = hi
+                        changed = True
+                else:
+                    if lo is not None and lo < self.peak_px:
+                        self.peak_px = lo
+                        changed = True
+            elif lo is not None and not self.is_long() and lo < self.peak_px:
+                self.peak_px = lo
+                changed = True
+        if changed:
+            _save_state()
+        return changed
 
     def _unrealized_pct(self, mark_px: float) -> float:
         if self.is_long():
@@ -453,6 +489,21 @@ class DSLTracker:
 
 # ── Global tracker registry ──────────────────────────────────────────
 
+# Concurrency: the fast-exit daemon thread (trading_loop) and the main loop
+# BOTH run DSL checks / registry writes, so two classes of race exist:
+#   * two threads `check()` the SAME tracker → both see the floor breach,
+#     both market-close (double-close).
+#   * one thread iterates/rewrites the registry (register/deregister/_save_state)
+#     while another mutates it → RuntimeError: dict changed size during
+#     iteration, or a torn peak/floor written to disk.
+# `_check_lock` serializes ALL per-tracker state mutations (check() + ratchet_peak);
+# `_registry_lock` serializes registry add/remove/persist. `_registry_lock` is an
+# RLock because rehydrate_from_exchange() calls load_state() (same thread).
+# Hierarchy is always check → registry (a check that ratchets persists under
+# registry); the registry lock NEVER requests the check lock, so no deadlock.
+_check_lock = threading.Lock()
+_registry_lock = threading.RLock()
+
 _active_positions: Dict[str, DSLTracker] = {}
 _loaded_from_disk = False
 
@@ -513,11 +564,12 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
 def _save_state() -> None:
     """Atomically write the tracker registry to disk. Best-effort — never raises."""
     try:
-        payload = {
-            "version": _STATE_VERSION,
-            "saved_at": int(time.time() * 1000),
-            "positions": [_tracker_to_dict(t) for t in _active_positions.values()],
-        }
+        with _registry_lock:
+            payload = {
+                "version": _STATE_VERSION,
+                "saved_at": int(time.time() * 1000),
+                "positions": [_tracker_to_dict(t) for t in _active_positions.values()],
+            }
         tmp = DSL_STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
             json.dump(payload, f)
@@ -538,24 +590,25 @@ def load_state(force: bool = False) -> None:
     if _loaded_from_disk and not force:
         return
     _loaded_from_disk = True
-    try:
-        with open(DSL_STATE_FILE) as f:
-            payload = json.load(f)
-    except FileNotFoundError:
-        return
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"[dsl] state file unreadable, ignoring: {e}")
-        return
-    if force:
-        _active_positions.clear()
-    for d in payload.get("positions", []):
+    with _registry_lock:
         try:
-            t = _tracker_from_dict(d)
-            _active_positions[f"{t.coin}_{t.side}"] = t
-        except (KeyError, ValueError, TypeError) as e:
-            logger.warning(f"[dsl] skipping malformed tracker entry: {e}")
-    if not force:
-        logger.info(f"[dsl] rehydrated {len(_active_positions)} tracker(s) from disk")
+            with open(DSL_STATE_FILE) as f:
+                payload = json.load(f)
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(f"[dsl] state file unreadable, ignoring: {e}")
+            return
+        if force:
+            _active_positions.clear()
+        for d in payload.get("positions", []):
+            try:
+                t = _tracker_from_dict(d)
+                _active_positions[f"{t.coin}_{t.side}"] = t
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"[dsl] skipping malformed tracker entry: {e}")
+        if not force:
+            logger.info(f"[dsl] rehydrated {len(_active_positions)} tracker(s) from disk")
 
 
 def register_position(coin: str, side: str, entry_px: float,
@@ -569,7 +622,8 @@ def register_position(coin: str, side: str, entry_px: float,
     tracker = DSLTracker(coin, side, entry_px, entry_time or time.time(), policy,
                          leverage=leverage, entry_atr_pct=entry_atr_pct)
     tracker.current_tp_px = initial_tp_px
-    _active_positions[key] = tracker
+    with _registry_lock:
+        _active_positions[key] = tracker
     _save_state()
     atr_note = ""
     pol = tracker.policy
@@ -595,12 +649,13 @@ def active_position_coins() -> Dict[str, str]:
 def deregister_position(coin: str, side: str) -> bool:
     """Remove a tracker (after a successful close). Returns True if removed."""
     key = f"{coin}_{side}"
-    if key in _active_positions:
+    with _registry_lock:
+        if key not in _active_positions:
+            return False
         del _active_positions[key]
-        _save_state()
-        logger.info(f"[dsl] Deregistered {key}")
-        return True
-    return False
+    _save_state()
+    logger.info(f"[dsl] Deregistered {key}")
+    return True
 
 
 def _policy_from_config() -> ExitPolicy:
@@ -657,83 +712,98 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
     on timed-out dexes from being reset to fresh state next tick.
     """
     load_state()
-    live_keys = set()
-    added = 0
-    for p in asset_positions or []:
-        pos = p.get("position", {}) if isinstance(p, dict) else {}
-        coin = pos.get("coin")
-        if not coin:
-            continue
-        try:
-            szi = float(pos.get("szi", "0") or 0)
-            entry = float(pos.get("entryPx") or 0)
-        except (TypeError, ValueError):
-            continue
-        if szi == 0 or entry <= 0:
-            continue
-        side = "long" if szi > 0 else "short"
-        key = f"{coin}_{side}"
-        live_keys.add(key)
-        pos_leverage = pos.get("leverage", {})
-        lev = int(pos_leverage.get("value", 0) or 0) if isinstance(pos_leverage, dict) else int(pos_leverage or 0)
-        if not lev:
-            lev = default_leverage
-        if key not in _active_positions:
-            # Inherit the CURRENT config exit policy, never the bare ExitPolicy()
-            # default. A synthesize happens after a blackout-induced drop (the
-            # exchange momentarily reported the position gone), and the default
-            # is LOOSER (2.5%/50% ROE vs config 2.0%/30%) — re-synthesizing with
-            # the default silently widened live stops ("policy drift"). Pull
-            # config when the caller didn't pass an explicit policy.
-            synth_policy = policy if policy is not None else _policy_from_config()
-            _active_positions[key] = DSLTracker(coin, side, entry, time.time(), synth_policy,
-                                                leverage=lev)
-            added += 1
-            logger.info(f"[dsl] Synthesized tracker for existing {key} @ {entry} ({lev}x)")
+    # Registry span under `_registry_lock` (RLock → the load_state() above and
+    # the _save_state() below re-enter it safely): the read-decide-mutate of
+    # `_active_positions` must be atomic against the fast-exit daemon, which
+    # snapshots the registry between its own ticks. No network I/O happens in
+    # this span, so holding the lock cannot starve the daemon for long.
+    # Hierarchy: registry → check (never the reverse), so no deadlock.
+    with _registry_lock:
+        live_keys = set()
+        added = 0
+        for p in asset_positions or []:
+            pos = p.get("position", {}) if isinstance(p, dict) else {}
+            coin = pos.get("coin")
+            if not coin:
+                continue
+            try:
+                szi = float(pos.get("szi", "0") or 0)
+                entry = float(pos.get("entryPx") or 0)
+            except (TypeError, ValueError):
+                continue
+            if szi == 0 or entry <= 0:
+                continue
+            side = "long" if szi > 0 else "short"
+            key = f"{coin}_{side}"
+            live_keys.add(key)
+            pos_leverage = pos.get("leverage", {})
+            lev = int(pos_leverage.get("value", 0) or 0) if isinstance(pos_leverage, dict) else int(pos_leverage or 0)
+            if not lev:
+                lev = default_leverage
+            if key not in _active_positions:
+                # Inherit the CURRENT config exit policy, never the bare ExitPolicy()
+                # default. A synthesize happens after a blackout-induced drop (the
+                # exchange momentarily reported the position gone), and the default
+                # is LOOSER (2.5%/50% ROE vs config 2.0%/30%) — re-synthesizing with
+                # the default silently widened live stops ("policy drift"). Pull
+                # config when the caller didn't pass an explicit policy.
+                synth_policy = policy if policy is not None else _policy_from_config()
+                _active_positions[key] = DSLTracker(coin, side, entry, time.time(), synth_policy,
+                                                    leverage=lev)
+                added += 1
+                logger.info(f"[dsl] Synthesized tracker for existing {key} @ {entry} ({lev}x)")
 
-    def _key_in_queried_scope(k: str) -> bool:
-        """True iff the dex behind this tracker key was queried this cycle.
-        Key format `<coin>_<side>`; coin format `BTC` or `xyz:MU`."""
-        if queried_dexes is None:
-            return True
-        coin, _, _ = k.rpartition("_")
-        dex = coin.split(":", 1)[0] if ":" in coin else ""
-        return dex in queried_dexes
+        def _key_in_queried_scope(k: str) -> bool:
+            """True iff the dex behind this tracker key was queried this cycle.
+            Key format `<coin>_<side>`; coin format `BTC` or `xyz:MU`."""
+            if queried_dexes is None:
+                return True
+            coin, _, _ = k.rpartition("_")
+            dex = coin.split(":", 1)[0] if ":" in coin else ""
+            return dex in queried_dexes
 
-    stale = [k for k in _active_positions
-             if k not in live_keys and _key_in_queried_scope(k)]
-    for k in stale:
-        del _active_positions[k]
-        logger.info(f"[dsl] Dropped stale tracker {k} (no live exchange position)")
-    skipped = [k for k in _active_positions
-               if k not in live_keys and not _key_in_queried_scope(k)]
-    if skipped:
-        logger.warning(
-            f"[dsl] Preserving {len(skipped)} tracker(s) whose dex query failed "
-            f"this cycle (will retry next tick): {', '.join(skipped[:5])}"
-            + (f" +{len(skipped)-5} more" if len(skipped) > 5 else "")
-        )
+        stale = [k for k in _active_positions
+                 if k not in live_keys and _key_in_queried_scope(k)]
+        for k in stale:
+            del _active_positions[k]
+            logger.info(f"[dsl] Dropped stale tracker {k} (no live exchange position)")
+        skipped = [k for k in _active_positions
+                   if k not in live_keys and not _key_in_queried_scope(k)]
+        if skipped:
+            logger.warning(
+                f"[dsl] Preserving {len(skipped)} tracker(s) whose dex query failed "
+                f"this cycle (will retry next tick): {', '.join(skipped[:5])}"
+                + (f" +{len(skipped)-5} more" if len(skipped) > 5 else "")
+            )
 
-    if added or stale:
-        _save_state()
+        if added or stale:
+            _save_state()
 
 
 def check_all_positions(mids: Dict[str, float]) -> List[ExitVerdict]:
     """Check all active positions against current mids. Call each scan tick.
 
     Returns list of ExitVerdict for positions that should be closed.
+
+    Holds `_check_lock` for the whole pass: the main loop and the fast-exit
+    daemon thread both funnel through here, and `check()` mutates per-tracker
+    state (peak, floor, consecutive_breaches) in place. Serializing the pass
+    makes a floor-breach verdict exclusive — only ONE caller sees a given
+    breach and issues the close (the other's reduce-only close is then a
+    verified `already_flat` no-op, never a double-spend or side flip).
     """
     exits = []
-    for tracker in list(_active_positions.values()):
-        mark_px = mids.get(tracker.coin)
-        # Handle both str and float values from different sources
-        if mark_px is not None:
-            try:
-                mark_px = float(mark_px)
-            except (ValueError, TypeError):
-                continue
-            if mark_px > 0:
-                verdict = tracker.check(mark_px)
-                if verdict.exit:
-                    exits.append(verdict)
+    with _check_lock:
+        for tracker in list(_active_positions.values()):
+            mark_px = mids.get(tracker.coin)
+            # Handle both str and float values from different sources
+            if mark_px is not None:
+                try:
+                    mark_px = float(mark_px)
+                except (ValueError, TypeError):
+                    continue
+                if mark_px > 0:
+                    verdict = tracker.check(mark_px)
+                    if verdict.exit:
+                        exits.append(verdict)
     return exits

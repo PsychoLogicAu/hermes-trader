@@ -269,9 +269,11 @@ def test_forced_reval_mid_failure_swallowed():
 # ── Phase 3: source wiring (integration invariants) ───────────────────────────
 
 def test_loop_wiring():
-    assert ("from hermes_trader.agents.executor import close_position_market, "
-            "maybe_execute, monitor_exits, momentum_reentry_allowed, "
-            "route_verdict") in _loop_src
+    assert (
+        "from hermes_trader.agents.executor import close_position_market, "
+        "fast_exit_pass, maybe_execute, monitor_exits, momentum_reentry_allowed, "
+        "route_verdict"
+    ) in _loop_src
     assert "_forced = _forced_held_reeval(results, _cfg_cd, held_coins)" in _loop_src
     assert "_worklist = list(results) + _forced" in _loop_src
     assert "for perception in _worklist:" in _loop_src
