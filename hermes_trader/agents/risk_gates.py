@@ -5,10 +5,13 @@ All gates are evaluated; results are collected for telemetry (no short-circuit).
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Dict, List, Optional
 
 GateResult = Dict[str, Any]  # {pass: bool, reason?: str}
+
+logger = logging.getLogger(__name__)
 
 
 class GateContext:
@@ -439,6 +442,124 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
     return {"pass": False, "reason": reason}
 
 
+def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Band counter-trend breach conviction gate (SHADOW by default).
+
+    Deterministic encoding of the shape the research prompt tells the LLM is
+    a reversion, not a continuation: the band (same interval/params as the
+    band_snapback trigger config) is TRENDING — drift > max_drift_pct — and
+    price is >= `min_breach_pct` beyond the OPPOSITE-side edge:
+
+      band drifts DOWN, price above the upper edge  + LONG entry
+          -> top of a relief rally = start of the next down-swing
+      band drifts UP,   price below the lower edge  + SHORT entry
+          -> bottom of a pullback = start of the next up-swing
+
+    The bounce/dip entry fights the drift and the nearest short-term
+    reversion is back toward the band — AGAINST the entry. The LLM has been
+    rationalizing exactly this as "the drift is already priced in ->
+    continuation" (GRASS long 2026-08-26 19:07: 1h band DOWN 6.4% drift,
+    px +6.6% vs upper edge, entered long at 0.82 conf -> -9.6% ROE). When
+    the breach shape matches the entry side, the trade must clear the
+    elevated bar: confidence >= `min_conf` (0.90). A genuinely
+    high-conviction continuation still gets through; the 0.82
+    rationalization does not. There is deliberately NO composite-score
+    bypass on this gate — the composite is a multi-trigger tally and the
+    shape it would excuse here is precisely the one this gate encodes.
+
+    SHADOW MODE: with `shadow_mode` true the gate STRUCTURALLY returns
+    pass=True and only carries a `shadow_would_block` marker, which the
+    executor logs loudly — same pattern as chronos_mismatch_gate. It cannot
+    alter live execution until the operator flips shadow_mode to false in
+    .agent-config.json. `enabled` false (code default) disables it
+    entirely.
+
+    Candles are fetched inside the gate on the band interval (same
+    interval/window as the band_snapback trigger config), so the read-side
+    TTL cache in hl_client makes this a hit when perception's band trigger
+    already pulled the same series seconds earlier — no extra network cost
+    in the common path, and the gate stays self-contained (no GateContext
+    plumbing).
+
+    Fail-safes: disabled / no band config / candle fetch failure / short
+    history / band not trending / breach below `min_breach_pct` / entry on
+    the WITH-drift side (chasing the drift, not the bounce) = no opinion = pass.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    from hermes_trader.agents.config_store import read_agent_config
+    from hermes_trader.client.hl_client import fetch_hl_candles
+    from hermes_trader.indicators.triggers import band_state
+
+    try:
+        agent_cfg = read_agent_config() or {}
+    except Exception as e:
+        logger.debug(f"[gate] band_counter_breach: agent-config read failed: {e}")
+        return {"pass": True}
+    bs = agent_cfg.get("band_snapback") or {}
+    if not bool(bs.get("enabled")):
+        return {"pass": True}
+    ov = (bs.get("overrides") or {}).get(ctx.coin) or {}
+    bs = {**bs, **{k: v for k, v in ov.items() if v is not None}}
+    interval = str(bs.get("interval", "1h"))
+    window = int(bs.get("window", 48))
+
+    try:
+        candles = fetch_hl_candles(ctx.coin, interval=interval, count=2 * window + 4)
+    except Exception as e:
+        logger.debug(f"[gate] band_counter_breach: candle fetch failed for {ctx.coin}: {e}")
+        return {"pass": True}
+    if not candles:
+        return {"pass": True}
+    try:
+        st = band_state(
+            candles,
+            window=window,
+            max_drift_pct=float(bs.get("max_drift_pct", 1.5)),
+            ma_type=str(bs.get("ma_type", "ema")),
+            band_span=bs.get("band_span"),
+        )
+    except Exception as e:
+        logger.debug(f"[gate] band_counter_breach: band_state failed for {ctx.coin}: {e}")
+        return {"pass": True}
+    if st is None or not st["trending"]:
+        return {"pass": True}
+
+    # Breach = price beyond the OPPOSITE-side edge of the drift: drift DOWN
+    # + above the upper edge (bounce) / drift UP + below the lower edge (dip).
+    # The entry side must be the bounce/dip side — the counter-trend one.
+    min_breach = float(cfg.get("min_breach_pct", 1.0) or 1.0)
+    if st["direction"] == "DOWN" and ctx.trade_side == "long":
+        breach = st["breach_opposite_pct"]
+        shape = f"bounce above the upper edge of a DOWN-drifting {interval} band (drift {st['drift_pct']:.1f}%, breach {breach:.1f}%)"
+    elif st["direction"] == "UP" and ctx.trade_side == "short":
+        breach = st["breach_opposite_pct"]
+        shape = f"dip below the lower edge of an UP-drifting {interval} band (drift {st['drift_pct']:.1f}%, breach {breach:.1f}%)"
+    else:
+        return {"pass": True}  # WITH the drift (or no breach) — not this shape
+    if breach < min_breach:
+        return {"pass": True}
+
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    if ctx.confidence >= min_conf:
+        return {"pass": True, "via": "confidence"}
+    reason = (
+        f"[gate:band_counter_breach] {ctx.coin} {ctx.trade_side} at conf "
+        f"{ctx.confidence:.2f} < {min_conf:.2f}: {shape} — the counter-trend "
+        f"chase at the top/bottom of a drift needs >= {min_conf:.2f} conviction"
+    )
+    if bool(cfg.get("shadow_mode", True)):
+        logger.warning(
+            f"[gate] band_counter_breach would-block {ctx.coin} {ctx.trade_side} "
+            f"(conf {ctx.confidence:.2f} < {min_conf:.2f}): {shape} — shadow_mode "
+            f"ON, logging only, not blocking. Set "
+            f"band_counter_breach_gate.shadow_mode=false to enable."
+        )
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def eval_all_gates(
     ctx: GateContext,
     config: Optional[Dict[str, Any]] = None,
@@ -505,6 +626,11 @@ def eval_all_gates(
     # would-block until shadow_mode is flipped in .agent-config.json.
     results["chronos_mismatch"] = chronos_mismatch_gate(
         ctx, effective_config.get("chronos_mismatch_gate") or {})
+    # Band counter-trend breach (GRASS shape): disabled by default in the
+    # shadow-gate config block below; when enabled it runs in shadow_mode
+    # (would-block marker) until the operator promotes it.
+    results["band_counter_breach"] = band_counter_breach_gate(
+        ctx, effective_config.get("band_counter_breach_gate") or {})
 
     block_reasons = []
     blocked = False

@@ -40,7 +40,7 @@ from hermes_trader.client.exchange import (
     place_hl_trigger_order,
     set_leverage,
 )
-from hermes_trader.client.hl_client import fetch_account_state, resolve_user_address
+from hermes_trader.client.hl_client import fetch_account_state, fetch_hl_candles, resolve_user_address
 
 logger = logging.getLogger(__name__)
 
@@ -905,6 +905,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Band counter-trend breach shadow gate: same would-block pattern. Fires
+    # on the GRASS shape — a counter-trend bounce/dip entry extended beyond
+    # the opposite edge of a drifting MA band. Logs loudly while shadow_mode
+    # is on so we can count false positives before it can block anything.
+    _bc = gate_output["results"].get("band_counter_breach") or {}
+    if _bc.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] band_counter_breach WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     if gate_output["blocked"]:
         # ── Capital-rotation (Phase-1 lever) — SHADOW by default ─────────────
         # Phase-1 finding: 94% of missed movers die at the 300% cap / max_concurrent
@@ -1251,6 +1264,81 @@ def monitor_exits(mids: Dict[str, float]) -> List[Dict[str, Any]]:
     (phase1/phase2/timeout). `leveraged_pct` ≈ spot move × leverage and matches
     what Hyperliquid's UI shows on the user's margin.
     """
+    exits = check_all_positions(mids)
+    return [
+        {
+            "coin": v.coin,
+            "side": v.position_side,
+            "phase": v.phase,
+            "leverage": v.leverage,
+            "reason": v.reason,
+            "unrealized_pct": v.unrealized_pct,
+            "leveraged_pct": v.unrealized_pct * v.leverage,
+        }
+        for v in exits
+    ]
+
+
+def fast_exit_pass(
+    candle_interval: str = "1m",
+    candle_count: int = 3,
+) -> List[Dict[str, Any]]:
+    """Lighter-cadence DSL exit check for the (few) HELD positions only.
+
+    The main-loop monitor pass samples once per full scan cycle (~3min+ under
+    load), so an intrabar spike that round-trips inside one candle can be
+    missed entirely by the mid-only peak (GRASS 2026-08-26: spiked +1.37%,
+    sampled peak +0.73%, phase-2 never armed, timed out at a loss). This pass
+    is run from a dedicated ~15s daemon thread while a position is open:
+
+      1. Ratchet each held tracker's PEAK from a fresh 1m candle's high/low
+         (not just the sampled mid) — a wick can no longer be missed.
+      2. Run the full DSL floor check on a fresh mid.
+
+    Returns verdicts shaped exactly like `monitor_exits`, so the caller
+    (trading_loop) closes via the SAME idempotent `close_position_market` path.
+    Only active (held) trackers are touched, so the steady-state cost is
+    `#open_positions` fresh 1m-candle + mid fetches per interval — negligible.
+    Never raises: a transient fetch failure just skips that coin this tick.
+    """
+    from hermes_trader.agents import dsl_exit
+    trackers = list(dsl_exit._active_positions.values())
+    if not trackers:
+        return []
+
+    mids: Dict[str, float] = {}
+    highs: Dict[str, List[float]] = {t.coin: [] for t in trackers}
+    lows: Dict[str, List[float]] = {t.coin: [] for t in trackers}
+
+    for tr in trackers:
+        try:
+            # Fresh mid for the floor check + also a candidate peak extreme.
+            mid = get_hl_price(tr.coin)
+            if mid > 0:
+                mids[tr.coin] = mid
+                highs[tr.coin].append(mid)
+                lows[tr.coin].append(mid)
+            # Fresh 1m candle extremes for the peak ratchet. fresh=True
+            # bypasses the read-side TTL so the still-forming candle is seen
+            # every tick (the point of the tighter cadence).
+            candles = fetch_hl_candles(tr.coin, candle_interval, candle_count, fresh=True)
+            for c in candles:
+                highs[tr.coin].append(float(c.h))
+                lows[tr.coin].append(float(c.l))
+        except Exception as e:
+            logger.warning(f"[dsl-fast] {tr.coin}: peak/mid fetch failed ({e}); skipping this tick")
+
+    if not mids:
+        return []
+
+    for coin, h_list in highs.items():
+        lo_list = lows.get(coin) or []
+        hi = max(h_list) if h_list else None
+        lo = min(lo_list) if lo_list else None
+        tr = dsl_exit._active_positions.get(f"{coin}_long") or dsl_exit._active_positions.get(f"{coin}_short")
+        if tr is not None:
+            tr.ratchet_peak(hi, lo)
+
     exits = check_all_positions(mids)
     return [
         {
