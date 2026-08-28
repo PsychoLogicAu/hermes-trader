@@ -952,6 +952,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         logger.debug(f"[executor] chronos sync read failed for {analysis['coin']}: {_pe}")
         _chronos_med = None
         _chronos_q10p = _chronos_q90p = None
+    # Gate-side squeeze read for the squeeze_extreme gate: same sync,
+    # cache-first read the attach uses below (the attach runs later, at the
+    # trade-result site, so it sees whatever this read leaves in the cache).
+    # The flag is recomputed per candidate side inside _fetch, so a cache
+    # hit still reflects THIS candidate, not the previous one.
+    try:
+        from hermes_trader.agents.squeeze_signal import get_squeeze_signal_sync as _ss
+        _squeeze_sig = _ss(analysis["coin"], trade_side)
+        _squeeze_extreme = _squeeze_sig.extreme_no_breakout if _squeeze_sig else None
+    except Exception as _se:
+        logger.debug(f"[executor] squeeze sync read failed for {analysis['coin']}: {_se}")
+        _squeeze_extreme = None
     ctx = GateContext(
         confidence=analysis["confidence"],
         current_positions=positions,
@@ -974,6 +986,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         chronos_median_pct=_chronos_med,
         chronos_q10_path_pct=_chronos_q10p,
         chronos_q90_path_pct=_chronos_q90p,
+        squeeze_extreme_no_breakout=_squeeze_extreme,
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
@@ -1014,6 +1027,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Squeeze extreme-without-breakout shadow gate: the chasing-without-
+    # confirmation bucket (channel extreme, no fresh aligned breakout). The
+    # flag itself is already on the trade-result attach
+    # (squeeze_extreme_no_breakout) — this line is the would-block marker.
+    _sx = gate_output["results"].get("squeeze_extreme") or {}
+    if _sx.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] squeeze_extreme WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_sx.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     if gate_output["blocked"]:
