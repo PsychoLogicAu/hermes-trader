@@ -35,6 +35,8 @@ class GateContext:
         binary_news_match: str = "",
         peak_daily_pnl: float = 0.0,
         chronos_median_pct: Optional[float] = None,
+        chronos_q10_path_pct: Optional[List[float]] = None,
+        chronos_q90_path_pct: Optional[List[float]] = None,
     ):
         self.confidence = confidence
         self.current_positions = current_positions
@@ -65,6 +67,13 @@ class GateContext:
         # never computes). None = no usable forecast → chronos_mismatch_gate
         # has no opinion and passes.
         self.chronos_median_pct = chronos_median_pct
+        # Per-step Chronos-2 quantile paths, % vs last close (same warm cache;
+        # None on cold cache / old signals / errors). Fed to
+        # chronos_tail_trigger_gate — the shape-based counter-forecast veto
+        # validated by the 2026-08-28 60-flag replay (adverse-quantile early
+        # tail > path-mean > endpoint for loss avoidance).
+        self.chronos_q10_path_pct = chronos_q10_path_pct
+        self.chronos_q90_path_pct = chronos_q90_path_pct
 
 
 def confidence_gate(ctx: GateContext, min_confidence: float) -> GateResult:
@@ -442,6 +451,65 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
     return {"pass": False, "reason": reason}
 
 
+def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Chronos tail-trigger conviction gate (SHADOW by default).
+
+    Shape-based counter-forecast veto, validated by the 2026-08-28 60-flag
+    replay: when the ADVERSE quantile of the cached Chronos-2 forecast path
+    (q10 for longs, q90 for shorts) breaches `-min_adv_path_pct` at ANY of
+    the first `window_steps` steps (5m candles each — 6 = 30m ahead), the
+    entry is vetoed unless it clears the same elevated-conviction bar as
+    `chronos_mismatch` (conf >= min_conf OR composite >= min_composite).
+
+    Why the tail instead of the path mean (the reduction the mismatch gate
+    uses): the replay showed the mean/endpoint scalars save ≈$0.96 across 14
+    executed flags while the K=6/X=3.0 tail trigger saved ≈$3.21 — it blocks
+    the same 4 stop-outs (MOVE, TRUMP, FARTCOIN x2, all within ~25m of entry)
+    but RELEASES the small mean-reverting winners the path-mean gate kills.
+    The q10 path also overstates realized magnitude ~2x, so the threshold is
+    a boolean trip-wire near half the 5% spot stop — not a magnitude
+    forecast — and deliberately sits well inside the stop.
+
+    SHADOW MODE: with `shadow_mode` true (default, and how the operator armed
+    it 2026-08-28) the gate STRUCTURALLY returns pass=True and only carries a
+    `shadow_would_block` marker, which the executor logs loudly next to the
+    existing chronos_mismatch shadow line. It cannot alter live execution
+    until the operator flips shadow_mode to false in .agent-config.json.
+
+    Fail-safes (no-opinion pass): disabled; no warm cached signal (cold cache
+    / model down / disabled); paths missing (pre-change cache entries); path
+    shorter than window_steps; tail not breached.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    k = int(cfg.get("window_steps", 6) or 6)
+    x = float(cfg.get("min_adv_path_pct", 3.0) or 3.0)
+    if k <= 0 or x <= 0:
+        return {"pass": True}
+    path = (ctx.chronos_q10_path_pct if ctx.trade_side == "long"
+            else ctx.chronos_q90_path_pct)
+    if not path or len(path) < k:
+        return {"pass": True}
+    window = path[:k]
+    tail = min(window) if ctx.trade_side == "long" else max(window)
+    breached = tail <= -x if ctx.trade_side == "long" else tail >= x
+    if not breached:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"chronos_tail_trigger ({ctx.trade_side} entry, adverse q-path "
+              f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
+              f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
+              f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
+              f"{min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -626,6 +694,13 @@ def eval_all_gates(
     # would-block until shadow_mode is flipped in .agent-config.json.
     results["chronos_mismatch"] = chronos_mismatch_gate(
         ctx, effective_config.get("chronos_mismatch_gate") or {})
+    # Tail-trigger (shape-based) counter-forecast veto. Same warm cache and
+    # same elevated-conviction bar as chronos_mismatch, but keys off the
+    # ADVERSE quantile PATH (min q10 / max q90 over the first `window_steps`
+    # 5m steps) rather than the path-mean scalar. SHADOW until shadow_mode
+    # is flipped. Passes when the warm cache has no per-step paths.
+    results["chronos_tail_trigger"] = chronos_tail_trigger_gate(
+        ctx, effective_config.get("chronos_tail_trigger_gate") or {})
     # Band counter-trend breach (GRASS shape): disabled by default in the
     # shadow-gate config block below; when enabled it runs in shadow_mode
     # (would-block marker) until the operator promotes it.

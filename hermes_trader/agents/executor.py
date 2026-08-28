@@ -221,11 +221,79 @@ def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> N
             )
         else:
             result["chronos_aligned"] = None
+        # Tail value for the chronos_tail_trigger_gate shadow log: adverse
+        # quantile extreme over the first `window_steps` steps of the path
+        # (min q10 for longs, max q90 for shorts). Same warm cache, no
+        # recompute. None when the signal predates per-step path storage.
+        _tcfg = None
+        try:
+            from hermes_trader.agents.config import get_config as _get_cfg
+            _tcfg = (_get_cfg().get("chronos_tail_trigger_gate") or {})
+        except Exception:
+            _tcfg = {}
+        _k = int((_tcfg or {}).get("window_steps", 6) or 6)
+        _tpath = (sig.q10_path_pct if side == "long" else sig.q90_path_pct) or None
+        if _tpath and len(_tpath) >= _k:
+            _tw = _tpath[:_k]
+            _tail = min(_tw) if side == "long" else max(_tw)
+            result["chronos_tail_pct"] = round(_tail * 10) / 10
+        else:
+            result["chronos_tail_pct"] = None
         result["chronos_error"] = sig.error
     except Exception as e:
         result["chronos_median_pct"] = None
         result["chronos_aligned"] = None
         result["chronos_error"] = str(e)
+
+
+def _attach_squeeze_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach the shadow squeeze-breakout fields to a trade result dict.
+
+    SHADOW ONLY: logged for forward validation, never gating or sizing.
+    The per-coin TTL cache makes this a ~free read steady-state; a cold
+    cache miss costs one 1h candle fetch (itself 90s-TTL cached).
+    Non-fatal: any failure yields an error field, the trade path continues.
+    """
+    try:
+        from hermes_trader.agents.squeeze_signal import (
+            get_squeeze_signal_sync, record_shadow,
+        )
+        sig = get_squeeze_signal_sync(coin, side)
+        # Composite entry-gate observability (shadow): last confirmed 1h
+        # close's position in the prior 48h range + the "extreme with no
+        # confirming breakout" flag. Logged only — NEVER gates or sizes.
+        if sig.active:
+            mode = str(result.get("mode") or "")
+            result["squeeze_side"] = sig.side
+            result["squeeze_score"] = round(sig.score, 2) if sig.score is not None else None
+            result["squeeze_ext_pct"] = round(sig.ext_pct, 2) if sig.ext_pct is not None else None
+            result["squeeze_aligned"] = sig.side == side
+            result["squeeze_error"] = None
+            if sig.side != side:
+                # The candidate is about to trade AGAINST a live breakout in
+                # the other direction — that is exactly the information the
+                # shadow exists to collect; keep the row but flag it.
+                result["squeeze_counter_signal"] = True
+            result["squeeze_chan_pos"] = round(sig.chan_pos, 3) if sig.chan_pos is not None else None
+            result["squeeze_extreme_no_breakout"] = sig.extreme_no_breakout
+            record_shadow(coin, side, sig,
+                          analysis_id=result.get("analysis_id"), mode=mode)
+        else:
+            result["squeeze_side"] = None
+            result["squeeze_score"] = None
+            result["squeeze_ext_pct"] = None
+            result["squeeze_aligned"] = None
+            result["squeeze_error"] = sig.error
+            result["squeeze_chan_pos"] = round(sig.chan_pos, 3) if sig.chan_pos is not None else None
+            result["squeeze_extreme_no_breakout"] = sig.extreme_no_breakout
+    except Exception as e:
+        result["squeeze_side"] = None
+        result["squeeze_score"] = None
+        result["squeeze_ext_pct"] = None
+        result["squeeze_aligned"] = None
+        result["squeeze_error"] = str(e)
+        result["squeeze_chan_pos"] = None
+        result["squeeze_extreme_no_breakout"] = None
 
 
 def build_open_config_snapshot(regime: str, exit_policy_label: str,
@@ -507,6 +575,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 "analysis_id": analysis["id"], "reason": runner_block,
             }
             _attach_chronos_to_result(result, coin, side)
+            _attach_squeeze_to_result(result, coin, side)
             return result
 
     # Idempotency: don't double-execute
@@ -857,6 +926,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             binary_news_match = news_text[:140]
 
     trade_side = analysis.get("side", "long") or "long"
+    # The squeeze-breakout SHADOW signal is attached at the trade-result
+    # sites via _attach_squeeze_to_result (same pattern as the Chronos
+    # attach): cache-first sync read, one 1h candle fetch on a cold miss
+    # (90s shared-TTL), logged + ledgered only. Never gates, never sizes.
+
     # Cache-only Chronos read for the mismatch gate: the research prompt
     # (_chronos_block) computes this same forecast per coin, so this is a
     # cache hit — peek never computes and never blocks. None (cold cache /
@@ -865,9 +939,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         from hermes_trader.agents.chronos_signal import peek_chronos
         _csig = peek_chronos(analysis["coin"])
         _chronos_med = _csig.median_pct if _csig else None
+        # Per-step quantile paths for the tail-trigger gate (warm cache only;
+        # None for cold cache / pre-change signals — the gate then passes).
+        _chronos_q10p = _csig.q10_path_pct if _csig else None
+        _chronos_q90p = _csig.q90_path_pct if _csig else None
     except Exception as _pe:
         logger.debug(f"[executor] chronos peek failed for {analysis['coin']}: {_pe}")
         _chronos_med = None
+        _chronos_q10p = _chronos_q90p = None
     ctx = GateContext(
         confidence=analysis["confidence"],
         current_positions=positions,
@@ -888,6 +967,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         whale_signal_fired=bool(analysis.get("whale_signal")) and bool(config.get("whale_regime_bypass", False)),
         peak_daily_pnl=memory.peak_daily_pnl(),
         chronos_median_pct=_chronos_med,
+        chronos_q10_path_pct=_chronos_q10p,
+        chronos_q90_path_pct=_chronos_q90p,
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
@@ -903,6 +984,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Tail-trigger shadow: same would-block pattern, keys off the adverse
+    # quantile PATH (validated K=6/X=3.0 in the 2026-08-28 60-flag replay —
+    # saved ~$3.21 vs ~$0.96 for the path-mean reduction).
+    _ct = gate_output["results"].get("chronos_tail_trigger") or {}
+    if _ct.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] chronos_tail_trigger WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_ct.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     # Band counter-trend breach shadow gate: same would-block pattern. Fires
@@ -986,6 +1079,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             "gate_results": gate_output["results"],
         }
         _attach_chronos_to_result(result, coin, side)
+        _attach_squeeze_to_result(result, coin, side)
         return result
 
     if shadow_mode:
@@ -998,6 +1092,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             "size_usd": trade_notional,
         }
         _attach_chronos_to_result(_res, coin, _side)
+        _attach_squeeze_to_result(_res, coin, _side)
         return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
@@ -1254,6 +1349,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "sl_missing": sl_missing,
     }
     _attach_chronos_to_result(result, coin, trade_side)
+    _attach_squeeze_to_result(result, coin, trade_side)
     return result
 
 
