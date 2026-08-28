@@ -62,13 +62,15 @@ class GateContext:
         # The headline + matched term that tripped the binary-news gate, for
         # log visibility ("which article blocked this?").
         self.binary_news_match = binary_news_match
-        # Median move of this coin's (warm) Chronos-2 forecast, % vs last close.
-        # Side-independent; fed by maybe_execute via peek_chronos (cache-only,
-        # never computes). None = no usable forecast → chronos_mismatch_gate
+        # Median move of this coin's Chronos-2 forecast, % vs last close.
+        # Side-independent; fed by maybe_execute via get_chronos_signal_sync
+        # (warm cache hit, or one bounded compute on a cold/expired cache —
+        # never a cache-only peek, which raced the attach compute).
+        # None = no usable forecast → chronos_mismatch_gate
         # has no opinion and passes.
         self.chronos_median_pct = chronos_median_pct
-        # Per-step Chronos-2 quantile paths, % vs last close (same warm cache;
-        # None on cold cache / old signals / errors). Fed to
+        # Per-step Chronos-2 quantile paths, % vs last close (same sync read;
+        # None on error signals / old shapes). Fed to
         # chronos_tail_trigger_gate — the shape-based counter-forecast veto
         # validated by the 2026-08-28 60-flag replay (adverse-quantile early
         # tail > path-mean > endpoint for loss avoidance).

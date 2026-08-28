@@ -146,6 +146,16 @@ def _install_mocks():
         lambda result, coin, side: result.update(
             chronos_median_pct=None, chronos_aligned=None, chronos_error="test")
     )
+    # Gate-side Chronos read: maybe_execute calls get_chronos_signal_sync
+    # (warm-cache / bounded compute). Stub it — the test must not fetch
+    # candles or load the model. Error signal = "no usable forecast", so
+    # both chronos shadow gates pass with no opinion.
+    class _NoopSig:
+        median_pct = None
+        q10_path_pct = None
+        q90_path_pct = None
+        error = "test"
+    ex.get_chronos_signal_sync = lambda coin, side: _NoopSig()
     os.environ["HYPERLIQUID_PRIVATE_KEY"] = "0xTEST"
 
 

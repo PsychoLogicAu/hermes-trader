@@ -931,20 +931,25 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # attach): cache-first sync read, one 1h candle fetch on a cold miss
     # (90s shared-TTL), logged + ledgered only. Never gates, never sizes.
 
-    # Cache-only Chronos read for the mismatch gate: the research prompt
-    # (_chronos_block) computes this same forecast per coin, so this is a
-    # cache hit — peek never computes and never blocks. None (cold cache /
-    # disabled) simply means the gate has no opinion.
+    # Sync Chronos read for the mismatch / tail-trigger gates:
+    # get_chronos_signal_sync returns the warm cache entry when fresh and
+    # computes once on a cold/expired cache (one 5m candleSnapshot POST +
+    # ~40ms CPU inference, bounded by the 90s shared candle cache). The
+    # cache-only peek raced the attach compute — the attach's fresh signal
+    # landed ~5s AFTER the gate read an expired cache, so the shadow gates
+    # systematically missed would-blocks on fresh-compute trades (2026-08-28
+    # ENA: tail −3.9% attached, gate passed on a 375s-old entry). An error
+    # signal (disabled / no candles / inference failure) carries no usable
+    # values → the gates then simply have no opinion.
     try:
-        from hermes_trader.agents.chronos_signal import peek_chronos
-        _csig = peek_chronos(analysis["coin"])
+        _csig = get_chronos_signal_sync(analysis["coin"], trade_side)
         _chronos_med = _csig.median_pct if _csig else None
-        # Per-step quantile paths for the tail-trigger gate (warm cache only;
-        # None for cold cache / pre-change signals — the gate then passes).
+        # Per-step quantile paths for the tail-trigger gate; absent on error
+        # signals or pre-change signals — the gate then passes.
         _chronos_q10p = _csig.q10_path_pct if _csig else None
         _chronos_q90p = _csig.q90_path_pct if _csig else None
     except Exception as _pe:
-        logger.debug(f"[executor] chronos peek failed for {analysis['coin']}: {_pe}")
+        logger.debug(f"[executor] chronos sync read failed for {analysis['coin']}: {_pe}")
         _chronos_med = None
         _chronos_q10p = _chronos_q90p = None
     ctx = GateContext(
