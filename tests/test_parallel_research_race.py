@@ -193,6 +193,12 @@ def _run_concurrent(fn):
     return results
 
 
+# _install_mocks() replaces ex._runner_entry_block_reason with a permanent
+# lambda (line above) — fine for THIS module's races, but it runs at import
+# (collection time) and would poison every later test that calls the real
+# gate. Capture the real gate now and restore it at module end (after phase 4),
+# so the global is whole again by the time any test_* function runs.
+_orig_runner_entry_block_reason = ex._runner_entry_block_reason
 _install_mocks()
 
 print("== Phase 1: WITHOUT the execution lock (the race the lock fixes) ==")
@@ -272,6 +278,11 @@ check("gate: empty book with max_concurrent=1 allows an open",
 
 print()
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
+
+# Restore the real gate so later test modules see the real implementation.
+# (The script's own phases already ran above; this global was only needed
+# for THIS module's races.)
+ex._runner_entry_block_reason = _orig_runner_entry_block_reason
 if FAIL:
     print("FAILED:", FAIL)
     sys.exit(1)

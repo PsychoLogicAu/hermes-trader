@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
@@ -1581,6 +1581,54 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     return {"action": "unknown", "verdict": verdict, "result": None}
 
 
+def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
+                              side: str) -> Tuple[Optional[int], tuple]:
+    """Count independent signals corroborating a late-trend-chase entry.
+
+    Returns (n, names): n is the count of ALIGNED independent signals in
+    [0, 2] (clamped to the available signals), or None when the dynamic-bar
+    feature is disabled (`late_chase_dynamic_per_signal_drop` <= 0) — the gate
+    then behaves exactly as before (fixed bar, and no signal fetches at all).
+
+    Signals (independent pipelines, NOT the LLM's own confidence):
+      chronos_aligned — get_chronos_signal_sync median sign agrees with side
+                        (300s cache: a silent hit in steady state)
+      squeeze_aligned — squeeze_signal Donchian breakout side == side
+                        (300s cache, same reason)
+
+    A signal only votes when it is exactly True; missing/None/error/
+    counter-direction counts as 0. Failures never raise (fail-closed: fewer
+    votes, never a false allow).
+    """
+    gate = config.get("runner_entry_gate") or {}
+    drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
+    if drop <= 0:
+        return (None, ())
+    names: list = []
+    # Chronos alignment — median sign vs side; None median or error = no vote.
+    try:
+        sig = get_chronos_signal_sync(analysis.get("coin") or "unknown", side)
+        m = sig.median_pct if sig.median_pct is not None else None
+        if not sig.error and m is not None:
+            aligned = (m > 0) if side == "long" else (m < 0)
+            if aligned:
+                names.append("chronos_aligned")
+    except Exception as e:
+        logger.debug(f"[executor] late-chase corroboration: chronos read failed "
+                     f"(non-fatal): {e}")
+    # Squeeze alignment — live Donchian breakout on the same side.
+    try:
+        from hermes_trader.agents.squeeze_signal import get_squeeze_signal_sync
+        sig = get_squeeze_signal_sync(analysis.get("coin") or "unknown", side)
+        if sig is not None and sig.active and sig.error is None \
+                and getattr(sig, "side", None) == side:
+            names.append("squeeze_aligned")
+    except Exception as e:
+        logger.debug(f"[executor] late-chase corroboration: squeeze read failed "
+                     f"(non-fatal): {e}")
+    return (len(names), tuple(names))
+
+
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -1673,14 +1721,29 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     if forced and whale and not fresh_impulse:
         return "runner_gate_blocked (whale-only forced override; no fresh breakout/burst)"
     if uptrend and not (fresh_impulse or structured_daily_mover):
-        bypass_min = float(gate.get("bypass_late_trend_chase_min_conf", 0))
-        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bypass_min
+        # Dynamic confidence bar: independent-signal corroboration lowers the
+        # late-chase bypass bar so a 0.78 LLM with two aligned signals can
+        # enter what a bare 0.90 bar (never reached; LLM tops out ~0.78)
+        # would block forever. Clamped to min_confidence so corroboration can
+        # never undercut the hard confidence floor. Feature off (drop <= 0 or
+        # key absent) → the fixed bar, byte-identical to before.
+        fixed_bar = float(gate.get("bypass_late_trend_chase_min_conf", 0))
+        drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
+        corr, corr_names = _late_chase_corroboration(analysis, config, side)
+        if corr is None:
+            bar, bar_note = fixed_bar, ""
+        else:
+            bar = max(fixed_bar - corr * drop, min_conf)
+            bar_note = (f" (dynamic bar {bar:.2f} from {fixed_bar:.2f}, "
+                        f"{corr} signal{'s' if corr != 1 else ''} aligned: "
+                        f"{'+'.join(corr_names) if corr_names else 'none'})")
+        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bar
         if bypassed:
             logger.info(f"[executor] late-trend chase bypassed on {coin} "
-                        f"(conf {conf:.2f} >= {bypass_min:.2f})")
+                        f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
         else:
-            return ("runner_gate_blocked (late trend-only chase; no fresh "
-                    "breakout/burst)")
+            return (f"runner_gate_blocked (late trend-only chase; no fresh "
+                    f"breakout/burst, bar {bar:.2f}){bar_note}")
     else:
         bypassed = False
 
