@@ -275,7 +275,6 @@ def simulate_dsl_exit(coin: str, side: str, entry_i: int, entry_px: float,
         tracker = dsl_exit.DSLTracker(coin, side, entry_px, entry_t_s, policy,
                                       leverage=leverage,
                                       entry_atr_pct=entry_atr_pct)
-        tracker.current_tp_px = tp_px  # what the live loop would have placed
 
         def move(px: float) -> float:
             return sign * (px / entry_px - 1) * 100
