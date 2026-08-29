@@ -140,14 +140,12 @@ class ExitPolicy:
     # old too-tight 1.2% stop: exiting inside the noise band is -EV churn.
     noise_band_enabled: bool = False
     noise_band_atr_mult: float = 1.0  # pull-back tolerated = this × entry ATR% (only sub-first-tier)
-    # ── Trailing TP (dynamic goalpost on the upside) ──────────────────
-    # Trail TP upward as price makes new highs; never moves down. Caps at
-    # max_tp_pct_from_entry so a runner doesn't chase infinitely. Disable with
-    # trail_pct_from_peak=0. Designed to "keep moving the goalposts" on strong
-    # momentum moves while the static TP order remains as a server-side backstop.
-    trailing_tp_enabled: bool = False
-    trail_pct_from_peak: float = 0.03    # TP trails this % behind the peak price
-    max_tp_pct_from_entry: float = 0.40   # Hard ceiling: TP can't exceed this % above entry
+    # NOTE: the old "Trailing TP" (server-side TP trail, config key
+    # dsl_exit.trailing_tp) was culled in chore/cull-trailing-tp: the book's
+    # runners top out ~+11% spot while the trail TP (peak*0.97) only beat the
+    # DSL retrace floor above ~+13.6% peaks, and short-side trails were always
+    # rejected by adjust_tp_order's longs-only parameter guard. Runner
+    # protection = scale-out TP + DSL retrace floor (0.25/0.35/0.40 tiers).
 
 
 class DSLTracker:
@@ -172,7 +170,6 @@ class DSLTracker:
         self.peak_px = entry_px
         self.consecutive_breaches = 0
         self._last_floor: Optional[float] = None
-        self.current_tp_px: Optional[float] = None  # Last-known TP order level on Hyperliquid
 
     def is_long(self) -> bool:
         return self.side == "long"
@@ -430,63 +427,6 @@ class DSLTracker:
             "exit_reason": verdict.reason,
         }
 
-    def compute_trailing_tp(self, mark_px: float) -> Optional[float]:
-        """Return a new higher TP level if trailing rules say to push it up, else None.
-
-        - Tracks peak_px (already updated in check()).
-        - If peak_px rises, calculate trailing_tp = peak_px * (1 - trail_pct_from_peak).
-        - Clamp at entry_px * (1 + max_tp_pct_from_entry).
-        - Only moves TP upward; never down.
-        - CRITICAL: only returns a level if price hasn't already run through it.
-          For longs, new_tp must be > mark_px; for shorts, new_tp < mark_px.
-          If price already passed through the trailing level, the original TP
-          likely already closed the trade — no point trying to "move" it.
-        - Callers must persist the returned value back into self.current_tp_px after
-          successfully placing/canceling the order on Hyperliquid.
-        """
-        pol = self.policy
-        if not pol.trailing_tp_enabled or pol.trail_pct_from_peak <= 0:
-            return None
-
-        is_long = self.is_long()
-        # Only trail once we're in real profit territory
-        upct = self._unrealized_pct(self.peak_px)
-        if upct < pol.protect_pct:
-            return None
-
-        if is_long:
-            trailing = self.peak_px * (1 - pol.trail_pct_from_peak)
-            max_tp = self.entry_px * (1 + pol.max_tp_pct_from_entry / 100)
-            new_tp = min(trailing, max_tp)
-        else:
-            trailing = self.peak_px * (1 + pol.trail_pct_from_peak)
-            max_tp = self.entry_px * (1 - pol.max_tp_pct_from_entry / 100)
-            new_tp = max(trailing, max_tp)
-
-        if self.current_tp_px is None:
-            return None
-
-        # Must move the TP further out (longs: higher price; shorts: lower price)
-        if is_long:
-            if new_tp <= self.current_tp_px:
-                return None
-            # Price must still be BELOW the trailing TP — otherwise the original TP
-            # likely already fired on the way up.
-            if new_tp <= mark_px:
-                return None
-        else:
-            if new_tp >= self.current_tp_px:
-                return None
-            if new_tp >= mark_px:
-                return None
-
-        logger.info(
-            f"[dsl-trail-tp] {self.coin} {self.side}: adjusting TP from {self.current_tp_px:.4f} "
-            f"to {new_tp:.4f} (peak={self.peak_px:.4f}, mark={mark_px:.4f})"
-        )
-        return new_tp
-
-
 # ── Global tracker registry ──────────────────────────────────────────
 
 # Concurrency: the fast-exit daemon thread (trading_loop) and the main loop
@@ -519,13 +459,17 @@ def _tracker_to_dict(t: DSLTracker) -> Dict[str, Any]:
         "peak_px": t.peak_px,
         "consecutive_breaches": t.consecutive_breaches,
         "last_floor": t._last_floor,
-        "current_tp_px": t.current_tp_px,
         "policy": asdict(t.policy),
     }
 
 
 def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
     pol_raw = d.get("policy") or {}
+    # Cull migration (chore/cull-trailing-tp): state files written by older
+    # versions carry the trailing-TP fields; drop them so ExitPolicy(...)
+    # doesn't choke on the removed kwargs and open positions still rehydrate.
+    for _legacy in ("trailing_tp_enabled", "trail_pct_from_peak", "max_tp_pct_from_entry"):
+        pol_raw.pop(_legacy, None)
     tiers = [RetraceTier(**rt) for rt in pol_raw.get("phase2_tiers", [])]
     policy = ExitPolicy(
         max_loss_pct=pol_raw.get("max_loss_pct", ExitPolicy.max_loss_pct),
@@ -544,9 +488,6 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
         atr_stop_ceiling_pct=pol_raw.get("atr_stop_ceiling_pct", ExitPolicy.atr_stop_ceiling_pct),
         noise_band_enabled=pol_raw.get("noise_band_enabled", ExitPolicy.noise_band_enabled),
         noise_band_atr_mult=pol_raw.get("noise_band_atr_mult", ExitPolicy.noise_band_atr_mult),
-        trailing_tp_enabled=pol_raw.get("trailing_tp_enabled", ExitPolicy.trailing_tp_enabled),
-        trail_pct_from_peak=pol_raw.get("trail_pct_from_peak", ExitPolicy.trail_pct_from_peak),
-        max_tp_pct_from_entry=pol_raw.get("max_tp_pct_from_entry", ExitPolicy.max_tp_pct_from_entry),
     )
     t = DSLTracker(d["coin"], d["side"], float(d["entry_px"]),
                    float(d.get("entry_time") or time.time()), policy,
@@ -556,8 +497,6 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
     t.consecutive_breaches = int(d.get("consecutive_breaches", 0))
     lf = d.get("last_floor")
     t._last_floor = float(lf) if lf is not None else None
-    ctp = d.get("current_tp_px")
-    t.current_tp_px = float(ctp) if ctp is not None else None
     return t
 
 
@@ -615,13 +554,11 @@ def register_position(coin: str, side: str, entry_px: float,
                       entry_time: Optional[float] = None,
                       policy: Optional[ExitPolicy] = None,
                       leverage: int = 1,
-                      entry_atr_pct: float = 0.0,
-                      initial_tp_px: Optional[float] = None) -> DSLTracker:
+                      entry_atr_pct: float = 0.0) -> DSLTracker:
     """Register a new position for DSL tracking."""
     key = f"{coin}_{side}"
     tracker = DSLTracker(coin, side, entry_px, entry_time or time.time(), policy,
                          leverage=leverage, entry_atr_pct=entry_atr_pct)
-    tracker.current_tp_px = initial_tp_px
     with _registry_lock:
         _active_positions[key] = tracker
     _save_state()
@@ -673,7 +610,6 @@ def _policy_from_config() -> ExitPolicy:
         tiers = [RetraceTier(**t) for t in tiers_raw] if tiers_raw else None
         atr_cfg = dsl.get("atr_stop", {}) or {}
         noise_cfg = dsl.get("noise_band", {}) or {}
-        trail_cfg = dsl.get("trailing_tp", {}) or {}
         return ExitPolicy(
             max_loss_pct=dsl.get("max_loss_pct", ExitPolicy.max_loss_pct),
             max_loss_roe_pct=dsl.get("max_loss_roe_pct", ExitPolicy.max_loss_roe_pct),
@@ -690,9 +626,6 @@ def _policy_from_config() -> ExitPolicy:
             consecutive_breaches_required=int(dsl.get("consecutive_breaches_required", 1) or 1),
             noise_band_enabled=bool(noise_cfg.get("enabled", False)),
             noise_band_atr_mult=float(noise_cfg.get("atr_mult", ExitPolicy.noise_band_atr_mult)),
-            trailing_tp_enabled=bool(trail_cfg.get("enabled", False)),
-            trail_pct_from_peak=float(trail_cfg.get("trail_pct_from_peak", ExitPolicy.trail_pct_from_peak)),
-            max_tp_pct_from_entry=float(trail_cfg.get("max_tp_pct_from_entry", ExitPolicy.max_tp_pct_from_entry)),
             phase2_tiers=tiers if tiers else ExitPolicy().phase2_tiers,
         )
     except Exception:

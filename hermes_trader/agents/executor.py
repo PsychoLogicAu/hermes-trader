@@ -1360,11 +1360,10 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             logger.error(f"[executor] TP scale-out FAILED for {coin}: {tp_res.get('error')}")
 
     final_sl = (entry_px - atr * sl_atr_mult) if is_buy else (entry_px + atr * sl_atr_mult) if atr > 0 else stop_px
-    final_tp = (entry_px + atr * TP_ATR_MULT) if is_buy else (entry_px - atr * TP_ATR_MULT) if atr > 0 else tp_px
 
-    # Register DSL tracking AFTER we know the server-side TP level.
+    # Register DSL tracking AFTER we know the server-side levels.
     register_position(coin, trade_side, entry_px, policy=policy, leverage=leverage,
-                      entry_atr_pct=entry_atr_pct, initial_tp_px=final_tp)
+                      entry_atr_pct=entry_atr_pct)
     logger.info(f"[executor] Registered DSL exit for {coin} {trade_side} @ {entry_px} ({leverage}x)")
 
     result = {
@@ -1375,7 +1374,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "size_usd": position_notional,
         "entry_px": entry_px,
         "stop_px": final_sl,
-        "tp_px": final_tp,
+        "tp_px": tp_px,
         "dsl_registered": True,
         "sl_missing": sl_missing,
     }

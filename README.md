@@ -2,10 +2,10 @@
 
 > Autonomous crypto trading agent on Hyperliquid (perpetuals), operated as a Docker Compose stack. Scans markets, runs cheap TA filters, calls a self-hosted LLM only on confirmed setups, enforces 14 risk gates, and manages dynamic exits via DSL — all without human intervention.
 
-Originally forked from [Julian-dev28/hermes-trader](https://github.com/Julian-dev28/hermes-trader); this repo has since diverged significantly with new LLM wiring, Docker deployment, advanced risk gates, shadow-mode signals, and trailing TP.
+Originally forked from [Julian-dev28/hermes-trader](https://github.com/Julian-dev28/hermes-trader); this repo has since diverged significantly with new LLM wiring, Docker deployment, advanced risk gates, shadow-mode signals.
 
 **What it does:**
-Scans 500+ Hyperliquid markets, fires statistical triggers on price/volume/breakout signals, runs a zero-cost multi-timeframe TA filter (`analyze_perception`), and only calls the LLM on CONFIRMED setups (or momentum bursts). The LLM acts as an analyst — not an oracle. A 14-gate risk framework enforces discipline, and a DSL exit engine manages trailing stops, profit locking, and timeouts.
+Scans 500+ Hyperliquid markets, fires statistical triggers on price/volume/breakout signals, runs a zero-cost multi-timeframe TA filter (`analyze_perception`), and only calls the LLM on CONFIRMED setups (or momentum bursts). The LLM acts as an analyst — not an oracle. A 14-gate risk framework enforces discipline, and a DSL exit engine manages trailing stops, profit locking, and timeouts, with a server-side ATR take-profit scale-out.
 
 ---
 
@@ -113,7 +113,7 @@ The LLM is never called on a raw trigger. Cheap math gates the expensive model e
 |          hermes-trader — autonomous trading pipeline          |
 |                                                               |
 |  Scan → TA Filter → AI Research → Risk Gates → Execute → DSL Monitor ──▶ Auto-Close
-|        (cheap)         (expensive)     (14 gates)          (per-tick, trailing TP)
+|        (cheap)         (expensive)     (14 gates)          (per-tick, ATR TP scale-out)
 |               |
 |               └── Hyperfeed Discovery
 |                   Leaderboard • Smart Money • OI Anomaly • Whale Tracking
@@ -140,7 +140,7 @@ Key differences from the original repo:
 - **LLM:** Self-hosted via `llama-net` (Qwen-based), not OpenRouter.
 - **Deployment:** Docker Compose container (`hermes-trader`), not direct Python/`restart.sh`.
 - **Signals:** Shadow-mode signal suite (GEX, whale flow, FINRA short volume, news catalyst) wired into research and enforcement.
-- **Risk gates:** 14 gates, enhanced with high-confidence bypasses (`bypass_low_volume`, `bypass_late_trend_chase`), funding-regime overlays, and trailing TP.
+- **Risk gates:** 14 gates, enhanced with high-confidence bypasses (`bypass_low_volume`, `bypass_late_trend_chase`), funding-regime overlays, and an ATR-scaled server-side take-profit scale-out.
 
 ---
 
@@ -238,14 +238,11 @@ Beyond the original 11 gates:
 - **GEX Veto**: For equity perps (HIP-3), a forced-override LONG near a gamma pin wall can be suppressed (`gex_override_caution`) so the override path doesn't force entries into mean-revert chop.
 - **Whale Veto / Boost**: Large whale sell flows veto long forced-entries; large whale buys can boost (lower) the override bar.
 
-### Dynamic Trailing TP (via DSL Heartbeat)
+### Server-Side Take-Profit Scale-Out
 
-- Every heartbeat (~60s), the DSL engine adjusts server-side TP orders upward when trailing conditions are met.
-- Configured via `.agent-config.json` under `dsl_exit.trailing_tp`:
-  - `trail_pct_from_peak`: distance from peak (default 3%)
-  - `max_tp_pct_from_entry`: maximum target cap
-- Only adjusts if trailing level > current TP + minimum move, so it doesn't ping-pong.
-- Full reconciliation with live exchange positions each cycle; persists across restarts via `.dsl-state.json`.
+- On entry, the executor places a reduce-only trigger TP at `entry ± 1×ATR` (4h) covering `tp_scale_fraction` (default 50%) of the position, so half a winner is banked server-side even between DSL checks.
+- The remainder rides the DSL exit engine's trailing floor (retrace tiers 0.25/0.35/0.40) and hard timeout.
+- The scale-out trigger is cancelled by `cancel_open_orders_for_coin` when the DSL engine closes the position.
 
 ---
 
@@ -344,7 +341,7 @@ Key parameters:
 | `coin_blocklist` | Never trade these symbols |
 | `runner_entry_gate.*` | Runner surface gate thresholds (late-chase / low-vol bypass) |
 | `atr_risk_sizing.*` | ATR-based equal-risk sizing parameters |
-| `dsl_exit.*` | DSL trailing stop + trailing TP configuration |
+| `dsl_exit.*` | DSL trailing-stop / retrace-tier / scale-out configuration |
 | `shadow_signals.*` | Toggle individual free signals in the shadow suite |
 | `chronos_signal.*` | Chronos-2 forecasting shadow signal (shadow-only logging; `enabled` toggles it) |
 
@@ -390,7 +387,7 @@ hermes-trader/
 │   │   ├── research.py            # AI research pipeline (local LLM)
 │   │   ├── executor.py            # Trade execution + DSL registration
 │   │   ├── risk_gates.py          # 14 risk gates
-│   │   ├── dsl_exit.py            # Two-phase trailing stop + trailing TP
+│   │   ├── dsl_exit.py            # Two-phase trailing stop + profit locking
 │   │   ├── hyperfeed.py           # Discovery API (leaderboard, whale index)
 │   │   ├── market_regime.py       # Regime detection + funding overlays
 │   │   ├── options_gex.py         # GEX / max-pain / gamma walls from CBOE

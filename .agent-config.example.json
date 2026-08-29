@@ -51,11 +51,6 @@
     "hard_timeout_minutes": 1800.0,
     "breakeven_trigger_pct": 0.0,
     "breakeven_lock_pct": 0.0,
-    "trailing_tp": {
-      "enabled": true,
-      "trail_pct_from_peak": 0.03,
-      "max_tp_pct_from_entry": 40.0
-    },
     "atr_stop": {
       "enabled": false,
       "atr_mult": 1.5,
