@@ -1280,13 +1280,18 @@ def test_fetch_account_state_aggregates_hip3_dexes(monkeypatch):
     monkeypatch.setattr("hermes_trader.client.universe.list_hip3_dexes", lambda: ["xyz", "vntl"])
 
     state = hl_client.fetch_account_state("0xUSER", include_hip3=True)
-    # Aggregated equity = main 1000 + xyz 250 + vntl 50 = 1300
-    assert state["equity"] == 1300.0
+    # Unified-account equity (59ea41d): portfolio = spot cash + perp uPnL +
+    # separately-deposited perp margin. Fixture: spot USDC 10, no uPnL, main
+    # margin backing (1000 - 0) exceeds spot hold (0) so the whole 1000 counts
+    # as deposited -> main equity 1010. (The pre-unified expectation of 1000
+    # double-counted the reserved margin on a real unified account.)
+    assert state["equity"] == 1010.0 + 250.0 + 50.0
     # Aggregated notional = main 500 + xyz 300 + vntl 0 = 800
     assert state["total_ntl"] == 800.0
-    # `available` = main free initial margin (equity 1000 - margin used 100);
-    # stays main-only so executor sizing doesn't bleed in cross-dex idle USDC
-    assert state["available"] == 900.0
+    # `available` = main free initial margin (unified equity 1010 - margin
+    # used 100 = 910); stays main-only so executor sizing doesn't bleed in
+    # cross-dex idle USDC
+    assert state["available"] == 910.0
     # Per-dex breakdown exposed for the dashboard
     assert state["dex_equity"] == {"": 1000.0, "xyz": 250.0, "vntl": 50.0}
     # Positions: main BTC + HIP-3 MU, with bare MU prefixed to xyz:MU
@@ -3216,6 +3221,12 @@ def test_peek_chronos_never_computes():
         error: None = None
 
     real_get = cs._cache_get
+    # conftest redirects HERMES_AGENT_CONFIG_FILE to an empty temp dir, so the
+    # real config here has chronos_signal absent -> peek would short-circuit on
+    # enabled=False. Force-enable so this test exercises the cache path (the
+    # enabled=False -> None path is asserted explicitly at the end).
+    real_cfg = cs._get_chronos_config
+    cs._get_chronos_config = lambda: {"enabled": True, "cache_ttl_seconds": 300}
     try:
         cs._cache_get = lambda coin, ttl: _Sig()
         sig = cs.peek_chronos("X")
@@ -3226,7 +3237,6 @@ def test_peek_chronos_never_computes():
 
         # Disabled config -> None.
         cs._cache_get = lambda coin, ttl: _Sig()
-        real_cfg = cs._get_chronos_config
         cs._get_chronos_config = lambda: {"enabled": False}
         try:
             assert cs.peek_chronos("X") is None
@@ -3234,6 +3244,7 @@ def test_peek_chronos_never_computes():
             cs._get_chronos_config = real_cfg
     finally:
         cs._cache_get = real_get
+        cs._get_chronos_config = real_cfg
 
 
 def test_build_user_message_indicator_block_full_snap():

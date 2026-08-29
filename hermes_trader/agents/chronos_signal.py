@@ -16,11 +16,19 @@ Config-driven via `.agent-config.json` under `chronos_signal`:
         context_length: 100         # candles fed as context
         forecast_horizon: 48        # steps ahead to predict (in candle interval)
         cache_ttl_seconds: 300      # TTL for per-coin cache
-        timeout_seconds: 30         # max seconds per forecast before abort
+        timeout_seconds: 30         # abort deadline per forecast; 0 = no deadline
 
 Chronos2Pipeline.predict() returns tensors of shape (n_variates, n_quantiles, horizon).
 Quantiles are fixed by the model (model.quantiles), not configurable per call.
 We match our interest quantiles to the closest model-provided ones.
+
+timeout_seconds is enforced at the caller level: the forecast runs on a
+dedicated single worker and the CALLER abandons it (error signal, never
+cached) once the deadline passes. torch predict can't be interrupted
+mid-inference, so an overrun leaves the worker busy until it finishes —
+subsequent forecasts queue behind it and hit their own deadline (logged)
+until the stuck inference completes. The point is the CALLER never blocks
+past the deadline, whichever path (sync/async) reached _fetch_signal.
 """
 
 from __future__ import annotations
@@ -296,6 +304,16 @@ def _forecast_from_candles(
 
 
 # ── Signal fetch (sync, cache-aware, still potentially slow) ──────────────────
+def _compute_signal(coin: str, side: str, cfg: Dict[str, Any]) -> ChronosSignal:
+    """Candle fetch + forecast for one coin. Runs on a dedicated thread (see
+    _fetch_signal); errors are captured there, not raised to the caller."""
+    context_length = int(cfg.get("context_length", 100))
+    # Fetch on the interval used by perception scan (5m by default).
+    # Chronos works best with enough bars; we pull context_length candles.
+    candles = fetch_hl_candles(coin, "5m", context_length)
+    return _forecast_from_candles(coin, side, candles or [], cfg)
+
+
 def _fetch_signal(coin: str, side: str) -> ChronosSignal:
     cfg = _get_chronos_config()
     if not cfg.get("enabled", False):
@@ -313,12 +331,46 @@ def _fetch_signal(coin: str, side: str) -> ChronosSignal:
     if cached is not None:
         return cached
 
-    context_length = int(cfg.get("context_length", 100))
-    # Fetch on the interval used by perception scan (5m by default).
-    # Chronos works best with enough bars; we pull context_length candles.
-    candles = fetch_hl_candles(coin, "5m", context_length)
+    # Run the forecast on a dedicated daemon thread and wait at most
+    # timeout_seconds (0/unset = no deadline). A torch predict cannot be
+    # interrupted, so on timeout we abandon the thread and return an error
+    # signal (never cached) — the CALLER (sync prompt/gate path or the
+    # fire-and-forget shadow worker) is bounded either way. Each forecast
+    # gets its own thread so a hung inference can't delay other coins;
+    # abandoned threads die with the process.
+    timeout_s = float(cfg.get("timeout_seconds", 0) or 0)
+    result: Dict[str, Any] = {}
+    done = threading.Event()
 
-    signal = _forecast_from_candles(coin, side, candles or [], cfg)
+    def _run():
+        try:
+            result["signal"] = _compute_signal(coin, side, cfg)
+        except Exception as e:  # surfaced as an error signal, mirrors below
+            result["signal"] = ChronosSignal(
+                coin=coin, side=side, context_last=0.0,
+                median=None, q_low=None, q_high=None,
+                median_pct=None, spread_pct=None,
+                horizon=cfg.get("forecast_horizon", 48),
+                model_id=cfg.get("model_id", "amazon/chronos-2"),
+                inference_ms=0, error=str(e),
+            )
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name=f"chronos-compute-{coin}", daemon=True).start()
+    if not done.wait(timeout_s if timeout_s > 0 else None):
+        signal = ChronosSignal(
+            coin=coin, side=side, context_last=0.0,
+            median=None, q_low=None, q_high=None,
+            median_pct=None, spread_pct=None,
+            horizon=cfg.get("forecast_horizon", 48),
+            model_id=cfg.get("model_id", "amazon/chronos-2"),
+            inference_ms=0, error=f"timeout after {timeout_s:.0f}s",
+        )
+        logger.info(_format_signal_log(signal, bool(cfg.get("debug", False))))
+        return signal
+
+    signal = result["signal"]
     if not signal.error:
         _cache_set(coin, signal, ttl)
     # Log once per actual compute (cache miss). Cache hits return above
