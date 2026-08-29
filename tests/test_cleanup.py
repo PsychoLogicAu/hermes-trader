@@ -3127,9 +3127,17 @@ def test_chronos_block_in_prompt_sync_render():
         model_id: str = "amazon/chronos-2"
         inference_ms: float = 10.0
         error: Optional[str] = None
+        q10_path_pct: Optional[list] = None
+        q90_path_pct: Optional[list] = None
 
-    # Negative median (decay warning), sync returns a fresh signal.
-    sig_neg = _Sig(median=8.9, median_pct=-1.111, q_low=8.5, q_high=9.3)
+    # Negative median (decay warning), sync returns a fresh signal. The p10
+    # path dives to -6% within the first 6 steps, so the early-tail read
+    # (the same shape the tail-trigger gate consumes) must render too.
+    sig_neg = _Sig(
+        median=8.9, median_pct=-1.111, q_low=8.5, q_high=9.3,
+        q10_path_pct=[-1.5, -2.8, -3.9, -4.8, -5.6, -6.0, -4.1, -3.2],
+        q90_path_pct=[0.4, 0.9, 1.2, 1.4, 1.5, 1.5, 1.3, 1.1],
+    )
     perception = {"type": "perp", "mid": 9.0, "composite_score": 40, "triggers": []}
     snap = {"ema8": None, "ema21": None, "last_close": 9.0}
 
@@ -3149,7 +3157,16 @@ def test_chronos_block_in_prompt_sync_render():
         assert "Chronos forecast (shadow signal" in msg
         assert "-1.11%" in msg
         assert "FADE within ~4h" in msg
-        assert "4h ahead" in msg
+        # Label is the path-average over the window, not a point price ahead —
+        # the 2026-08-28 replay finding (the median path mean-reverts).
+        assert "Path-average price over the next ~4h" in msg
+        # p10/p90 span figures are path-averages too.
+        assert "p10 avg -5.6%" in msg
+        assert "p90 avg +3.3%" in msg
+        # Early adverse tail renders (first-6-step p10 min -6.0%, p90 max +1.5%).
+        assert "early tail, first 30m" in msg
+        assert "p10 min -6.0%" in msg
+        assert "p90 max +1.5%" in msg
 
         # Sync returns an error signal -> block omitted, prompt shape unchanged.
         err = _Sig(median=None, median_pct=None, error="no candles")

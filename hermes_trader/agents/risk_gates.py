@@ -35,6 +35,9 @@ class GateContext:
         binary_news_match: str = "",
         peak_daily_pnl: float = 0.0,
         chronos_median_pct: Optional[float] = None,
+        chronos_q10_path_pct: Optional[List[float]] = None,
+        chronos_q90_path_pct: Optional[List[float]] = None,
+        squeeze_extreme_no_breakout: Optional[bool] = None,
     ):
         self.confidence = confidence
         self.current_positions = current_positions
@@ -60,11 +63,27 @@ class GateContext:
         # The headline + matched term that tripped the binary-news gate, for
         # log visibility ("which article blocked this?").
         self.binary_news_match = binary_news_match
-        # Median move of this coin's (warm) Chronos-2 forecast, % vs last close.
-        # Side-independent; fed by maybe_execute via peek_chronos (cache-only,
-        # never computes). None = no usable forecast → chronos_mismatch_gate
+        # Median move of this coin's Chronos-2 forecast, % vs last close.
+        # Side-independent; fed by maybe_execute via get_chronos_signal_sync
+        # (warm cache hit, or one bounded compute on a cold/expired cache —
+        # never a cache-only peek, which raced the attach compute).
+        # None = no usable forecast → chronos_mismatch_gate
         # has no opinion and passes.
         self.chronos_median_pct = chronos_median_pct
+        # Per-step Chronos-2 quantile paths, % vs last close (same sync read;
+        # None on error signals / old shapes). Fed to
+        # chronos_tail_trigger_gate — the shape-based counter-forecast veto
+        # validated by the 2026-08-28 60-flag replay (adverse-quantile early
+        # tail > path-mean > endpoint for loss avoidance).
+        self.chronos_q10_path_pct = chronos_q10_path_pct
+        self.chronos_q90_path_pct = chronos_q90_path_pct
+        # The squeeze-signal composite gate flag (1h Donchian extreme with no
+        # fresh aligned breakout — the "chasing without confirmation" bucket),
+        # recomputed per candidate side by squeeze_signal._set_gate. None = no
+        # squeeze data (disabled / fetch failed) -> squeeze_extreme_gate has no
+        # opinion and passes. True/False = the flag's actual value; the gate
+        # only ever has an opinion on True.
+        self.squeeze_extreme_no_breakout = squeeze_extreme_no_breakout
 
 
 def confidence_gate(ctx: GateContext, min_confidence: float) -> GateResult:
@@ -442,6 +461,65 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
     return {"pass": False, "reason": reason}
 
 
+def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Chronos tail-trigger conviction gate (SHADOW by default).
+
+    Shape-based counter-forecast veto, validated by the 2026-08-28 60-flag
+    replay: when the ADVERSE quantile of the cached Chronos-2 forecast path
+    (q10 for longs, q90 for shorts) breaches `-min_adv_path_pct` at ANY of
+    the first `window_steps` steps (5m candles each — 6 = 30m ahead), the
+    entry is vetoed unless it clears the same elevated-conviction bar as
+    `chronos_mismatch` (conf >= min_conf OR composite >= min_composite).
+
+    Why the tail instead of the path mean (the reduction the mismatch gate
+    uses): the replay showed the mean/endpoint scalars save ≈$0.96 across 14
+    executed flags while the K=6/X=3.0 tail trigger saved ≈$3.21 — it blocks
+    the same 4 stop-outs (MOVE, TRUMP, FARTCOIN x2, all within ~25m of entry)
+    but RELEASES the small mean-reverting winners the path-mean gate kills.
+    The q10 path also overstates realized magnitude ~2x, so the threshold is
+    a boolean trip-wire near half the 5% spot stop — not a magnitude
+    forecast — and deliberately sits well inside the stop.
+
+    SHADOW MODE: with `shadow_mode` true (default, and how the operator armed
+    it 2026-08-28) the gate STRUCTURALLY returns pass=True and only carries a
+    `shadow_would_block` marker, which the executor logs loudly next to the
+    existing chronos_mismatch shadow line. It cannot alter live execution
+    until the operator flips shadow_mode to false in .agent-config.json.
+
+    Fail-safes (no-opinion pass): disabled; no warm cached signal (cold cache
+    / model down / disabled); paths missing (pre-change cache entries); path
+    shorter than window_steps; tail not breached.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    k = int(cfg.get("window_steps", 6) or 6)
+    x = float(cfg.get("min_adv_path_pct", 3.0) or 3.0)
+    if k <= 0 or x <= 0:
+        return {"pass": True}
+    path = (ctx.chronos_q10_path_pct if ctx.trade_side == "long"
+            else ctx.chronos_q90_path_pct)
+    if not path or len(path) < k:
+        return {"pass": True}
+    window = path[:k]
+    tail = min(window) if ctx.trade_side == "long" else max(window)
+    breached = tail <= -x if ctx.trade_side == "long" else tail >= x
+    if not breached:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"chronos_tail_trigger ({ctx.trade_side} entry, adverse q-path "
+              f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
+              f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
+              f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
+              f"{min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -560,6 +638,58 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     return {"pass": False, "reason": reason}
 
 
+def squeeze_extreme_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Squeeze extreme-without-breakout conviction gate (SHADOW by default).
+
+    The third member of the shadow-gate house pattern, encoding the
+    "chasing without confirmation" bucket from the 2026-08-27 15-day
+    ledger replay (scratch/research/counterfactual_gate.py): entries on the
+    candidate's side while price sits at the extreme of the prior 48h 1h
+    Donchian range (top `extreme_pct`% for longs, bottom for shorts) with
+    NO fresh aligned breakout confirming the move. The replay: extreme
+    WITH fresh breakout confirmation = +$1.96 / 79% win; extreme WITHOUT =
+    −$10.73 / 71% win — the flag alone removed ~$10.7 of the window's
+    losses. The research verdict was "right shape, overfit threshold":
+    the 5% extreme zone was chosen after seeing the data, so this gate
+    ships SHADOW and the prospective flag count is the validation.
+
+    The flag itself is computed by squeeze_signal._set_gate (one sync read,
+    per-candidate-side, on every _evaluate return point) and fed here via
+    GateContext.squeeze_extreme_no_breakout — the gate itself is a pure ctx
+    function, no candle fetch, no config read beyond its own block.
+
+    SHADOW MODE: with `shadow_mode` true (default) the gate STRUCTURALLY
+    returns pass=True and only carries a `shadow_would_block` marker, which
+    the executor logs loudly — same pattern as chronos_mismatch /
+    band_counter_breach. It cannot alter live execution until the operator
+    flips shadow_mode to false in .agent-config.json.
+
+    Conviction bar: conf >= `min_conf` (0.90) OR composite >=
+    `min_composite` (60) — same elevated bar as the chronos conviction
+    gates; a genuinely high-conviction late entry still gets through.
+
+    Fail-safes (no-opinion pass): disabled; flag is None (squeeze disabled /
+    fetch failed / no data) or False (not at the extreme, or a fresh aligned
+    breakout confirms the move); conviction bar met.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    if ctx.squeeze_extreme_no_breakout is not True:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"squeeze_extreme ({ctx.trade_side} entry at the 48h 1h-channel "
+              f"extreme with no fresh aligned breakout; conf "
+              f"{ctx.confidence:.2f} < {min_conf:.2f}, composite "
+              f"{ctx.composite_score:.1f} < {min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def eval_all_gates(
     ctx: GateContext,
     config: Optional[Dict[str, Any]] = None,
@@ -626,11 +756,25 @@ def eval_all_gates(
     # would-block until shadow_mode is flipped in .agent-config.json.
     results["chronos_mismatch"] = chronos_mismatch_gate(
         ctx, effective_config.get("chronos_mismatch_gate") or {})
+    # Tail-trigger (shape-based) counter-forecast veto. Same warm cache and
+    # same elevated-conviction bar as chronos_mismatch, but keys off the
+    # ADVERSE quantile PATH (min q10 / max q90 over the first `window_steps`
+    # 5m steps) rather than the path-mean scalar. SHADOW until shadow_mode
+    # is flipped. Passes when the warm cache has no per-step paths.
+    results["chronos_tail_trigger"] = chronos_tail_trigger_gate(
+        ctx, effective_config.get("chronos_tail_trigger_gate") or {})
     # Band counter-trend breach (GRASS shape): disabled by default in the
     # shadow-gate config block below; when enabled it runs in shadow_mode
     # (would-block marker) until the operator promotes it.
     results["band_counter_breach"] = band_counter_breach_gate(
         ctx, effective_config.get("band_counter_breach_gate") or {})
+    # Squeeze extreme-without-breakout (chasing the channel extreme without a
+    # fresh aligned breakout — the replay's worst-loss bucket). Pure ctx read:
+    # the flag is computed by squeeze_signal on the gate-side sync read in
+    # maybe_execute. Shadow until shadow_mode is flipped. Passes when the
+    # flag is absent/False (data gap can never block a trade).
+    results["squeeze_extreme"] = squeeze_extreme_gate(
+        ctx, effective_config.get("squeeze_extreme_gate") or {})
 
     block_reasons = []
     blocked = False

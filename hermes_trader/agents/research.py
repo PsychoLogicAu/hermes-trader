@@ -190,18 +190,30 @@ def _signals_block(coin: str) -> str:
 
 
 def _chronos_block(coin: str) -> str:
-    """Chronos-2 4h forward forecast for the AI prompt, when
+    """Chronos-2 forward forecast for the AI prompt, when
     `chronos_signal.in_prompt` is true. Calls the sync wrapper so the line is
     DETERMINISTIC per coin: it renders whenever the signal is enabled and the
     model is loaded (the model is preloaded at app init; steady-state cost is
     ~200ms/coin, dominated by the HL candle fetch). A disabled flag or a
     failed/absent forecast returns '' so the prompt shape is unchanged.
 
+    The `median` figure is the PATH AVERAGE over the horizon (the mean of the
+    12 step-by-step forecasts), NOT the point price at the horizon — the
+    2026-08-28 60-flag replay showed the median path mean-reverts (TRUMP's
+    q50 dipped to -1.4% and recovered to -0.6% by step 12), so the endpoint
+    is nearly useless as a read. The replay ranked the reductions by loss
+    avoidance: EARLY ADVERSE TAIL > skew > path-mean. This block therefore
+    also renders the early tail — the extreme the adverse quantile reaches
+    within the first 6 steps (~30 min), the same shape the
+    `chronos_tail_trigger_gate` consumes — so the LLM can see the stop-risk
+    the median understates (the replay's q10 tail overstated realized
+    magnitude ~2x, so treat it as a fat-tail RISK flag, not a magnitude).
+
     Labeled as a DECAY/continuation warning on purpose: the bot's exit policy is
-    scalp, so the 4h horizon is LONGER than the hold. A negative call means the
-    move is likely to fade within 4h — drop conviction for a scalp, don't
+    scalp, so the horizon is LONGER than the hold. A negative call means the
+    move is likely to fade over the window — drop conviction for a scalp, don't
     auto-PASS a confirmed fresh breakout. A positive call means the model sees
-    continuation over the next ~4h — supports holding through noise.
+    continuation over the window — supports holding through noise.
     """
     try:
         cfg = read_agent_config().get("chronos_signal", {})
@@ -223,9 +235,28 @@ def _chronos_block(coin: str) -> str:
         if low is not None and high is not None and sig.context_last:
             lo_pct = (low - sig.context_last) / sig.context_last * 100
             hi_pct = (high - sig.context_last) / sig.context_last * 100
-            span = f", p10 {lo_pct:+.1f}% / p90 {hi_pct:+.1f}%"
+            span = f", p10 avg {lo_pct:+.1f}% / p90 avg {hi_pct:+.1f}%"
         else:
             span = ""
+        # Early adverse tail: the extreme the adverse quantile reaches within
+        # the first 6 steps (~30 min) — the replay's most loss-avoiding read,
+        # and the same value the tail-trigger gate consumes. The forecast is
+        # side-independent (the cache is coin-keyed), so render both
+        # directions: p10 path min (long-side stop risk) and p90 path max
+        # (short-side stop risk).
+        tail_bits = []
+        _tail_steps = 6
+        p10p = sig.q10_path_pct or []
+        p90p = sig.q90_path_pct or []
+        if p10p[:_tail_steps]:
+            tail_bits.append(f"p10 min {min(p10p[:_tail_steps]):+.1f}%")
+        if p90p[:_tail_steps]:
+            tail_bits.append(f"p90 max {max(p90p[:_tail_steps]):+.1f}%")
+        tail_s = (
+            f"; early tail, first {_tail_steps * 5}m (stop-risk read — the "
+            f"median understates it): {' / '.join(tail_bits)}"
+            if tail_bits else ""
+        )
         # Chronos runs on 5m candles; horizon bars * 5m = the forward window.
         hours = sig.horizon * 5 / 60
         hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
@@ -241,11 +272,73 @@ def _chronos_block(coin: str) -> str:
             note = f"the model is directionally neutral over the next ~{hours_s}h."
         return (
             "Chronos forecast (shadow signal — weigh, don't obey):\n"
-            f"  - Median price {hours_s}h ahead: {med:+.2f}%{span}. "
+            f"  - Path-average price over the next ~{hours_s}h: {med:+.2f}%{span}{tail_s}. "
             + note
         )
     except Exception as e:
         logger.debug(f"[research] chronos block failed for {coin}: {e}")
+        return ""
+
+
+def _squeeze_block(coin: str) -> str:
+    """Squeeze-breakout (1h Donchian) state for the AI prompt, when
+    `squeeze_signal` is enabled. Same determinism contract as _chronos_block:
+    sync, cache-first read (the executor's attach + gate-side read share the
+    300s per-coin cache, so this is normally a pure dict read); '' on disabled
+    / failed / absent data so the prompt shape is unchanged.
+
+    Rendered as CONTEXT to weigh, not a trigger: the breakout rule's OOS edge
+    came from FRESH, aligned breakouts, and the research's worst-loss bucket
+    was same-side re-entries AT THE EXTREME with no fresh breakout
+    ("chasing without confirmation"). The `extreme_no_breakout` flag is the
+    deterministic encoding of that bucket and is also the input the
+    squeeze_extreme shadow gate consumes — the prompt surfaces it so the LLM
+    sees the same shape the gate does.
+    """
+    try:
+        cfg = read_agent_config().get("squeeze_signal", {})
+        if not cfg.get("enabled", False):
+            return ""
+        from hermes_trader.agents.squeeze_signal import get_squeeze_signal_sync
+        sig = get_squeeze_signal_sync(coin, "long")
+        if sig is None:
+            return ""
+        lines = ["Squeeze / 48h channel state (1h Donchian — weigh, don't obey):"]
+        if sig.active:
+            side_word = "long" if sig.side == "long" else "short"
+            lines.append(
+                f"  - FRESH {side_word.upper()} breakout: the last confirmed 1h close "
+                f"broke the prior 48h {'high' if sig.side == 'long' else 'low'} by "
+                f"{sig.ext_pct:+.2f}% ({sig.fresh_age_min:.0f}m ago, decisive body). "
+                "This is the shape the breakout rule rewards — a fresh aligned "
+                "breakout CONFIRMS a same-side entry at the extreme."
+            )
+        else:
+            lines.append(f"  - No fresh 1h breakout (last check: {sig.error}).")
+        if sig.chan_pos is not None:
+            pos = sig.chan_pos
+            if pos > 1.0:
+                zone = "ABOVE the 48h channel high"
+            elif pos < 0.0:
+                zone = "BELOW the 48h channel low"
+            elif pos > 0.95:
+                zone = f"at the very top of the 48h range ({pos:.0%})"
+            elif pos < 0.05:
+                zone = f"at the very bottom of the 48h range ({pos:.0%})"
+            else:
+                zone = f"mid-range (48h position {pos:.0%})"
+            lines.append(f"  - Price now {zone}.")
+        if sig.extreme_no_breakout:
+            lines.append(
+                "  - CAUTION: the candidate side is at the channel extreme with NO "
+                "fresh breakout confirming it — the 'chasing without confirmation' "
+                "shape the 15-day ledger's worst losses came from. Down-weight "
+                "conviction on a same-side late entry; a fresh aligned breakout "
+                "(above) is what distinguishes continuation from the chase."
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"[research] squeeze block failed for {coin}: {e}")
         return ""
 
 
@@ -507,6 +600,7 @@ def _build_user_message(
         "",
         _signals_block(coin),
         _chronos_block(coin),
+        _squeeze_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
         f"Recent news: {news}",

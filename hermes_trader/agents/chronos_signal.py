@@ -150,6 +150,14 @@ class ChronosSignal:
     model_id: str
     inference_ms: float
     error: Optional[str] = None
+    # Per-step quantile paths, % vs context_last, across the full horizon.
+    # Replay finding (2026-08-28): the forecast's SHAPE — specifically the
+    # adverse quantile's early path — carries more veto information than the
+    # path-mean scalars above. Kept on the signal so the
+    # chronos_tail_trigger gate (and future shape-based gates) can consume
+    # it; None on every failure path (old caches, errors, disabled).
+    q10_path_pct: Optional[List[float]] = None
+    q90_path_pct: Optional[List[float]] = None
 
 
 # ── Per-coin cache (TTL-based) ────────────────────────────────────────────────
@@ -239,6 +247,15 @@ def _forecast_from_candles(
         median = float(f[0, idx_med, :].mean().item())
         q_low = float(f[0, idx_low, :].mean().item())
         q_high = float(f[0, idx_high, :].mean().item())
+        # Per-step quantile paths, % vs the context's last close. The model
+        # does NOT force the path to be linear (replay-verified 2026-08-28:
+        # the median path mean-reverts within the horizon, while the adverse
+        # quantile's early steps keep their shape). Stored so the
+        # chronos_tail_trigger gate can consume the tail directly.
+        q10_path_pct = [float(v) for v in
+                        ((f[0, idx_low, :] - last_close) / last_close * 100).tolist()]
+        q90_path_pct = [float(v) for v in
+                        ((f[0, idx_high, :] - last_close) / last_close * 100).tolist()]
     except torch.cuda.OutOfMemoryError as e:
         return ChronosSignal(
             coin=coin, side=side, context_last=last_close,
@@ -273,6 +290,8 @@ def _forecast_from_candles(
         horizon=horizon,
         model_id=cfg.get("model_id", "amazon/chronos-2"),
         inference_ms=inference_ms,
+        q10_path_pct=q10_path_pct,
+        q90_path_pct=q90_path_pct,
     )
 
 

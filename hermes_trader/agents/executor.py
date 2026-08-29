@@ -13,7 +13,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
@@ -221,11 +221,79 @@ def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> N
             )
         else:
             result["chronos_aligned"] = None
+        # Tail value for the chronos_tail_trigger_gate shadow log: adverse
+        # quantile extreme over the first `window_steps` steps of the path
+        # (min q10 for longs, max q90 for shorts). Same warm cache, no
+        # recompute. None when the signal predates per-step path storage.
+        _tcfg = None
+        try:
+            from hermes_trader.agents.config import get_config as _get_cfg
+            _tcfg = (_get_cfg().get("chronos_tail_trigger_gate") or {})
+        except Exception:
+            _tcfg = {}
+        _k = int((_tcfg or {}).get("window_steps", 6) or 6)
+        _tpath = (sig.q10_path_pct if side == "long" else sig.q90_path_pct) or None
+        if _tpath and len(_tpath) >= _k:
+            _tw = _tpath[:_k]
+            _tail = min(_tw) if side == "long" else max(_tw)
+            result["chronos_tail_pct"] = round(_tail * 10) / 10
+        else:
+            result["chronos_tail_pct"] = None
         result["chronos_error"] = sig.error
     except Exception as e:
         result["chronos_median_pct"] = None
         result["chronos_aligned"] = None
         result["chronos_error"] = str(e)
+
+
+def _attach_squeeze_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach the shadow squeeze-breakout fields to a trade result dict.
+
+    SHADOW ONLY: logged for forward validation, never gating or sizing.
+    The per-coin TTL cache makes this a ~free read steady-state; a cold
+    cache miss costs one 1h candle fetch (itself 90s-TTL cached).
+    Non-fatal: any failure yields an error field, the trade path continues.
+    """
+    try:
+        from hermes_trader.agents.squeeze_signal import (
+            get_squeeze_signal_sync, record_shadow,
+        )
+        sig = get_squeeze_signal_sync(coin, side)
+        # Composite entry-gate observability (shadow): last confirmed 1h
+        # close's position in the prior 48h range + the "extreme with no
+        # confirming breakout" flag. Logged only — NEVER gates or sizes.
+        if sig.active:
+            mode = str(result.get("mode") or "")
+            result["squeeze_side"] = sig.side
+            result["squeeze_score"] = round(sig.score, 2) if sig.score is not None else None
+            result["squeeze_ext_pct"] = round(sig.ext_pct, 2) if sig.ext_pct is not None else None
+            result["squeeze_aligned"] = sig.side == side
+            result["squeeze_error"] = None
+            if sig.side != side:
+                # The candidate is about to trade AGAINST a live breakout in
+                # the other direction — that is exactly the information the
+                # shadow exists to collect; keep the row but flag it.
+                result["squeeze_counter_signal"] = True
+            result["squeeze_chan_pos"] = round(sig.chan_pos, 3) if sig.chan_pos is not None else None
+            result["squeeze_extreme_no_breakout"] = sig.extreme_no_breakout
+            record_shadow(coin, side, sig,
+                          analysis_id=result.get("analysis_id"), mode=mode)
+        else:
+            result["squeeze_side"] = None
+            result["squeeze_score"] = None
+            result["squeeze_ext_pct"] = None
+            result["squeeze_aligned"] = None
+            result["squeeze_error"] = sig.error
+            result["squeeze_chan_pos"] = round(sig.chan_pos, 3) if sig.chan_pos is not None else None
+            result["squeeze_extreme_no_breakout"] = sig.extreme_no_breakout
+    except Exception as e:
+        result["squeeze_side"] = None
+        result["squeeze_score"] = None
+        result["squeeze_ext_pct"] = None
+        result["squeeze_aligned"] = None
+        result["squeeze_error"] = str(e)
+        result["squeeze_chan_pos"] = None
+        result["squeeze_extreme_no_breakout"] = None
 
 
 def build_open_config_snapshot(regime: str, exit_policy_label: str,
@@ -507,6 +575,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 "analysis_id": analysis["id"], "reason": runner_block,
             }
             _attach_chronos_to_result(result, coin, side)
+            _attach_squeeze_to_result(result, coin, side)
             return result
 
     # Idempotency: don't double-execute
@@ -857,17 +926,44 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             binary_news_match = news_text[:140]
 
     trade_side = analysis.get("side", "long") or "long"
-    # Cache-only Chronos read for the mismatch gate: the research prompt
-    # (_chronos_block) computes this same forecast per coin, so this is a
-    # cache hit — peek never computes and never blocks. None (cold cache /
-    # disabled) simply means the gate has no opinion.
+    # The squeeze-breakout SHADOW signal is attached at the trade-result
+    # sites via _attach_squeeze_to_result (same pattern as the Chronos
+    # attach): cache-first sync read, one 1h candle fetch on a cold miss
+    # (90s shared-TTL), logged + ledgered only. Never gates, never sizes.
+
+    # Sync Chronos read for the mismatch / tail-trigger gates:
+    # get_chronos_signal_sync returns the warm cache entry when fresh and
+    # computes once on a cold/expired cache (one 5m candleSnapshot POST +
+    # ~40ms CPU inference, bounded by the 90s shared candle cache). The
+    # cache-only peek raced the attach compute — the attach's fresh signal
+    # landed ~5s AFTER the gate read an expired cache, so the shadow gates
+    # systematically missed would-blocks on fresh-compute trades (2026-08-28
+    # ENA: tail −3.9% attached, gate passed on a 375s-old entry). An error
+    # signal (disabled / no candles / inference failure) carries no usable
+    # values → the gates then simply have no opinion.
     try:
-        from hermes_trader.agents.chronos_signal import peek_chronos
-        _csig = peek_chronos(analysis["coin"])
+        _csig = get_chronos_signal_sync(analysis["coin"], trade_side)
         _chronos_med = _csig.median_pct if _csig else None
+        # Per-step quantile paths for the tail-trigger gate; absent on error
+        # signals or pre-change signals — the gate then passes.
+        _chronos_q10p = _csig.q10_path_pct if _csig else None
+        _chronos_q90p = _csig.q90_path_pct if _csig else None
     except Exception as _pe:
-        logger.debug(f"[executor] chronos peek failed for {analysis['coin']}: {_pe}")
+        logger.debug(f"[executor] chronos sync read failed for {analysis['coin']}: {_pe}")
         _chronos_med = None
+        _chronos_q10p = _chronos_q90p = None
+    # Gate-side squeeze read for the squeeze_extreme gate: same sync,
+    # cache-first read the attach uses below (the attach runs later, at the
+    # trade-result site, so it sees whatever this read leaves in the cache).
+    # The flag is recomputed per candidate side inside _fetch, so a cache
+    # hit still reflects THIS candidate, not the previous one.
+    try:
+        from hermes_trader.agents.squeeze_signal import get_squeeze_signal_sync as _ss
+        _squeeze_sig = _ss(analysis["coin"], trade_side)
+        _squeeze_extreme = _squeeze_sig.extreme_no_breakout if _squeeze_sig else None
+    except Exception as _se:
+        logger.debug(f"[executor] squeeze sync read failed for {analysis['coin']}: {_se}")
+        _squeeze_extreme = None
     ctx = GateContext(
         confidence=analysis["confidence"],
         current_positions=positions,
@@ -888,6 +984,9 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         whale_signal_fired=bool(analysis.get("whale_signal")) and bool(config.get("whale_regime_bypass", False)),
         peak_daily_pnl=memory.peak_daily_pnl(),
         chronos_median_pct=_chronos_med,
+        chronos_q10_path_pct=_chronos_q10p,
+        chronos_q90_path_pct=_chronos_q90p,
+        squeeze_extreme_no_breakout=_squeeze_extreme,
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
@@ -905,6 +1004,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Tail-trigger shadow: same would-block pattern, keys off the adverse
+    # quantile PATH (validated K=6/X=3.0 in the 2026-08-28 60-flag replay —
+    # saved ~$3.21 vs ~$0.96 for the path-mean reduction).
+    _ct = gate_output["results"].get("chronos_tail_trigger") or {}
+    if _ct.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] chronos_tail_trigger WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_ct.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     # Band counter-trend breach shadow gate: same would-block pattern. Fires
     # on the GRASS shape — a counter-trend bounce/dip entry extended beyond
     # the opposite edge of a drifting MA band. Logs loudly while shadow_mode
@@ -916,6 +1027,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Squeeze extreme-without-breakout shadow gate: the chasing-without-
+    # confirmation bucket (channel extreme, no fresh aligned breakout). The
+    # flag itself is already on the trade-result attach
+    # (squeeze_extreme_no_breakout) — this line is the would-block marker.
+    _sx = gate_output["results"].get("squeeze_extreme") or {}
+    if _sx.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] squeeze_extreme WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_sx.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     if gate_output["blocked"]:
@@ -986,6 +1110,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             "gate_results": gate_output["results"],
         }
         _attach_chronos_to_result(result, coin, side)
+        _attach_squeeze_to_result(result, coin, side)
         return result
 
     if shadow_mode:
@@ -998,6 +1123,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             "size_usd": trade_notional,
         }
         _attach_chronos_to_result(_res, coin, _side)
+        _attach_squeeze_to_result(_res, coin, _side)
         return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
@@ -1254,6 +1380,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         "sl_missing": sl_missing,
     }
     _attach_chronos_to_result(result, coin, trade_side)
+    _attach_squeeze_to_result(result, coin, trade_side)
     return result
 
 
@@ -1454,6 +1581,54 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     return {"action": "unknown", "verdict": verdict, "result": None}
 
 
+def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
+                              side: str) -> Tuple[Optional[int], tuple]:
+    """Count independent signals corroborating a late-trend-chase entry.
+
+    Returns (n, names): n is the count of ALIGNED independent signals in
+    [0, 2] (clamped to the available signals), or None when the dynamic-bar
+    feature is disabled (`late_chase_dynamic_per_signal_drop` <= 0) — the gate
+    then behaves exactly as before (fixed bar, and no signal fetches at all).
+
+    Signals (independent pipelines, NOT the LLM's own confidence):
+      chronos_aligned — get_chronos_signal_sync median sign agrees with side
+                        (300s cache: a silent hit in steady state)
+      squeeze_aligned — squeeze_signal Donchian breakout side == side
+                        (300s cache, same reason)
+
+    A signal only votes when it is exactly True; missing/None/error/
+    counter-direction counts as 0. Failures never raise (fail-closed: fewer
+    votes, never a false allow).
+    """
+    gate = config.get("runner_entry_gate") or {}
+    drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
+    if drop <= 0:
+        return (None, ())
+    names: list = []
+    # Chronos alignment — median sign vs side; None median or error = no vote.
+    try:
+        sig = get_chronos_signal_sync(analysis.get("coin") or "unknown", side)
+        m = sig.median_pct if sig.median_pct is not None else None
+        if not sig.error and m is not None:
+            aligned = (m > 0) if side == "long" else (m < 0)
+            if aligned:
+                names.append("chronos_aligned")
+    except Exception as e:
+        logger.debug(f"[executor] late-chase corroboration: chronos read failed "
+                     f"(non-fatal): {e}")
+    # Squeeze alignment — live Donchian breakout on the same side.
+    try:
+        from hermes_trader.agents.squeeze_signal import get_squeeze_signal_sync
+        sig = get_squeeze_signal_sync(analysis.get("coin") or "unknown", side)
+        if sig is not None and sig.active and sig.error is None \
+                and getattr(sig, "side", None) == side:
+            names.append("squeeze_aligned")
+    except Exception as e:
+        logger.debug(f"[executor] late-chase corroboration: squeeze read failed "
+                     f"(non-fatal): {e}")
+    return (len(names), tuple(names))
+
+
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -1546,14 +1721,29 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     if forced and whale and not fresh_impulse:
         return "runner_gate_blocked (whale-only forced override; no fresh breakout/burst)"
     if uptrend and not (fresh_impulse or structured_daily_mover):
-        bypass_min = float(gate.get("bypass_late_trend_chase_min_conf", 0))
-        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bypass_min
+        # Dynamic confidence bar: independent-signal corroboration lowers the
+        # late-chase bypass bar so a 0.78 LLM with two aligned signals can
+        # enter what a bare 0.90 bar (never reached; LLM tops out ~0.78)
+        # would block forever. Clamped to min_confidence so corroboration can
+        # never undercut the hard confidence floor. Feature off (drop <= 0 or
+        # key absent) → the fixed bar, byte-identical to before.
+        fixed_bar = float(gate.get("bypass_late_trend_chase_min_conf", 0))
+        drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
+        corr, corr_names = _late_chase_corroboration(analysis, config, side)
+        if corr is None:
+            bar, bar_note = fixed_bar, ""
+        else:
+            bar = max(fixed_bar - corr * drop, min_conf)
+            bar_note = (f" (dynamic bar {bar:.2f} from {fixed_bar:.2f}, "
+                        f"{corr} signal{'s' if corr != 1 else ''} aligned: "
+                        f"{'+'.join(corr_names) if corr_names else 'none'})")
+        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bar
         if bypassed:
             logger.info(f"[executor] late-trend chase bypassed on {coin} "
-                        f"(conf {conf:.2f} >= {bypass_min:.2f})")
+                        f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
         else:
-            return ("runner_gate_blocked (late trend-only chase; no fresh "
-                    "breakout/burst)")
+            return (f"runner_gate_blocked (late trend-only chase; no fresh "
+                    f"breakout/burst, bar {bar:.2f}){bar_note}")
     else:
         bypassed = False
 
