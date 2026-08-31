@@ -9,7 +9,7 @@ to the poke bar.
 
 Usage (project venv):
   .venv/bin/python scripts/band_snapback_backtest.py [--coins BTC,ETH,SOL]
-      [--window 48] [--drift 1.5] [--min-poke 0.5] [--hold 12] [--bars 400]
+      [--band-span 16] [--drift 1.5] [--min-poke 0.5] [--hold 12] [--bars 400]
       [--chart-dir scratch/band_snapback_charts]
 
 Charts: one PNG per fired signal (annotated with the fitted band, the poke
@@ -394,20 +394,20 @@ def apply_dsl_exits(coin: str, candles: list[Candle], events: list[dict],
             "leverage": leverage, "sl_mult": sl_mult, "tp_frac": tp_frac}
 
 
-def replay(candles: list[Candle], window: int, max_drift_pct: float,
+def replay(candles: list[Candle], max_drift_pct: float,
            min_poke_atr: float, hold_bars: int, ma_type: str = "ema",
-           band_span=None):
+           band_span: int = 16):
     """Bar-by-bar replay. Returns list of event dicts for fired signals."""
     events = []
-    span = window if band_span is None else max(2, int(band_span))
-    # The trigger needs 2*window bars BEFORE the poke (window for the band
-    # edges + window for the drift reference), so the first eligible poke is
-    # at index 2*window.
-    for i in range(2 * window, len(candles)):
+    span = max(2, int(band_span))
+    # The trigger needs 2*band_span bars BEFORE the poke (the band's own
+    # window, once: MA warm at the drift reference + band edges), so the
+    # first eligible poke is at index 2*span.
+    for i in range(2 * span, len(candles)):
         history = candles[: i + 1]          # up to and incl. poke bar i (closed)
-        hit = band_snapback(history, window=window, max_drift_pct=max_drift_pct,
+        hit = band_snapback(history, max_drift_pct=max_drift_pct,
                             min_poke_atr=min_poke_atr, ma_type=ma_type,
-                            band_span=band_span, include_partial=False)
+                            band_span=span, include_partial=False)
         if not hit.get("fired"):
             continue
         entry_i = i
@@ -421,7 +421,7 @@ def replay(candles: list[Candle], window: int, max_drift_pct: float,
         # Curved MA band over the `span` bars ending at i-1 (the bar before
         # the poke) — the same band the trigger judged the poke against,
         # plus its one-bar linear projection onto the poke bar (dashed).
-        fit = candles[i - 2 * window: i]
+        fit = candles[i - 2 * span: i]
         up_ma, lo_ma = _band_ma(fit, span, ma_type)
         up_fit = up_ma[-span:]              # curved upper edge (MA of highs)
         lo_fit = lo_ma[-span:]              # curved lower edge (MA of lows)
@@ -646,13 +646,15 @@ def main():
     ap.add_argument("--interval", default="15m",
                     help="candle timeframe: 1m 3m 5m 15m 1h 4h (default 15m)")
     ap.add_argument("--bars", type=int, default=500)
-    ap.add_argument("--window", type=int, default=48)
     ap.add_argument("--ma-type", dest="ma_type", default="ema",
                     choices=["ema", "sma"],
                     help="band-edge moving average (default ema)")
-    ap.add_argument("--band-span", dest="band_span", type=int, default=None,
-                    help="band-edge MA span (bars); LAG dial. Default: = --window. "
-                         "Smaller = tighter/faster band, e.g. 16")
+    ap.add_argument("--band-span", dest="band_span", type=int, default=16,
+                    help="the band's single window (bars): edges, drift/"
+                         "direction, and ATR all run over it. "
+                         "Smaller = tighter/faster band (default 16)")
+    ap.add_argument("--window", dest="band_span_legacy", type=int, default=None,
+                    help=argparse.SUPPRESS)  # deprecated alias for --band-span
     ap.add_argument("--drift", type=float, default=1.5)
     ap.add_argument("--min-poke", dest="min_poke", type=float, default=0.5)
     ap.add_argument("--hold", type=int, default=12, help="bars to hold after entry")
@@ -677,7 +679,13 @@ def main():
 
     os.makedirs(args.chart_dir, exist_ok=True)
     coins = [c.strip() for c in args.coins.split(",") if c.strip()]
-    span = args.window if args.band_span is None else max(2, args.band_span)
+    if args.band_span_legacy is not None:
+        print("NOTE: --window is deprecated (the separate drift-reference "
+              "lookback was retired; band_span is the single window) — "
+              f"using band_span={args.band_span_legacy}", flush=True)
+        span = max(2, args.band_span_legacy)
+    else:
+        span = max(2, args.band_span)
     lag_bars = (span - 1) / 2
     dsl_mode = args.exit_mode == "dsl"
     time_scale = args.scale_timeouts
@@ -701,11 +709,11 @@ def main():
     for coin in coins:
         print(f"[{coin}] fetching {args.bars} x {args.interval} candles ...", flush=True)
         candles = fetch_range(coin, args.interval, args.bars)
-        if len(candles) < 2 * args.window + 2:
-            print(f"[{coin}] not enough candles ({len(candles)} < {2 * args.window + 2} = 2*window+2), skipping")
+        if len(candles) < 2 * span + 2:
+            print(f"[{coin}] not enough candles ({len(candles)} < {2 * span + 2} = 2*band_span+2), skipping")
             continue
-        events = replay(candles, args.window, args.drift, args.min_poke,
-                        args.hold, args.ma_type, args.band_span)
+        events = replay(candles, args.drift, args.min_poke,
+                        args.hold, args.ma_type, span)
         print(f"[{coin}] {len(candles)} candles, {len(events)} fired signals "
               f"({datetime.fromtimestamp(_ts_ms(candles[0].t), tz=timezone.utc):%Y-%m-%d} → "
               f"{datetime.fromtimestamp(_ts_ms(candles[-1].t), tz=timezone.utc):%Y-%m-%d %H:%M})")
