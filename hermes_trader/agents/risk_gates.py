@@ -35,9 +35,11 @@ class GateContext:
         binary_news_match: str = "",
         peak_daily_pnl: float = 0.0,
         chronos_median_pct: Optional[float] = None,
+        chronos_spread_pct: Optional[float] = None,
         chronos_q10_path_pct: Optional[List[float]] = None,
         chronos_q90_path_pct: Optional[List[float]] = None,
         squeeze_extreme_no_breakout: Optional[bool] = None,
+        duelist_verdict: Optional[str] = None,
     ):
         self.confidence = confidence
         self.current_positions = current_positions
@@ -70,6 +72,13 @@ class GateContext:
         # None = no usable forecast → chronos_mismatch_gate
         # has no opinion and passes.
         self.chronos_median_pct = chronos_median_pct
+        # Chronos-2 p10-p90 spread, % vs last close (same warm sync read as
+        # the median above). Fed ONLY to the ratio-aware deadband
+        # COUNTERFACTUAL in chronos_mismatch_gate — it never gates live
+        # execution, it just records that a ratio-aware deadband would have
+        # rescued a fixed-deadband block (HEMI replay, 2026-08-30).
+        # None = no spread (error signal) → counterfactual is inert.
+        self.chronos_spread_pct = chronos_spread_pct
         # Per-step Chronos-2 quantile paths, % vs last close (same sync read;
         # None on error signals / old shapes). Fed to
         # chronos_tail_trigger_gate — the shape-based counter-forecast veto
@@ -84,6 +93,11 @@ class GateContext:
         # opinion and passes. True/False = the flag's actual value; the gate
         # only ever has an opinion on True.
         self.squeeze_extreme_no_breakout = squeeze_extreme_no_breakout
+        # The A/B duelist's verdict at entry (LONG / SHORT / PASS / None),
+        # carried from research.py's `duelist_at_entry` snapshot via
+        # maybe_execute. None = the duelist is disabled or failed — the
+        # veto has no opinion and passes.
+        self.duelist_verdict = duelist_verdict
 
 
 def confidence_gate(ctx: GateContext, min_confidence: float) -> GateResult:
@@ -418,6 +432,53 @@ def _cfg(config: Dict[str, Any], key: str, default: Any) -> Any:
     return config[camel] if camel in config else default
 
 
+def _chronos_ratio_deadband_rescue(
+    ctx: GateContext, fixed_deadband: float, gate_cfg: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Counterfactual: would a ratio-aware deadband have rescued this block?
+
+    The live fixed-deadband rule treats |median| beyond `min_abs_median_pct`
+    as a directional claim. The HEMI replay (2026-08-30) showed a median that
+    sits inside the model's own p10-p90 band is noise, not a claim — so the
+    ratio-aware deadband is `max(fixed, min_conf_ratio * spread)`. Because it
+    is ALWAYS >= the fixed deadband, it can only widen the no-opinion zone: it
+    rescues blocks, it never creates them. This is the sample we accrue before
+    ever flipping the live rule to ratio-aware.
+
+    Called only on the block path (where the fixed rule has already rejected
+    the entry, so `abs(med) >= fixed_deadband` holds — asserted defensively
+    below). Returns None when the spread is unavailable or the ratio floor
+    does not actually widen the no-opinion zone past |median| (i.e. no rescue
+    to report).
+    """
+    med = ctx.chronos_median_pct
+    spread = ctx.chronos_spread_pct
+    if med is None or spread is None or spread <= 0:
+        return None
+    if abs(med) < fixed_deadband:
+        # Invariant of the block path — a median inside the fixed deadband
+        # never reaches the block, so no rescue to report.
+        return None
+    # Same knob semantics as chronos_signal.resolve_min_conf_ratio: absent ->
+    # 0.25, explicit 0 -> 0 (counterfactual inert: ratio_deadband collapses
+    # back to the fixed one, so no rescue can ever register).
+    try:
+        ratio = max(0.0, float(gate_cfg.get("min_conf_ratio", 0.25)))
+    except (TypeError, ValueError):
+        ratio = 0.25
+    ratio_deadband = max(fixed_deadband, ratio * spread)
+    if abs(med) < ratio_deadband:
+        return {
+            "would_pass": True,
+            "fixed_deadband_pct": fixed_deadband,
+            "ratio_deadband_pct": round(ratio_deadband, 4),
+            "min_conf_ratio": ratio,
+            "spread_pct": spread,
+            "median_pct": med,
+        }
+    return None
+
+
 def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Chronos direction-mismatch conviction gate (SHADOW by default).
 
@@ -435,6 +496,15 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
 
     Fail-safe: no forecast (cold cache, model not loaded, in_prompt off) or a
     directionally-neutral forecast (within the deadband) = no opinion = pass.
+
+    COUNTERFACTUAL (log-only, never gates): on the block path we also ask what
+    a ratio-aware deadband `max(min_abs_median_pct, min_conf_ratio * spread)`
+    would have done. It is always wider than the fixed deadband, so it only
+    rescues, never adds — a pure over-block sample (HEMI replay, 2026-08-30).
+    When it would have rescued, the result carries a `counterfactual_rescue`
+    marker the executor logs so we can count them against P/L before deciding
+    whether to promote the live rule to ratio-aware. `min_conf_ratio` (default
+    0.25) lives in this gate's config block.
     """
     cfg = gate_cfg or {}
     if not bool(cfg.get("enabled", True)):
@@ -456,9 +526,20 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
     reason = (f"chronos_mismatch ({ctx.trade_side} vs forecast {med:+.2f}%; "
               f"conf {ctx.confidence:.2f} < {min_conf:.2f}, "
               f"composite {ctx.composite_score:.1f} < {min_composite:.0f})")
+    result: GateResult = {"reason": reason}
+    # Log-only counterfactual (never changes the pass/fail below): a
+    # ratio-aware deadband is always wider than the fixed one, so it can only
+    # rescue a block the fixed rule made — accrue the sample for the
+    # fixed-vs-ratio decision.
+    cf = _chronos_ratio_deadband_rescue(ctx, deadband, cfg)
+    if cf is not None:
+        result["counterfactual_rescue"] = cf
     if bool(cfg.get("shadow_mode", True)):
-        return {"pass": True, "reason": reason, "shadow_would_block": True}
-    return {"pass": False, "reason": reason}
+        result["pass"] = True
+        result["shadow_would_block"] = True
+    else:
+        result["pass"] = False
+    return result
 
 
 def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
@@ -553,11 +634,23 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     entirely.
 
     Candles are fetched inside the gate on the band interval (same
-    interval/window as the band_snapback trigger config), so the read-side
-    TTL cache in hl_client makes this a hit when perception's band trigger
-    already pulled the same series seconds earlier — no extra network cost
-    in the common path, and the gate stays self-contained (no GateContext
-    plumbing).
+    interval/width as the band_snapback trigger config plus the drift
+    reference: band_span + drift_ref_span + a few extra bars), so the
+    read-side TTL cache in hl_client makes this a hit when perception's band
+    trigger already pulled the same series seconds earlier — no extra network
+    cost in the common path, and the gate stays self-contained (no
+    GateContext plumbing).
+
+    DRIFT REFERENCE (`drift_ref_span`, this gate's config block): the band
+    edges stay the trigger's `band_span` MA, but the drift/direction verdict
+    samples the SAME edge `drift_ref_span` bars back — the lag knob the
+    trigger rework collapsed onto band_span, re-opened here for the gate
+    alone. A late-chase entry is late against the LONGER trend, and a 16-bar
+    EMA hugs price so tightly its own-window drift is structurally ~4-5x
+    smaller (the GRASS 2026-08-26 tick read 6.4% over 48 bars but only 1.1%
+    over 16 — the gate slept). Live value 32; absent = band_span = pre-key
+    behaviour byte-identical. The drift gate's max_drift_pct stays the same
+    1.5% bar.
 
     Fail-safes: disabled / no band config / candle fetch failure / short
     history / band not trending / breach below `min_breach_pct` / entry on
@@ -581,10 +674,18 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     ov = (bs.get("overrides") or {}).get(ctx.coin) or {}
     bs = {**bs, **{k: v for k, v in ov.items() if v is not None}}
     interval = str(bs.get("interval", "1h"))
-    window = int(bs.get("window", 48))
+    span = max(2, int(bs.get("band_span", 16)))
+    # Drift-reference lag: absent -> band_span (the trigger's own-window
+    # semantics); explicit value -> the longer late-chase reference.
+    try:
+        drift_ref = int(cfg.get("drift_ref_span", span) or span)
+    except (TypeError, ValueError):
+        drift_ref = span
+    drift_ref = max(1, drift_ref)
 
     try:
-        candles = fetch_hl_candles(ctx.coin, interval=interval, count=2 * window + 4)
+        candles = fetch_hl_candles(ctx.coin, interval=interval,
+                                   count=span + drift_ref + 4)
     except Exception as e:
         logger.debug(f"[gate] band_counter_breach: candle fetch failed for {ctx.coin}: {e}")
         return {"pass": True}
@@ -593,10 +694,10 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     try:
         st = band_state(
             candles,
-            window=window,
+            band_span=span,
             max_drift_pct=float(bs.get("max_drift_pct", 1.5)),
             ma_type=str(bs.get("ma_type", "ema")),
-            band_span=bs.get("band_span"),
+            drift_ref=drift_ref,
         )
     except Exception as e:
         logger.debug(f"[gate] band_counter_breach: band_state failed for {ctx.coin}: {e}")
@@ -690,6 +791,79 @@ def squeeze_extreme_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResu
     return {"pass": False, "reason": reason}
 
 
+def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Duelist-veto conviction gate (SHADOW by default).
+
+    The fifth member of the shadow-gate house pattern. The strict veto
+    validated by the 2026-08-31 48h replay (Aug 29 09:07 → Aug 31 09:07
+    UTC, 41 executed trades): when the primary issues a DIRECTIONAL call
+    (LONG/SHORT) and the A/B duelist — a second model answering the same
+    research prompt — abstains with PASS, the entry is vetoed unless it
+    clears the elevated-conviction bar (conf >= `min_conf` OR composite >=
+    `min_composite`). The replay: the veto removed 12 of 41 entries
+    (+5 losers / −7 winners, net +$1.83 vs the −$2.72 baseline) and caught
+    the 2026-08-31 short-cluster's 240-min stale-flat-timeout trap exactly —
+    the duelist had said PASS on 5 of the 6 losers that died on the timeout.
+
+    The veto is deliberately STRICT by default (no conviction-escape): the
+    48h replay's +$1.83 result was computed with the strict rule, and an
+    escape bar (conf >= 0.90) would have changed the count because several
+    vetoed entries ran at 0.82. `min_conf` / `min_composite` therefore
+    implement the "deliberately conservative" escape — set them high (or
+    remove the check) if the duelist's PASS should carry no weight at all.
+
+    SHADOW MODE: with `shadow_mode` true (default, and how it ships) the
+    gate STRUCTURALLY returns pass=True and only carries a
+    `shadow_would_block` marker, which the executor logs loudly next to the
+    other shadow gates (`[gate][SHADOW] duelist_veto WOULD HAVE BLOCKED …`).
+    The executed-trade result dict carries the full `gate_results`, so the
+    marker lands in the session log's `execute` event and the
+    `Trade result:` log line for free — joinable to the ledger (by
+    analysis_id/coin/side) and to the duel JSONL (by ts/coin).
+
+    Fail-safes (no-opinion pass): disabled; duelist verdict absent (the
+    duelist is disabled or the second LLM call failed); the duelist AGREES
+    (its verdict matches the primary's side) or is directionally neutral
+    within the deadband — PASS is the only abstention. A data gap can never
+    block a trade.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    dl = ctx.duelist_verdict
+    if not dl:
+        return {"pass": True}
+    dl_upper = str(dl).upper()
+    # The veto only fires on the primary's directional side being abstained
+    # by the duelist. A PASS primary never reaches this gate (route_verdict
+    # routes PASS to "none" unless a force-execute hint fires, in which case
+    # the force path re-evaluates every gate — including this one — on the
+    # upgraded side; a duelist PASS on a force-execute PASS is a genuine
+    # disagreement and the veto applies).
+    if dl_upper == "PASS":
+        pass  # duelist abstained while primary is directional — the veto shape
+    elif (ctx.trade_side == "long" and dl_upper == "SHORT") or \
+         (ctx.trade_side == "short" and dl_upper == "LONG"):
+        # The duelist took the OPPOSITE side — a stronger disagreement than
+        # abstention. The same veto applies (it is the "duelist says NO to
+        # this entry" family).
+        pass
+    else:
+        # The duelist AGREES with the primary (same side), or the verdict is
+        # unrecognised — no opinion, pass.
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"duelist_veto ({ctx.trade_side} entry, duelist said "
+              f"{dl_upper}; conf {ctx.confidence:.2f} < {min_conf:.2f}, "
+              f"composite {ctx.composite_score:.1f} < {min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def eval_all_gates(
     ctx: GateContext,
     config: Optional[Dict[str, Any]] = None,
@@ -775,6 +949,13 @@ def eval_all_gates(
     # flag is absent/False (data gap can never block a trade).
     results["squeeze_extreme"] = squeeze_extreme_gate(
         ctx, effective_config.get("squeeze_extreme_gate") or {})
+    # Duelist veto: the A/B duelist's abstention (PASS) or opposite-side call
+    # on the primary's directional entry. Strict veto (no escape by default);
+    # shadow until the operator flips shadow_mode to false. Passes when the
+    # duelist has no verdict (disabled / failed) or AGREES with the primary —
+    # a data gap can never block a trade.
+    results["duelist_veto"] = duelist_veto_gate(
+        ctx, effective_config.get("duelist_veto_gate") or {})
 
     block_reasons = []
     blocked = False

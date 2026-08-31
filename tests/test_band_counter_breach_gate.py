@@ -51,13 +51,18 @@ def _candles(prices: list) -> list[Candle]:
 
 
 def _grass_shape(prices: list | None = None) -> list[Candle]:
-    """Down-trending 1h band (slow drift) + relief bounce above the upper
-    edge at the end — the exact GRASS 2026-08-26 setup."""
+    """Down-trending 1h band over its OWN 16-bar window + a short relief
+    bounce back above the upper edge — the GRASS 2026-08-26 setup.
+
+    The direction verdict is measured over the band's own window only (the
+    band's 16-bar EMA span), so the rally must be short enough that the
+    16-bar edge still reads DOWN (a 4-bar bounce is well inside one 16-bar
+    window; a 12-bar rally would dominate the window and read as UP — the
+    old 48-bar drift reference is gone)."""
     if prices is not None:
         return _candles(prices)
-    prices = [1.0 - 0.002 * i for i in range(100)]  # ~-20% drift over window
-    prices[-12:] = [0.899, 0.902, 0.905, 0.909, 0.913, 0.918,  # 4h relief rally
-                    0.924, 0.930, 0.937, 0.944, 0.951, 0.958]
+    prices = [1.0 - 0.002 * i for i in range(96)]  # ~-19% downswing
+    prices += [prices[-1] + 0.008 * (k + 1) for k in range(4)]  # 4-bar relief rally
     return _candles(prices)
 
 
@@ -75,7 +80,7 @@ def _chop_prices() -> list:
 
 
 def test_band_state_grass_shape_detects_down_drift_and_breach():
-    bs = band_state(_grass_shape(), window=48, max_drift_pct=1.5, ma_type="ema", band_span=16)
+    bs = band_state(_grass_shape(), band_span=16, max_drift_pct=1.5, ma_type="ema")
     assert bs["trending"] is True
     assert bs["direction"] == "DOWN"
     assert bs["drift_pct"] > 1.5
@@ -87,36 +92,86 @@ def test_band_state_grass_shape_detects_down_drift_and_breach():
 
 
 def test_band_state_mirror_up_drift_dip_below_lower():
-    prices = [1.0 + 0.002 * i for i in range(100)]  # uptrend
-    prices[-12:] = [1.191, 1.188, 1.184, 1.180, 1.175, 1.170,
-                    1.164, 1.158, 1.152, 1.146, 1.140, 1.134]
-    bs = band_state(_candles(prices), window=48, max_drift_pct=1.5, ma_type="ema", band_span=16)
+    prices = [1.0 + 0.0025 * i for i in range(94)]  # uptrend over the window
+    prices += [prices[-1] - 0.008 * (k + 1) for k in range(6)]  # 6-bar dip below the lower edge
+    bs = band_state(_candles(prices), band_span=16, max_drift_pct=1.5, ma_type="ema")
     assert bs["trending"] is True
     assert bs["direction"] == "UP"
     assert bs["breach_opposite_pct"] == pytest.approx(-bs["px_lower_pct"], rel=1e-9)
 
 
 def test_band_state_chop_never_trends():
-    bs = band_state(_candles(_chop_prices()), window=48, max_drift_pct=1.5)
+    bs = band_state(_candles(_chop_prices()), band_span=16, max_drift_pct=1.5)
     assert bs["trending"] is False
     # breach only matters when trending; on a flat band the gate must have
     # no opinion regardless of the px position
 
 
 def test_band_state_insufficient_history():
-    bs = band_state(_grass_shape()[:30], window=48)
-    assert bs is None  # < 2*window bars -> no opinion
+    bs = band_state(_grass_shape()[:30], band_span=16)
+    assert bs is None  # < 2*band_span bars -> no opinion
 
 
 def test_band_state_partial_bar_included():
     """include_partial=True must use the forming bar's close (the live
     perception semantics) — the verdict reference for a mid-entry call."""
     full = _grass_shape()
-    with_partial = band_state(full, window=48, max_drift_pct=1.5, include_partial=True)
-    without = band_state(full, window=48, max_drift_pct=1.5, include_partial=False)
+    with_partial = band_state(full, band_span=16, max_drift_pct=1.5, include_partial=True)
+    without = band_state(full, band_span=16, max_drift_pct=1.5, include_partial=False)
     # both should agree on direction here; the partial call must not error
     # and must reference the last (partial) bar's close
     assert with_partial["direction"] == without["direction"]
+
+
+# ---------------------------------------------------------------------------
+# drift_ref — the gate-only longer drift-reference lag (2026-08-31)
+# ---------------------------------------------------------------------------
+
+def _gentle_downswing_shape() -> list[Candle]:
+    """A GRASS-shaped downswing GENTLE enough that the band's own 16-bar
+    window reads drift 0.74% (chop -> the reworked default sleeps) while a
+    32-bar drift reference reads 1.72% (trending -> the gate arms). This is
+    the exact asymmetry drift_ref exists to recover: late-chase bounces off
+    a slow, long trend. Bounce carries px ~1.45% past the upper edge."""
+    prices = [1.0 - 0.0006 * i for i in range(90)]
+    prices += [prices[-1] + 0.005 * (k + 1) for k in range(4)]
+    return _candles(prices)
+
+
+def test_band_state_drift_ref_default_equals_span():
+    """drift_ref=None must be byte-identical to drift_ref=band_span — the
+    trigger's single-window semantics are the untouched default."""
+    cs = _grass_shape()
+    a = band_state(cs, band_span=16, max_drift_pct=1.5)
+    b = band_state(cs, band_span=16, max_drift_pct=1.5, drift_ref=16)
+    assert a == b
+
+
+def test_band_state_drift_ref_arms_gentle_trend_the_span_alone_misses():
+    cs = _gentle_downswing_shape()
+    own = band_state(cs, band_span=16, max_drift_pct=1.5)          # ref=16
+    long_ref = band_state(cs, band_span=16, max_drift_pct=1.5, drift_ref=32)
+    assert own["trending"] is False          # own-window chop: gate sleeps
+    assert long_ref["trending"] is True      # 32-bar ref: the trend is seen
+    assert long_ref["direction"] == "DOWN"
+    # edges are the SAME MA — px-vs-edge and breach barely move with ref
+    assert abs(long_ref["px_upper_pct"] - own["px_upper_pct"]) < 0.15
+    assert long_ref["breach_opposite_pct"] > 1.0
+
+
+def test_band_state_drift_ref_chop_stays_chop():
+    """A longer reference lag must not manufacture trend out of flat chop."""
+    import math
+    prices = [1.0 + 0.01 * math.sin(i / 3.0) for i in range(120)]
+    bs = band_state(_candles(prices), band_span=16, max_drift_pct=1.5, drift_ref=32)
+    assert bs["trending"] is False
+
+
+def test_band_state_drift_ref_history_boundary():
+    """ref=32 needs span+ref+2 = 50 bars (include_partial); one short -> None."""
+    cs = _grass_shape()
+    assert band_state(cs[:49], band_span=16, drift_ref=32) is None
+    assert band_state(cs[:50], band_span=16, drift_ref=32) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -124,12 +179,11 @@ def test_band_state_partial_bar_included():
 # ---------------------------------------------------------------------------
 
 # The live .agent-config.json band_snapback block (GRASS: no per-coin
-# override -> base settings: EMA/16 on 1h, 48-bar window, 1.5% drift gate).
+# override -> base settings: EMA/16 on 1h, 16-bar window, 1.5% drift gate).
 BAND_CFG = {
     "enabled": True,
     "ma_type": "ema",
     "band_span": 16,
-    "window": 48,
     "max_drift_pct": 1.5,
     "min_poke_atr": 0.75,
     "max_project_atr": 0.25,
@@ -157,7 +211,7 @@ def _ctx(side: str, conf: float) -> GateContext:
 
 def _wire(monkeypatch, candles: list[Candle], band_cfg: dict | None = None):
     """Point the gate's I/O at the synthetic candles and a live-config-shaped
-    band_snapback block (ema/16, 1h, window 48 — GRASS's live settings)."""
+    band_snapback block (ema/16, 1h, span 16 — GRASS's live settings)."""
     agent_cfg = {"band_snapback": band_cfg if band_cfg is not None else BAND_CFG}
     monkeypatch.setattr(
         "hermes_trader.agents.config_store.read_agent_config",
@@ -203,9 +257,8 @@ def test_gate_short_entry_not_counter_trend(monkeypatch):
 
 
 def test_gate_mirror_up_drift_dip_blocks_short_below_lower(monkeypatch):
-    prices = [1.0 + 0.002 * i for i in range(100)]
-    prices[-12:] = [1.191, 1.188, 1.184, 1.180, 1.175, 1.170,
-                    1.164, 1.158, 1.152, 1.146, 1.140, 1.134]
+    prices = [1.0 + 0.0025 * i for i in range(94)]
+    prices += [prices[-1] - 0.008 * (k + 1) for k in range(6)]
     _wire(monkeypatch, _candles(prices))
     r = band_counter_breach_gate(_ctx("short", 0.8), _gate_cfg())
     # dip below the lower edge of an UP-drifting band + SHORT = counter-trend
@@ -277,10 +330,10 @@ def test_gate_candle_fetch_failure_passes(monkeypatch):
 
 
 def test_gate_per_coin_override_drives_fetch(monkeypatch):
-    """A per-coin band_snapback override (interval/window) must drive the
-    gate's candle fetch (count = 2*window + 4), like the live trigger's
+    """A per-coin band_snapback override (interval/band_span) must drive the
+    gate's candle fetch (count = 2*band_span + 4), like the live trigger's
     resolution — recorded via the mocked fetch."""
-    ov_cfg = {**BAND_CFG, "overrides": {"GRASS": {"interval": "15m", "window": 24}}}
+    ov_cfg = {**BAND_CFG, "overrides": {"GRASS": {"interval": "15m", "band_span": 24}}}
     _wire(monkeypatch, _grass_shape(), band_cfg=ov_cfg)
     import hermes_trader.client.hl_client as hlc
     calls = []
@@ -293,4 +346,39 @@ def test_gate_per_coin_override_drives_fetch(monkeypatch):
     coin, interval, count = calls[0]
     assert coin == "GRASS"
     assert interval == "15m"      # override applied
-    assert count == 2 * 24 + 4    # override window applied
+    assert count == 2 * 24 + 4    # override band_span applied
+
+
+# ---------------------------------------------------------------------------
+# drift_ref_span — the gate-only longer drift reference (2026-08-31)
+# ---------------------------------------------------------------------------
+
+def test_gate_drift_ref_span_arms_the_slow_late_chase(monkeypatch):
+    """The whole point of the key: a GRASS-shaped bounce off a GENTLE, long
+    downswing. With the key absent the 16-bar own-window drift (0.74%) reads
+    chop and the 0.82-long passes; with drift_ref_span=32 the same candles
+    read trending DOWN 1.72%, the breach arms, and 0.82 < 0.90 blocks."""
+    cs = _gentle_downswing_shape()
+    _wire(monkeypatch, cs)
+    r_absent = band_counter_breach_gate(_ctx("long", 0.82), _gate_cfg())
+    assert r_absent == {"pass": True}          # own-window chop: no opinion
+    r_ref = band_counter_breach_gate(
+        _ctx("long", 0.82), _gate_cfg(drift_ref_span=32))
+    assert r_ref["pass"] is False              # the late-chase shape is armed
+    assert "band_counter_breach" in r_ref["reason"]
+
+
+def test_gate_drift_ref_span_scales_fetch_and_keeps_escape(monkeypatch):
+    """The fetch grows to span + drift_ref_span + 4, and the conviction
+    escape still applies at the longer ref (0.90 passes the armed shape)."""
+    _wire(monkeypatch, _gentle_downswing_shape())
+    import hermes_trader.client.hl_client as hlc
+    calls = []
+    monkeypatch.setattr(
+        hlc, "fetch_hl_candles",
+        lambda coin, interval="1h", count=200, **kw: calls.append((coin, interval, count)) or _gentle_downswing_shape(),
+    )
+    cfg = _gate_cfg(drift_ref_span=32)
+    r = band_counter_breach_gate(_ctx("long", 0.90), cfg)
+    assert r["pass"] is True and r.get("via") == "confidence"
+    assert calls and calls[0][2] == 16 + 32 + 4
