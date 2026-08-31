@@ -260,7 +260,27 @@ def _chronos_block(coin: str) -> str:
         # Chronos runs on 5m candles; horizon bars * 5m = the forward window.
         hours = sig.horizon * 5 / 60
         hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
-        if med > 0:
+        # Confidence floor (2026-08-30 HEMI replay): the FADE/continuation
+        # notes are interpretive CLAIMS, so they only render when the median
+        # clears a quarter of the model's own p10-p90 band (min_conf_ratio).
+        # All 8 hourly HEMI forecasts at the live config were under the floor
+        # — three of them rendered the full FADE warning at |median| 0.08–1.70%
+        # inside 5–8% bands, and the LLM leaned on those for six hours of a
+        # +38% rip. Below the floor the note says no-confident-direction and
+        # the data lines above still carry the numbers for the LLM's own
+        # judgement. Fail-safe: no spread -> ratio 0.0 -> neutral note
+        # (never claim a fade we have no basis for).
+        from hermes_trader.agents import chronos_signal as _cs2
+        min_conf_ratio = _cs2.resolve_min_conf_ratio(cfg)
+        ratio = _cs2.confidence_ratio(sig)
+        if ratio < min_conf_ratio:
+            spread_s = (f"{sig.spread_pct:.1f}%"
+                        if sig.spread_pct is not None else "no band")
+            note = (f"the model has no confident direction over the next ~{hours_s}h — the "
+                    f"median ({med:+.2f}%) sits inside its own p10-p90 band "
+                    f"({spread_s}, ratio {ratio:.2f} < {min_conf_ratio:.2f}); "
+                    "treat it as noise, not a fade or continuation.")
+        elif med > 0:
             note = (f"the model sees continuation for the next ~{hours_s}h — supports "
                     "holding through pullbacks, favours swing over scalp conviction.")
         elif med < 0:

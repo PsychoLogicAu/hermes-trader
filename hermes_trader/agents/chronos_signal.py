@@ -13,8 +13,20 @@ Config-driven via `.agent-config.json` under `chronos_signal`:
         debug: true|false            # extra log detail; off = summary only
         model_id: "amazon/chronos-2" # or autogluon/chronos-2-small
         device: "cpu"               # no GPU in our stack
-        context_length: 100         # candles fed as context
+        context_length: 100         # candles fed as context (live: 50 — HEMI
+                                    # replay, 2026-08-30: shorter context halves
+                                    # the regime-dilution window; directionality
+                                    # tied at 4/8)
         forecast_horizon: 48        # steps ahead to predict (in candle interval)
+        min_conf_ratio: 0.25        # confidence floor: |median_pct| /
+                                    # spread_pct. Below it the median sits
+                                    # inside the model's own p10-p90 band, so
+                                    # the prompt note says "no confident
+                                    # direction" (not FADE/continuation) and
+                                    # the log flag reads NEUTRAL (not
+                                    # ALIGN/MISMATCH). 0 disables the floor.
+                                    # HEMI replay: all 8 hourly forecasts at
+                                    # the live config were under 0.26.
         cache_ttl_seconds: 300      # TTL for per-coin cache
         timeout_seconds: 30         # abort deadline per forecast; 0 = no deadline
 
@@ -367,7 +379,12 @@ def _fetch_signal(coin: str, side: str) -> ChronosSignal:
             model_id=cfg.get("model_id", "amazon/chronos-2"),
             inference_ms=0, error=f"timeout after {timeout_s:.0f}s",
         )
-        logger.info(_format_signal_log(signal, bool(cfg.get("debug", False))))
+        logger.info(
+            _format_signal_log(
+                signal, bool(cfg.get("debug", False)),
+                resolve_min_conf_ratio(cfg),
+            )
+        )
         return signal
 
     signal = result["signal"]
@@ -376,20 +393,70 @@ def _fetch_signal(coin: str, side: str) -> ChronosSignal:
     # Log once per actual compute (cache miss). Cache hits return above
     # without logging, so each line reflects a real forecast rather than a
     # wrapper re-reading a warm entry (which made it look like N runs/coin).
-    logger.info(_format_signal_log(signal, bool(cfg.get("debug", False))))
+    logger.info(
+        _format_signal_log(
+            signal, bool(cfg.get("debug", False)),
+            resolve_min_conf_ratio(cfg),
+        )
+    )
     return signal
 
 
+def resolve_min_conf_ratio(cfg: Dict[str, Any]) -> float:
+    """The confidence-floor knob, read once per use site.
+
+    Absent/garbage -> 0.25 (default); an explicit 0 DISABLES the floor, as
+    the config header promises ("0 disables the floor") — so a falsy 0 must
+    NOT fall back to the default via `or`. Negative clamps to 0 (= disabled).
+    """
+    try:
+        v = float(cfg.get("min_conf_ratio", 0.25))
+    except (TypeError, ValueError):
+        return 0.25
+    return max(0.0, v)
+
+
+def confidence_ratio(sig: ChronosSignal) -> float:
+    """|median_pct| / spread_pct — the median's size vs the model's own
+    p10-p90 uncertainty band (the 2026-08-30 HEMI replay gate: a median that
+    sits inside its own band is noise, not a fade/continuation call).
+
+    Fail-safe is ZERO confidence, not full: a missing spread or missing
+    median means we have no basis for a directional claim, so the floor
+    never opens on data we don't have.
+    """
+    if sig.median_pct is None or not sig.spread_pct:
+        return 0.0
+    return abs(sig.median_pct) / sig.spread_pct
+
+
 # ── Async daemon wrapper (the entry point) ────────────────────────────────────
-def _format_signal_log(signal: ChronosSignal, debug: bool) -> str:
-    """Human-readable one-line log for the signal."""
+def _format_signal_log(
+    signal: ChronosSignal, debug: bool, min_conf_ratio: float = 0.25
+) -> str:
+    """Human-readable one-line log for the signal.
+
+    The ALIGN/MISMATCH flag only counts when the median is confident
+    (|median_pct| >= min_conf_ratio x the p10-p90 spread); below the floor
+    the median is inside its own uncertainty band and the line reads
+    NEUTRAL instead of MISMATCHing on a round-zero call (the 2026-08-30
+    HEMI replay: -0.08% logged as MISMATCH against a 4.98% band).
+    """
     if signal.error:
         return f"[chronos] {signal.coin} error: {signal.error}"
 
     median_pct_str = f"{signal.median_pct:+.2f}%" if signal.median_pct is not None else "?"
     spread_str = f"{signal.spread_pct:.2f}%" if signal.spread_pct is not None else "?"
-    direction = "↑" if (signal.median_pct or 0) > 0 else "↓"
-    alignment = "ALIGN" if (signal.median_pct or 0) * (1 if signal.side == "long" else -1) > 0 else "MISMATCH"
+    ratio = confidence_ratio(signal)
+    if signal.median_pct is None:
+        direction = "→"
+        alignment = "NEUTRAL (no median)"
+    elif ratio < min_conf_ratio:
+        direction = "→"
+        alignment = f"NEUTRAL (ratio {ratio:.2f} < {min_conf_ratio:.2f})"
+    else:
+        direction = "↑" if signal.median_pct > 0 else "↓"
+        alignment = "ALIGN" if signal.median_pct * (1 if signal.side == "long" else -1) > 0 else "MISMATCH"
     base = (
         f"[chronos] {signal.coin} ({signal.side}) "
         f"median={signal.median:.4f} ({median_pct_str}) "
