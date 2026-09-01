@@ -3138,8 +3138,14 @@ def test_chronos_block_in_prompt_sync_render():
     # Negative median (decay warning), sync returns a fresh signal. The p10
     # path dives to -6% within the first 6 steps, so the early-tail read
     # (the same shape the tail-trigger gate consumes) must render too.
+    # spread_pct stays 5.555 so the p10/p90 path-average lines render
+    # (-5.6% / +3.3%); median_pct is -2.778 so the confidence ratio is 0.50
+    # — ABOVE the min_conf_ratio floor (default 0.25, 2026-08-30 HEMI replay)
+    # — and the FADE note renders at all. (A median inside its own band now
+    # renders the "no confident direction" note instead; pinned in
+    # tests/test_chronos_confidence_floor.py.)
     sig_neg = _Sig(
-        median=8.9, median_pct=-1.111, q_low=8.5, q_high=9.3,
+        median=8.75, median_pct=-2.778, q_low=8.5, q_high=9.3,
         q10_path_pct=[-1.5, -2.8, -3.9, -4.8, -5.6, -6.0, -4.1, -3.2],
         q90_path_pct=[0.4, 0.9, 1.2, 1.4, 1.5, 1.5, 1.3, 1.1],
     )
@@ -3160,7 +3166,7 @@ def test_chronos_block_in_prompt_sync_render():
             250.0, [], "LIVE",
         )
         assert "Chronos forecast (shadow signal" in msg
-        assert "-1.11%" in msg
+        assert "-2.78%" in msg
         assert "FADE within ~4h" in msg
         # Label is the path-average over the window, not a point price ahead —
         # the 2026-08-28 replay finding (the median path mean-reverts).

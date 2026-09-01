@@ -549,23 +549,26 @@ def _project_band_edge(edge_series: List[float]) -> float:
 
 def band_snapback(
     candles: List[Candle],
-    window: int = 48,
+    band_span: int = 16,
     max_drift_pct: float = 1.5,
     min_poke_atr: float = 0.5,
     ma_type: str = "ema",
-    band_span: Optional[int] = None,
+    window: Optional[int] = None,
     max_project_atr: Optional[float] = 0.25,
     include_partial: bool = True,
     current_px: Optional[float] = None,
 ) -> TriggerHit:
     """Wick poke-out + snapback into a moving-average band (fade the poke).
 
-    The band edges are the ROLLING `ma_type` average of the HIGHs (upper edge)
-    and LOWs (lower edge) over `band_span` bars — a CURVED band that hugs price,
-    not a single straight fitted line. `band_span` (default: `window`) is the
-    LAG dial: a short span makes the band react fast and stick close to price;
-    a long span smooths it out. Keep `band_span <= window` (SMA needs that to
-    stay warm at the drift reference).
+    `band_span` is the ONE window of the whole trigger. The band edges are
+    the rolling `ma_type` average of the HIGHs (upper edge) and LOWs (lower
+    edge) over `band_span` bars — a CURVED band that hugs price, not a single
+    straight fitted line. The drift/direction verdict ("trending" chop gate)
+    and the ATR baseline operate over the SAME `band_span` bars — the band's
+    own window, by design. There is deliberately no separate longer lookback:
+    a band drifting over its own window IS the trend the fade must not fight.
+    The old `window` parameter (a separate, longer drift-reference lookback)
+    is deprecated and ignored.
 
     A poke is judged against the band edge AT the poke bar: the last true MA
     reading (bar before the poke — no lookahead) is linearly projected one
@@ -581,11 +584,13 @@ def band_snapback(
     bars and only bites in the tail. `None`/0 disables it.
 
     The setup is only valid in CHOP: the drift gate vetoes when the band edge
-    itself has drifted more than `max_drift_pct` over `window` bars. In a trend
-    the band follows price, so a poke-out is CONTINUATION, not
-    mean-reversion — the drift gate keeps this from fading breakouts. The
-    drift gate measures the (band_span-shaped) band edge over the FULL window,
-    so shrinking band_span to cut lag does NOT weaken trend detection.
+    itself has drifted more than `max_drift_pct` over the band's own window
+    (`band_span` bars). In a trend the band follows price, so a poke-out is
+    CONTINUATION, not mean-reversion — the drift gate keeps this from fading
+    breakouts. Because the drift is measured over the band's OWN window (no
+    separate longer lookback), a trend that moves the band within its window
+    vetoes the fade; the drift can only be missed while the band is flat
+    over its own window.
 
     In chop, a bar whose wick pierces the band edge by >= `min_poke_atr` * ATR
     while the price closes (or currently sits) back INSIDE the band proposes a
@@ -603,36 +608,39 @@ def band_snapback(
     """
     name = "bandSnapback"
     flat = {"name": name, "score": 0, "reason": "flat", "fired": False}
-    span = window if band_span is None else max(2, int(band_span))
+    if window is not None:
+        import logging
+        logging.getLogger(__name__).warning(
+            "band_snapback: the `window` parameter is deprecated and ignored "
+            f"(got {window}) — the band window is `band_span` only")
+    span = max(2, int(band_span))
 
-    # 2*window: the window right before the poke gives the band edges, and an
-    # equal window BEFORE THAT gives the drift reference (how far the band
-    # itself has moved). EMA is warm from bar 0; SMA needs window bars, so
-    # 2*window makes both types have a valid edge at the drift reference.
-    need = 2 * window + (1 if include_partial else 0)
+    # 2*span bars: the drift reference sits `span` bars back in the fit, so
+    # the MA must be warm there (exactly `span` bars of history — the band's
+    # own window), and the ATR baseline runs over the same span.
+    need = 2 * span + 1 + (1 if include_partial else 0)
     if len(candles) < need:
         return {**flat, "reason": "insufficient_history"}
 
     if include_partial:
         poke = candles[-2]
         px = candle_val(candles[-1], "c")
-        fit = candles[-(2 * window + 2):-2]
+        fit = candles[-(2 * span + 2):-2]
     else:
         poke = candles[-1]
         px = current_px if current_px is not None else candle_val(poke, "c")
-        fit = candles[-(2 * window + 1):-1]
+        fit = candles[-(2 * span + 1):-1]
 
-    if px <= 0 or len(fit) < 2 * window:
+    if px <= 0 or len(fit) < 2 * span:
         return {**flat, "reason": "insufficient_history"}
 
     # MA edges at the poke-bar edge (fit[-1]) and the drift reference
-    # (window bars back — the FULL window, independent of band_span, so the
-    # chop/trend gate is unaffected by the lag dial).
+    # (band_span bars back — the band's own window).
     up_ma, lo_ma = _band_ma(fit, span, ma_type)
     upper_edge, lower_edge = up_ma[-1], lo_ma[-1]
     if not math.isfinite(upper_edge) or not math.isfinite(lower_edge):
         return {**flat, "reason": "ma_not_warm"}
-    upper_ref, lower_ref = up_ma[-1 - window], lo_ma[-1 - window]
+    upper_ref, lower_ref = up_ma[-1 - span], lo_ma[-1 - span]
 
     # De-lagged band edges at the POKING bar: project the last true reading
     # one bar forward at the edge's own last gradient (linear extrapolation
@@ -651,23 +659,30 @@ def band_snapback(
     drift_pct = max(abs(upper_edge - upper_ref), abs(lower_edge - lower_ref)) / mid * 100
     if drift_pct > max_drift_pct:
         # Directional context for the LLM (silent but informative): the drift
-        # gate vetoes the FADE because the band is trending — so short-term
-        # mean-reversion pressure points WITH the band's drift, and going
-        # against it is a counter-trend scalp. Keep "trending" in the string
-        # (near-miss logging and tests key off it); the sign + band position
-        # are what the research prompt renders as band context.
+        # gate vetoes the FADE because the band is trending over its OWN
+        # window — so short-term mean-reversion pressure points WITH the
+        # band's drift, and going against it is a counter-trend scalp. Keep
+        # "trending" in the string (near-miss logging and tests key off
+        # it); the sign + band position are what the research prompt renders
+        # as band context.
         drift_signed = ((upper_edge - upper_ref) + (lower_edge - lower_ref)) / 2 / mid * 100
         direction = "UP" if drift_signed >= 0 else "DOWN"
         return {
             "name": name, "score": 0,
             "reason": (f"band trending {direction} ({drift_pct:.1f}% drift > "
-                       f"{max_drift_pct:.1f}% over window; px "
+                       f"{max_drift_pct:.1f}% over {span}-bar window; px "
                        f"{(mid / upper_edge - 1) * 100:+.1f}% vs upper edge, "
                        f"{(mid / lower_edge - 1) * 100:+.1f}% vs lower edge)"),
             "fired": False,
         }
 
-    a = atr(fit[-window:] + [poke], 14)
+    # ATR baseline runs over the band's OWN window (the same span), so the
+    # poke-depth unit is the volatility of the window the poke operates on.
+    # ATR(period) needs > period candles; fit[-span:] + poke = span+1 candles,
+    # so cap the period at span (ATR(14) for span>=14, ATR(span) for tight
+    # spans like the 15m span-8 overrides — keeps those from degrading to
+    # no_atr / silent).
+    a = atr(fit[-span:] + [poke], min(14, span))
     atr_val = a[-1]
     if not math.isfinite(atr_val) or atr_val <= 0:
         return {**flat, "reason": "no_atr"}
@@ -713,12 +728,11 @@ def band_snapback(
     depth_atr = depth / atr_val
     score = min(10.0, depth_atr / max(min_poke_atr, 1e-9) * 3.3)  # 10 at ~3x threshold
     side_word = "lower" if side == "long" else "upper"
-    span_note = "" if span == window else f"/span{span}"
     return {
         "name": name,
         "score": score,
         "reason": (f"{side} — {side_word} wick {depth_atr:.1f}x ATR past "
-                   f"projected {ma_type.upper()}{span_note}-band edge "
+                   f"projected {ma_type.upper()}/{span}-bar band edge "
                    f"(de-lagged 1 bar), snapped back inside "
                    f"(drift {drift_pct:.1f}%)"),
         "fired": True,
@@ -727,22 +741,39 @@ def band_snapback(
 
 def band_state(
     candles: List[Candle],
-    window: int = 48,
+    band_span: int = 16,
     max_drift_pct: float = 1.5,
     ma_type: str = "ema",
-    band_span: Optional[int] = None,
     include_partial: bool = True,
     current_px: Optional[float] = None,
+    drift_ref: Optional[int] = None,
+    window: Optional[int] = None,
 ) -> Optional[Dict]:
     """Band drift state — the drift-gate half of `band_snapback`, extracted.
+
+    `band_span` is the band's ONE window: the edges are the rolling MA over
+    `band_span` bars and the drift/direction verdict is measured over that
+    same window (no separate longer lookback — the old `window` parameter is
+    deprecated and ignored).
+
+    `drift_ref` (bars) optionally LENGTHENS only the drift-reference LAG: the
+    SAME band edge sampled `drift_ref` bars back instead of `band_span` bars
+    back. It is NOT a second, longer band — the edges the breach is measured
+    against stay the `band_span` MA. None (default) = `band_span`, i.e. the
+    trigger's own-window chop-gate semantics, byte-identical. Callers whose
+    job is the LONGER trend (the `band_counter_breach` late-chase veto) pass
+    a larger ref; the fit then grows to `band_span + drift_ref` bars so the
+    reference point still has `band_span` bars of MA history behind it (SMA
+    warmth).
 
     Returns None when history is too short or the band is degenerate (no
     opinion). Otherwise a dict:
 
-      trending       drift_pct > max_drift_pct — the band itself is trending,
-                     the same chop-gate condition that vetoes the snapback fade
+      trending       drift_pct > max_drift_pct — the band itself is trending
+                     over the drift window; the same chop-gate condition that
+                     vetoes the snapback fade
       direction      "UP" | "DOWN" — the band's drift sign (drift_signed)
-      drift_pct      max-edge drift over the FULL window, % of price (the
+      drift_pct      max-edge drift over the drift window, % of price (the
                      trigger's chop-gate math, verbatim)
       drift_signed   signed average edge drift, % of price
       px_upper_pct   (px / upper_edge - 1) * 100 — positive = price ABOVE the
@@ -761,17 +792,29 @@ def band_state(
     is a reversion, not a continuation (GRASS long 2026-08-26 19:07: 1h band
     DOWN 6.4% drift, px +6.6% vs upper edge, entered long at 0.82 conf).
     """
-    span = window if band_span is None else max(2, int(band_span))
-    need = 2 * window + (1 if include_partial else 0)
+    if window is not None:
+        import logging
+        logging.getLogger(__name__).warning(
+            "band_state: the `window` parameter is deprecated and ignored "
+            f"(got {window}) — the band window is `band_span` only")
+    span = max(2, int(band_span))
+    # Drift-reference lag: the same MA edge sampled `ref` bars back. Default
+    # = the band's own window (single-window rework semantics, byte-identical
+    # when drift_ref is None). The fit spans `span + ref` bars so the drift
+    # reference point has a full `span` of MA history behind it (SMA warmth);
+    # for ref == span that is exactly the old 2*span fit.
+    ref = span if drift_ref is None else max(1, int(drift_ref))
+    fit_len = span + ref
+    need = fit_len + 1 + (1 if include_partial else 0)
     if len(candles) < need:
         return None
     if include_partial:
         px = candle_val(candles[-1], "c")
-        fit = candles[-(2 * window + 2):-2]
+        fit = candles[-(fit_len + 2):-2]
     else:
         px = current_px if current_px is not None else candle_val(candles[-1], "c")
-        fit = candles[-(2 * window + 1):-1]
-    if px <= 0 or len(fit) < 2 * window:
+        fit = candles[-(fit_len + 1):-1]
+    if px <= 0 or len(fit) < fit_len:
         return None
     up_ma, lo_ma = _band_ma(fit, span, ma_type)
     upper_edge, lower_edge = up_ma[-1], lo_ma[-1]
@@ -779,7 +822,7 @@ def band_state(
         return None
     if upper_edge <= lower_edge:
         return None
-    upper_ref, lower_ref = up_ma[-1 - window], lo_ma[-1 - window]
+    upper_ref, lower_ref = up_ma[-1 - ref], lo_ma[-1 - ref]
     drift_pct = max(abs(upper_edge - upper_ref), abs(lower_edge - lower_ref)) / px * 100
     drift_signed = ((upper_edge - upper_ref) + (lower_edge - lower_ref)) / 2 / px * 100
     px_upper_pct = (px / upper_edge - 1) * 100  # >0 = price ABOVE upper edge

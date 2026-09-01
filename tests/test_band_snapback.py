@@ -5,9 +5,10 @@ Pure synthetic candles, no network. Covers:
 - upper wick poke + snapback in chop -> SHORT fires
 - SMA band variant (ma_type="sma") fires the same way
 - trending band -> stays silent (poke is continuation, not fade)
+- band_span (single window: span 8 chop still fires; span 8 trend still vetoes)
 - poke with close still OUTSIDE the band (breakout) -> silent
 - shallow poke below min_poke_atr -> silent
-- insufficient history (fewer than 2*window bars) -> silent
+- insufficient history (fewer than 2*band_span bars) -> silent
 - live (include_partial) vs backtest (include_partial=False) framing
 - current_px override (price drifted back outside) -> silent
 - weight-0: a fired bandSnapback contributes nothing to composite_score
@@ -17,6 +18,7 @@ Pure synthetic candles, no network. Covers:
 - projection cap (max_project_atr): clamps the de-lagged delta in the
   accelerating-band tail — a wick between the capped and uncapped judge
   lines fires with the cap, stays silent with it disabled
+- deprecation: passing the old `window` kwarg warns and is ignored
 """
 
 import math
@@ -32,10 +34,11 @@ def _candle(i, o, h, l, c):
     return Candle(t=T0 + i * STEP, o=o, h=h, l=l, c=c, v=1000.0)
 
 
-# The trigger needs 2*window bars before the poke (window for the band edges
-# + window for the drift reference). Default window=24 -> need 48 bars.
-WIN = 24
-NEED = 2 * WIN  # 48
+# band_span is the band's ONE window: edges, drift/direction, and ATR all
+# operate over it. The trigger needs 2*band_span bars before the poke
+# (span so the MA is warm at the drift reference + span more of history).
+SPAN = 24
+NEED = 2 * SPAN  # 48
 
 
 def chop(n=None, mid=100.0, half=0.3):
@@ -57,7 +60,7 @@ def test_lower_poke_snaps_back_fires_long():
     """EMA band: wick pierces the lower MA edge, close snaps back inside."""
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)  # wick ~0.5 below ~99.7
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert hit["fired"], hit
     assert "long" in hit["reason"], hit["reason"]
     assert "EMA" in hit["reason"], hit["reason"]
@@ -68,7 +71,7 @@ def test_lower_poke_sma_band_fires_long():
     """SMA band variant: same geometry, ma_type='sma'."""
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
-    hit = band_snapback(cs + [poke], window=WIN, ma_type="sma",
+    hit = band_snapback(cs + [poke], band_span=SPAN, ma_type="sma",
                         include_partial=False)
     assert hit["fired"], hit
     assert "long" in hit["reason"]
@@ -79,7 +82,7 @@ def test_upper_poke_snaps_back_fires_short():
     """EMA band: wick pierces the upper MA edge, close snaps back inside."""
     cs = chop()
     poke = _candle(NEED, 100.1, 100.8, 99.9, 100.15)  # wick ~0.5 above ~100.3
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert hit["fired"], hit
     assert "short" in hit["reason"], hit["reason"]
     assert hit["score"] > 0
@@ -93,35 +96,35 @@ def test_trending_band_stays_silent():
         base = 100.0 + i * 0.5  # strong uptrend: 0.5 per bar
         cs.append(_candle(i, base - 0.1, base + 0.3, base - 0.5, base))
     poke = _candle(NEED, 124.5, 124.9, 123.9, 124.6)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert not hit["fired"], hit
     assert "trending" in hit["reason"], hit["reason"]
 
 
 def test_band_span_tighter_still_fires_in_chop():
-    """band_span (8) << window (24): the band hugs price tightly but the poke
-    still snaps back -> fires, and the reason surfaces the span override."""
+    """band_span (8): the band hugs price tightly and the drift verdict
+    runs over the SAME 8 bars. Flat chop stays near-flat over any span,
+    so the poke still snaps back -> fires, and the reason names the window."""
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
-    hit = band_snapback(cs + [poke], window=WIN, band_span=8,
-                        include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=8, include_partial=False)
     assert hit["fired"], hit
     assert "long" in hit["reason"]
-    assert "/span8" in hit["reason"], hit["reason"]
+    assert "/8-bar" in hit["reason"], hit["reason"]
 
 
 def test_band_span_tight_drift_gate_still_vetoes_trend():
-    """The KEY property: a tight band_span (8) hugs the trend closely, but the
-    drift gate still measures the band edge over the FULL window (24) — so a
-    real trend is STILL vetoed, not faded. Shrinking band_span to cut lag does
-    not weaken trend detection."""
+    """THE KEY property: the drift gate measures the band edge over the
+    band's OWN window (here 8 bars) — so a real trend (0.5/bar over 8 bars
+    = ~3% edge drift > the 1.5% gate) is STILL vetoed even on a tight
+    span. A tight band cannot hide a trend that moves within its own
+    window; it can only miss a drift slower than that window can show."""
     cs = []
     for i in range(NEED):
         base = 100.0 + i * 0.5  # strong uptrend: 0.5 per bar
         cs.append(_candle(i, base - 0.1, base + 0.3, base - 0.5, base))
     poke = _candle(NEED, 124.5, 124.9, 123.9, 124.6)
-    hit = band_snapback(cs + [poke], window=WIN, band_span=8,
-                        include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=8, include_partial=False)
     assert not hit["fired"], hit
     assert "trending" in hit["reason"], hit["reason"]
 
@@ -130,7 +133,7 @@ def test_poke_without_snapback_stays_silent():
     """Wick pokes below but the CLOSE also stays below the band: breakout, not fade."""
     cs = chop()
     poke = _candle(NEED, 99.8, 99.9, 99.2, 99.55)  # close below ~99.7 band
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert not hit["fired"], hit
 
 
@@ -138,13 +141,13 @@ def test_shallow_poke_below_atr_threshold_stays_silent():
     """Wick barely kisses the band: no meaningful poke depth."""
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.6, 99.9)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert not hit["fired"], hit
 
 
 def test_insufficient_history():
-    """Fewer than 2*window bars before the poke -> insufficient_history."""
-    hit = band_snapback(chop(10), window=WIN, include_partial=False)
+    """Fewer than 2*band_span bars before the poke -> insufficient_history."""
+    hit = band_snapback(chop(10), band_span=SPAN, include_partial=False)
     assert not hit["fired"]
     assert hit["reason"] == "insufficient_history"
 
@@ -155,7 +158,7 @@ def test_live_include_partial_framing():
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
     partial = _candle(NEED + 1, 99.85, 99.9, 99.8, 99.88)  # current px ~99.88
-    hit_live = band_snapback(cs + [poke, partial], window=WIN, include_partial=True)
+    hit_live = band_snapback(cs + [poke, partial], band_span=SPAN, include_partial=True)
     assert hit_live["fired"], hit_live
     assert "long" in hit_live["reason"]
 
@@ -165,7 +168,7 @@ def test_current_px_overrides_poke_close():
     (current_px) has since dropped back OUTSIDE the band — snapback no longer holds."""
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False,
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False,
                         current_px=99.55)  # dropped below the ~99.7 lower edge
     assert not hit["fired"], hit
 
@@ -173,9 +176,9 @@ def test_current_px_overrides_poke_close():
 def test_deeper_poke_scores_higher():
     cs = chop()
     shallow = band_snapback(cs + [_candle(NEED, 99.9, 100.0, 99.35, 99.85)],
-                            window=WIN, include_partial=False)
+                            band_span=SPAN, include_partial=False)
     deep = band_snapback(cs + [_candle(NEED, 99.9, 100.0, 99.05, 99.85)],
-                         window=WIN, include_partial=False)
+                         band_span=SPAN, include_partial=False)
     assert shallow["fired"] and deep["fired"], (shallow, deep)
     assert deep["score"] > shallow["score"]
     assert shallow["score"] <= 10.0 and deep["score"] <= 10.0
@@ -184,7 +187,7 @@ def test_deeper_poke_scores_higher():
 def test_weight_zero_does_not_affect_composite():
     cs = chop()
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert hit["fired"]
     weights = {"bandSnapback": 0.0, "trendStrength": 0.55}
     assert composite_score([hit], weights) == 0
@@ -193,7 +196,7 @@ def test_weight_zero_does_not_affect_composite():
 def test_no_poke_at_all_stays_silent():
     """Flat chop with no wick poke: no signal."""
     cs = chop(NEED + 1)  # one extra flat bar as the 'poke'
-    hit = band_snapback(cs, window=WIN, include_partial=False)
+    hit = band_snapback(cs, band_span=SPAN, include_partial=False)
     assert not hit["fired"], hit
 
 
@@ -228,17 +231,17 @@ def test_stale_edge_crossing_is_now_rejected():
     from hermes_trader.indicators.math import atr as _atr
     from hermes_trader.indicators.triggers import _band_ma
     cs = _falling_ramp()
-    fit = cs  # the 48 bars before the poke
-    lo_ma = _band_ma(fit, WIN, "ema")[1]
+    fit = cs  # the 2*band_span bars before the poke
+    lo_ma = _band_ma(fit, SPAN, "ema")[1]
     stale = lo_ma[-1]
     proj = lo_ma[-1] + (lo_ma[-1] - lo_ma[-2])
-    a = _atr(fit[-WIN:] + [cs[-1]], 14)[-1]
+    a = _atr(fit[-SPAN:] + [cs[-1]], min(14, SPAN))[-1]
     min_depth = 0.5 * a
     assert proj < stale  # falling band: projection extends the decline
     pl = (stale - min_depth + proj - min_depth) / 2  # crosses stale zone only
     px = stale + 0.1
     poke = _candle(NEED, px, px + 0.1, pl, px)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert not hit["fired"], hit
     assert "no snapback" in hit["reason"], hit["reason"]
 
@@ -249,14 +252,14 @@ def test_deeper_poke_still_fires_against_projected_edge():
     from hermes_trader.indicators.math import atr as _atr
     from hermes_trader.indicators.triggers import _band_ma
     cs = _falling_ramp()
-    lo_ma = _band_ma(cs, WIN, "ema")[1]
+    lo_ma = _band_ma(cs, SPAN, "ema")[1]
     proj = lo_ma[-1] + (lo_ma[-1] - lo_ma[-2])
-    a = _atr(cs[-WIN:] + [cs[-1]], 14)[-1]
+    a = _atr(cs[-SPAN:] + [cs[-1]], min(14, SPAN))[-1]
     min_depth = 0.5 * a
     pl = proj - min_depth - 0.1   # clearly past the projected edge
     px = proj + 0.1               # snapped back inside the projected edge
     poke = _candle(NEED, px, px + 0.1, pl, px)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert hit["fired"], hit
     assert "long" in hit["reason"] and "projected" in hit["reason"], hit["reason"]
 
@@ -267,14 +270,14 @@ def test_flat_band_projection_is_a_noop():
     from hermes_trader.indicators.triggers import _project_band_edge, _band_ma
     cs = chop()
     fit = cs
-    lo_ma = _band_ma(fit, WIN, "ema")[1]
+    lo_ma = _band_ma(fit, SPAN, "ema")[1]
     delta = _project_band_edge(lo_ma) - lo_ma[-1]
     # chop() oscillates closes +/-0.05, so the EMA-of-lows carries a tiny
     # residual wiggle (~0.004/bar). The point: the projection moves the edge
     # negligibly vs the poke depth (~0.4 ATR), so flat-band behavior holds.
     assert abs(delta) < 0.01, delta
     poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
-    hit = band_snapback(cs + [poke], window=WIN, include_partial=False)
+    hit = band_snapback(cs + [poke], band_span=SPAN, include_partial=False)
     assert hit["fired"], hit
 
 
@@ -310,20 +313,53 @@ def test_projection_cap_trims_over_projected_signal():
     from hermes_trader.indicators.math import atr as _atr
     from hermes_trader.indicators.triggers import _band_ma, _project_band_edge
     fit = _accelerating_tail()
-    lo_ma = _band_ma(fit, WIN, "ema")[1]
+    lo_ma = _band_ma(fit, SPAN, "ema")[1]
     stale, raw = lo_ma[-1], _project_band_edge(lo_ma)
     # the test premise itself: the raw projection overshoots the decline by
     # MORE than the cap, so the clamp actually binds
     poke = _candle(NEED, 99.3076, 99.3076, fit[-1].l - 0.9, 99.3076)
-    a = _atr(fit[-WIN:] + [poke], 14)[-1]
+    a = _atr(fit[-SPAN:] + [poke], min(14, SPAN))[-1]
     assert raw < stale - 0.25 * a, (raw, stale, a)  # cap binds
     # and the drift gate passes (one-bar crash, tiny window drift)
-    assert abs(stale - lo_ma[-1 - WIN]) / poke.c * 100 < 1.5
+    assert abs(stale - lo_ma[-1 - SPAN]) / poke.c * 100 < 1.5
 
     # default (cap ON): the over-projected false 'snapback' is trimmed
-    hit_capped = band_snapback(fit + [poke], window=WIN, include_partial=False)
+    hit_capped = band_snapback(fit + [poke], band_span=SPAN, include_partial=False)
     assert not hit_capped["fired"], hit_capped
     # cap OFF: the raw projection fires the false positive
-    hit_raw = band_snapback(fit + [poke], window=WIN, include_partial=False,
+    hit_raw = band_snapback(fit + [poke], band_span=SPAN, include_partial=False,
                             max_project_atr=None)
     assert hit_raw["fired"] and "long" in hit_raw["reason"], hit_raw
+
+
+# ---------------------------------------------------------------------------
+# Deprecation shim: the old `window` kwarg warns and is IGNORED — band_span
+# is the band's single window (2026-08-31 rework). The research docstring
+# lists this; this test is the pin.
+# ---------------------------------------------------------------------------
+
+def test_window_kwarg_warns_and_is_ignored(caplog):
+    import logging
+    cs = chop()
+    poke = _candle(NEED, 99.9, 100.0, 99.2, 99.85)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.indicators.triggers"):
+        hit_ignored = band_snapback(cs + [poke], band_span=SPAN, window=999,
+                                    include_partial=False)
+        base = band_snapback(cs + [poke], band_span=SPAN,
+                             include_partial=False)
+    assert any("deprecated" in r.message for r in caplog.records), caplog.text
+    # window=999 must be IDENTICAL to not passing it (the value is ignored)
+    assert hit_ignored["fired"] == base["fired"] is True
+    assert hit_ignored["reason"] == base["reason"]
+
+
+def test_window_kwarg_warns_in_band_state(caplog):
+    import logging
+    from hermes_trader.indicators.triggers import band_state
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.indicators.triggers"):
+        st = band_state(chop(2 * SPAN + 4), band_span=SPAN, window=123)
+        st_ref = band_state(chop(2 * SPAN + 4), band_span=SPAN)
+    assert any("deprecated" in r.message for r in caplog.records), caplog.text
+    assert st == st_ref

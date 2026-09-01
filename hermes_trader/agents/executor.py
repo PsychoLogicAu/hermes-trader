@@ -944,6 +944,10 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     try:
         _csig = get_chronos_signal_sync(analysis["coin"], trade_side)
         _chronos_med = _csig.median_pct if _csig else None
+        # p10-p90 spread, % vs last close — same sync read. Fed ONLY to the
+        # ratio-aware deadband counterfactual in chronos_mismatch_gate (it
+        # logs, never gates). Absent on error signals → counterfactual inert.
+        _chronos_spread = _csig.spread_pct if _csig else None
         # Per-step quantile paths for the tail-trigger gate; absent on error
         # signals or pre-change signals — the gate then passes.
         _chronos_q10p = _csig.q10_path_pct if _csig else None
@@ -951,6 +955,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     except Exception as _pe:
         logger.debug(f"[executor] chronos sync read failed for {analysis['coin']}: {_pe}")
         _chronos_med = None
+        _chronos_spread = None
         _chronos_q10p = _chronos_q90p = None
     # Gate-side squeeze read for the squeeze_extreme gate: same sync,
     # cache-first read the attach uses below (the attach runs later, at the
@@ -964,6 +969,13 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     except Exception as _se:
         logger.debug(f"[executor] squeeze sync read failed for {analysis['coin']}: {_se}")
         _squeeze_extreme = None
+    # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
+    # LONG / SHORT / PASS, or None when the duelist is disabled / failed. Fed
+    # to duelist_veto_gate — the abstention (PASS) / opposite-side veto shape.
+    # A data gap (None) can never block a trade: the gate passes with no
+    # opinion.
+    _duelist_at = analysis.get("duelist_at_entry") or {}
+    _duelist_verdict = _duelist_at.get("verdict") or None
     ctx = GateContext(
         confidence=analysis["confidence"],
         current_positions=positions,
@@ -984,9 +996,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         whale_signal_fired=bool(analysis.get("whale_signal")) and bool(config.get("whale_regime_bypass", False)),
         peak_daily_pnl=memory.peak_daily_pnl(),
         chronos_median_pct=_chronos_med,
+        chronos_spread_pct=_chronos_spread,
         chronos_q10_path_pct=_chronos_q10p,
         chronos_q90_path_pct=_chronos_q90p,
         squeeze_extreme_no_breakout=_squeeze_extreme,
+        duelist_verdict=_duelist_verdict,
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
@@ -1003,6 +1017,22 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
             f"NOT blocking (shadow mode)")
+    # Log-only counterfactual sample: the fixed 0.5% deadband blocked this
+    # entry, but a ratio-aware deadband (min_conf_ratio x the p10-p90 spread,
+    # always wider than the fixed one) would have rescued it — i.e. the model
+    # was inside its own uncertainty band, not making a directional claim.
+    # Never affects execution. Accrue the count, then join against P/L on the
+    # blocked/missed trades before deciding whether to promote the live rule
+    # to ratio-aware (HEMI replay, 2026-08-30).
+    _cf = _cm.get("counterfactual_rescue")
+    if _cf:
+        logger.warning(
+            f"[gate][COUNTERFACTUAL] chronos_mismatch fixed-deadband block "
+            f"RESCUED by ratio-aware deadband for {analysis['coin']} "
+            f"{trade_side.upper()}: median {_cf['median_pct']:+.2f}% inside "
+            f"band {_cf['spread_pct']:.1f}% (|med| < {_cf['ratio_deadband_pct']:.2f}% "
+            f"= max({_cf['fixed_deadband_pct']:.2f}%, {_cf['min_conf_ratio']:.2f} x "
+            f"spread)) — fixed rule stands, ratio rule would have passed")
 
     # Tail-trigger shadow: same would-block pattern, keys off the adverse
     # quantile PATH (validated K=6/X=3.0 in the 2026-08-28 60-flag replay —
@@ -1040,6 +1070,22 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_sx.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Duelist veto shadow: the A/B duelist abstained (PASS) or took the
+    # opposite side on this directional entry. The gate structurally passes;
+    # this is the would-block marker (the marker also rides along in
+    # gate_results → the Trade result line → ledger joinable).
+    _dv = gate_output["results"].get("duelist_veto") or {}
+    if _dv.get("shadow_would_block"):
+        _dl_model = ((analysis.get("duelist_at_entry") or {}).get("model") or "?")
+        logger.warning(
+            f"[gate][SHADOW] duelist_veto WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(duelist {_dl_model} said "
+            f"{((analysis.get('duelist_at_entry') or {}).get('verdict') or '?').upper()}"
+            f"; conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_dv.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     if gate_output["blocked"]:

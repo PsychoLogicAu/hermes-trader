@@ -120,11 +120,13 @@ def locate_trade(rows: list[dict], coin: str, at: datetime) -> tuple[dict, dict 
 def load_band_params(cfg: dict, coin: str) -> dict:
     bs = cfg.get("band_snapback") or {}
     ov = (bs.get("overrides") or {}).get(coin) or {}
+    # band_span is the band's single window (edges + drift + ATR); the old
+    # separate `window` knob is retired — any leftover key is ignored.
+    span = int(ov.get("band_span", bs.get("band_span", 16)))
     return {
         "interval": ov.get("interval", bs.get("interval", "1h")),
-        "window": int(bs.get("window", 48)),
         "ma_type": bs.get("ma_type", "ema"),
-        "band_span": int(ov.get("band_span", bs.get("band_span", 16))),
+        "band_span": span,
         "max_drift_pct": float(bs.get("max_drift_pct", 1.5)),
         "min_poke_atr": float(bs.get("min_poke_atr", 0.75)),
         "sl_atr_mult": float(cfg.get("sl_atr_mult", 1.5)),
@@ -217,7 +219,6 @@ def plot_trade(coin: str, side: str, op: dict, cl: dict | None,
                candles: list[Candle], interval: str, bp: dict,
                state: dict, sl_px: float | None, tp_px: float | None,
                atr4: float, path: str) -> None:
-    win = bp["window"]
     span = bp["band_span"]
     entry_px = float(op["entry_px"])
     entry_ms = op["ts"]
@@ -239,7 +240,7 @@ def plot_trade(coin: str, side: str, op: dict, cl: dict | None,
     pnl_pct = spot * lev
 
     # Chart window: band window + a little before the entry through the exit.
-    before = win + span
+    before = 2 * span
     start_i = max(0, min(entry_i - before, len(candles) - 2))
     end_i = max(entry_i + 6, min(exit_i + 3, len(candles) - 1))
     view = candles[start_i: end_i + 1]
@@ -388,7 +389,7 @@ def render_one(rows: list[dict], cfg: dict, coin: str, at: datetime,
     entry_ms = op["ts"]
     side = op.get("side", "long")
     bp = load_band_params(cfg, coin)
-    interval, win, span = bp["interval"], bp["window"], bp["band_span"]
+    interval, span = bp["interval"], bp["band_span"]
     step = WIN_MS[interval]
     print(f"[{coin}] {side} entry {float(op['entry_px']):.6g} @ "
           f"{datetime.fromtimestamp(entry_ms / 1000.0, tz=timezone.utc):%Y-%m-%d %H:%M} UTC"
@@ -400,16 +401,16 @@ def render_one(rows: list[dict], cfg: dict, coin: str, at: datetime,
     else:
         print(f"[{coin}] no CLOSE found in ledger — charting as still-open")
 
-    # Chart-interval candles: 2*window+margin before entry (enough for the
-    # trigger verdict, which needs 2*window bars of history) → now.
+    # Chart-interval candles: 2*band_span+margin before entry (enough for the
+    # trigger verdict, which needs 2*band_span bars of history) → now.
     hold_ms = (cl["ts"] - entry_ms) if cl else 6 * 3_600_000
-    start_ms = entry_ms - (2 * win + 10) * step
+    start_ms = entry_ms - (2 * span + 10) * step
     end_ms = max(entry_ms + hold_ms + 10 * step, int(time.time() * 1000))
     print(f"[{coin}] fetching {interval} candles [{datetime.fromtimestamp(start_ms / 1000.0, tz=timezone.utc):%Y-%m-%d %H:%M} → now] ...", flush=True)
     candles = fetch_range(coin, interval, start_ms, end_ms)
-    if len(candles) < 2 * win + 4:
+    if len(candles) < 2 * span + 4:
         print(f"[{coin}] only {len(candles)} candles fetched "
-              f"(need {2 * win + 4} for the trigger verdict) — verdict may "
+              f"(need {2 * span + 4} for the trigger verdict) — verdict may "
               f"read 'insufficient_history'", flush=True)
 
     entry_i = max(i for i, c in enumerate(candles) if c.t <= entry_ms)
@@ -417,7 +418,7 @@ def render_one(rows: list[dict], cfg: dict, coin: str, at: datetime,
     # Trigger verdict at the entry bar — the real trigger, history through
     # entry, all closed bars (include_partial=False).
     hist = candles[: entry_i + 1]
-    state = band_snapback(hist, window=win, max_drift_pct=bp["max_drift_pct"],
+    state = band_snapback(hist, max_drift_pct=bp["max_drift_pct"],
                           min_poke_atr=bp["min_poke_atr"], ma_type=bp["ma_type"],
                           band_span=span, include_partial=False)
 

@@ -8,11 +8,13 @@ the indicator can be turned into a "money printer" without selection bias.
 Method
 ------
 Fetch N bars per coin (paged, cached to scratch/grid_cache/), then evaluate a
-grid of trigger parameters (band_span x min_poke_atr x window) over a SPLIT
-timeline:
+grid of trigger parameters (band_span x min_poke_atr) over a SPLIT timeline.
+band_span is the band's SINGLE window — edges, drift/direction, and ATR all
+run over it (the old separate `window`/drift-reference lookback was retired),
+so there is no independent window axis to sweep:
 
   [warmup] |---- IN-SAMPLE phase ----| gap |---- OUT-OF-SAMPLE phase ----|
-     W            --primary-window          40 bars        (same length)
+              --span x poke grid--            (same length)
 
 * Signals are classified by entry bar: IS entries exit ONLY within the IS
   phase, OOS entries only within the OOS phase (the DSL sim runs on the
@@ -37,7 +39,9 @@ Read the output
 Usage (project venv):
   .venv/bin/python scripts/band_snapback_grid.py --interval 1h
   .venv/bin/python scripts/band_snapback_grid.py --interval 4h \
-      --primary-window 16 --windows 8,16,48 --scale-timeouts 4.0
+      --spans 8,16,32 --scale-timeouts 4.0
+  (--primary-window / --windows are deprecated no-ops: band_span IS the
+   window, and phase A already sweeps every span in --spans.)
 """
 from __future__ import annotations
 
@@ -109,7 +113,7 @@ def _stats(pnl_list: list[float]) -> dict:
             "winrate": wins / n, "worst": min(pnl_list), "best": max(pnl_list)}
 
 
-def evaluate_cell(coin: str, candles: list[Candle], w: int, span: int,
+def evaluate_cell(coin: str, candles: list[Candle], span: int,
                   poke: float, hold: int, ma_type: str, drift: float,
                   is_start: int, is_end: int, oos_start: int, oos_end: int,
                   cfg: dict, time_scale: float, leverage: int,
@@ -130,13 +134,13 @@ def evaluate_cell(coin: str, candles: list[Candle], w: int, span: int,
     to plot_* is the full list, so no index shifting and band geometry
     stays intact.
     """
-    all_ev = replay(candles, w, drift, poke, hold, ma_type, span)
+    all_ev = replay(candles, drift, poke, hold, ma_type, span)
     ev_is = [e for e in all_ev if is_start <= e["entry_i"] < is_end
              and e["entry_i"] + hard_bars <= is_end]
     ev_oos = [e for e in all_ev if oos_start <= e["entry_i"] < oos_end
               and e["entry_i"] + hard_bars <= oos_end]
 
-    out = {"params": {"window": w, "span": span, "poke": poke},
+    out = {"params": {"span": span, "poke": poke},
            "censored": len(all_ev) - len(ev_is) - len(ev_oos)}
 
     def phase(tag: str, evs: list[dict], a: int, b: int):
@@ -170,11 +174,6 @@ def main():
     ap.add_argument("--coins", default="BTC,ETH,SOL")
     ap.add_argument("--interval", default="1h")
     ap.add_argument("--bars", type=int, default=1000)
-    ap.add_argument("--primary-window", dest="primary_window", type=int,
-                    default=48, help="phase A: window used for the coarse grid")
-    ap.add_argument("--windows", default=None,
-                    help="phase B: comma list of windows to sweep for the top "
-                         "IS configs (e.g. 24,48,96); omit to skip phase B")
     ap.add_argument("--spans", default=",".join(str(s) for s in SPANS))
     ap.add_argument("--pokes", default=",".join(str(p) for p in POKES))
     ap.add_argument("--drift", type=float, default=1.5)
@@ -183,21 +182,28 @@ def main():
                          "exit is what actually matters)")
     ap.add_argument("--ma-type", dest="ma_type", default="ema",
                     choices=["ema", "sma"])
-    ap.add_argument("--top", type=int, default=6,
-                    help="phase B: how many top-IS configs to sweep across windows")
     ap.add_argument("--scale-timeouts", dest="scale_timeouts", type=float,
                     default=1.0)
     ap.add_argument("--refresh", action="store_true",
                     help="ignore the candle cache and refetch")
     ap.add_argument("--plot-top", type=int, default=3,
                     help="phase: 'oos' charts for the top-N OOS configs (0 = off)")
+    # Deprecated no-ops (the separate drift-reference window was retired —
+    # band_span is the band's single window). Kept so old command lines
+    # from notes/skills don't crash.
+    ap.add_argument("--primary-window", dest="primary_window", type=int,
+                    default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--windows", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--top", type=int, default=6, help=argparse.SUPPRESS)
     args = ap.parse_args()
 
     coins = [c.strip() for c in args.coins.split(",") if c.strip()]
     spans = sorted({s for s in (int(x) for x in args.spans.split(","))})
     pokes = sorted({float(x) for x in args.pokes.split(",")})
-    windows_b = ([int(x) for x in args.windows.split(",")] if args.windows else None)
-    primary = args.primary_window
+    if args.primary_window is not None or args.windows:
+        print("NOTE: --primary-window/--windows are deprecated no-ops — "
+              "band_span is the band's single window and the grid sweeps "
+              "every span in --spans.", flush=True)
 
     os.makedirs(OUT_DIR, exist_ok=True)
     cfg = _load_agent_config()
@@ -240,7 +246,7 @@ def main():
     # Split geometry — sized off the SHORTEST coin so the phases are identical
     # across the pool (per-signal pooling only works on equal timelines).
     min_len = min(len(cds) for cds in data.values())
-    max_lookback = 2 * max(max(windows_b or [primary]), max(spans))
+    max_lookback = 2 * max(spans)
     is_start = max(100, max_lookback)
     phase_len = (min_len - is_start - 40 - 20) // 2   # 20 bars of OOS tail slack
     if phase_len < 50:
@@ -260,15 +266,14 @@ def main():
           f"OOS bars {oos_start}-{oos_end-1} ({phase_len} bars), "
           f"hard-timeout censor={hard_bars} bars before each phase end", flush=True)
 
-    # ── Phase A: coarse grid at the primary window ──────────────────────
-    cells = [(w, s, p) for s in spans for p in pokes
-             for w in [primary] if s <= w]
-    results = {}   # (w,s,p) -> {coin: evaluate_cell(...)}
-    for (w, s, p) in cells:
-        tag = f"w{w}_s{s}_p{p:.2f}"
-        print(f"\n== cell {tag} ({w}x span{s} poke{p:.2f}) ==", flush=True)
-        results[(w, s, p)] = {
-            coin: evaluate_cell(coin, data[coin], w, s, p, args.hold,
+    # ── Phase A: full grid (span x poke — band_span IS the window) ─────────
+    cells = [(s, p) for s in spans for p in pokes]
+    results = {}   # (s,p) -> {coin: evaluate_cell(...)}
+    for (s, p) in cells:
+        tag = f"s{s}_p{p:.2f}"
+        print(f"\n== cell {tag} (span{s} poke{p:.2f}) ==", flush=True)
+        results[(s, p)] = {
+            coin: evaluate_cell(coin, data[coin], s, p, args.hold,
                                 args.ma_type, args.drift,
                                 is_start, is_end, oos_start, oos_end,
                                 cfg, args.scale_timeouts, leverage,
@@ -299,23 +304,23 @@ def main():
         }
         attach_per100(cell_stats[key])
 
-    # plateau: among the 4 nearest grid neighbours (in span/poke space at the
-    # primary window), how many also have positive IS per-signal mean?
+    # plateau: among the 4 nearest grid neighbours (in span/poke space), how
+    # many also have positive IS per-signal mean?
     def plateau(key):
-        w, s, p = key
+        s, p = key
         idx_s = spans.index(s) if s in spans else None
         idx_p = pokes.index(p) if p in pokes else None
         if idx_s is None or idx_p is None:
             return float("nan")
         nb = []
         if idx_s > 0:
-            nb.append((w, spans[idx_s - 1], p))
+            nb.append((spans[idx_s - 1], p))
         if idx_s < len(spans) - 1:
-            nb.append((w, spans[idx_s + 1], p))
+            nb.append((spans[idx_s + 1], p))
         if idx_p > 0:
-            nb.append((w, s, pokes[idx_p - 1]))
+            nb.append((s, pokes[idx_p - 1]))
         if idx_p < len(pokes) - 1:
-            nb.append((w, s, pokes[idx_p + 1]))
+            nb.append((s, pokes[idx_p + 1]))
         pos = sum(1 for k in nb if k in cell_stats
                   and cell_stats[k]["is"]["n"] >= 5
                   and cell_stats[k]["is"]["mean"] > 0)
@@ -334,20 +339,20 @@ def main():
                 f"worst={s['worst']:+7.2f}%")
 
     print("\n" + "=" * 118)
-    print(f"PHASE A — coarse grid @ window={primary}, IS vs OOS "
+    print(f"PHASE A — grid over spans {spans} x pokes {pokes}, IS vs OOS "
           f"(per-signal averages, DSL exit, fees incl; per100 = net P/L per 100 bars)")
     print("=" * 118)
     print(f"{'cell':<14} | {'IN-SAMPLE':<44} | {'OOS':<44} | nb+ | per100 IS / OOS")
     for k in ranked:
-        w, s, p = k
+        s, p = k
         cs = cell_stats[k]
-        tag = f"w{w}_s{s}_p{p:.2f}"
+        tag = f"s{s}_p{p:.2f}"
         print(f"{tag:<14} | {fmt(cs['is'])} | {fmt(cs['oos'])} | {plateau(k)}"
               f" | {cs['is_per100']:+7.3f} / {cs['oos_per100']:+7.3f}")
     for k in ranked[:6]:
-        w, s, p = k
+        s, p = k
         cs = cell_stats[k]
-        print(f"  w{w}_s{s}_p{p:.2f}: IS {cs['is_hold']['mean']:+.3f}% "
+        print(f"  s{s}_p{p:.2f}: IS {cs['is_hold']['mean']:+.3f}% "
               f"OOS {cs['oos_hold']['mean']:+.3f}% (hold-{args.hold} gross, "
               f"n={cs['is_hold']['n']}/{cs['oos_hold']['n']})")
 
@@ -355,84 +360,26 @@ def main():
     csv_a = os.path.join(OUT_DIR, f"grid_{args.interval}_{stamp}_A.csv")
     with open(csv_a, "w", newline="") as f:
         wr = csv.writer(f)
-        wr.writerow(["cell", "window", "span", "poke", "phase", "coin", "n",
+        wr.writerow(["cell", "span", "poke", "phase", "coin", "n",
                      "wins", "net_pct", "mean_pct", "winrate", "worst", "best",
                      "reasons"])
         for k in ranked:
-            w, s, p = k
+            s, p = k
             for coin in coins:
                 for ph in ("is", "oos"):
-                    r = results[(w, s, p)][coin][ph]
+                    r = results[(s, p)][coin][ph]
                     d = r.get("dsl") or {"n": 0}
                     if d.get("n", 0):
-                        wr.writerow([f"w{w}_s{s}_p{p:.2f}", w, s, f"{p:.2f}",
+                        wr.writerow([f"s{s}_p{p:.2f}", s, f"{p:.2f}",
                                      ph, coin, d["n"], d["wins"],
                                      f"{d['net']:.3f}", f"{d['mean']:.3f}",
                                      f"{d['winrate']:.3f}", f"{d['worst']:.3f}",
                                      f"{d['best']:.3f}",
                                      json.dumps(r.get("reasons", {}))])
                     else:
-                        wr.writerow([f"w{w}_s{s}_p{p:.2f}", w, s, f"{p:.2f}",
+                        wr.writerow([f"s{s}_p{p:.2f}", s, f"{p:.2f}",
                                      ph, coin, 0, 0, "", "", "", "", "", ""])
     print(f"\nCSV: {csv_a}")
-
-    # ── Phase B: window sweep for the top-IS cells ──────────────────────
-    if windows_b:
-        top = [k for k in ranked if cell_stats[k]["is"]["n"] >= 5][:args.top]
-        print(f"\n" + "=" * 100)
-        print(f"PHASE B — window sweep for the top-{args.top} IS cells "
-              f"across windows {windows_b}")
-        print("=" * 100)
-        rows = []
-        for k in top:
-            _, s, p = k
-            for w in windows_b:
-                if s > w:
-                    continue
-                key = (w, s, p)
-                if key not in results:
-                    results[key] = {
-                        coin: evaluate_cell(coin, data[coin], w, s, p,
-                                            args.hold, args.ma_type,
-                                            args.drift, is_start, is_end,
-                                            oos_start, oos_end, cfg,
-                                            args.scale_timeouts, leverage,
-                                            sl_mult, tp_frac, hard_bars)
-                        for coin in coins
-                    }
-                    is_pnl, oos_pnl, is_hold, oos_hold = [], [], [], []
-                    for coin in coins:
-                        r = results[key][coin]
-                        is_pnl += [e["pnl_pct"] for e in r["is"].get("events", [])]
-                        oos_pnl += [e["pnl_pct"] for e in r["oos"].get("events", [])]
-                        is_hold += [e["hold_pnl_pct"] for e in r["is"].get("events", [])]
-                        oos_hold += [e["hold_pnl_pct"] for e in r["oos"].get("events", [])]
-                    cell_stats[key] = {"is": _stats(is_pnl), "oos": _stats(oos_pnl),
-                                       "is_hold": _stats(is_hold),
-                                       "oos_hold": _stats(oos_hold)}
-                    attach_per100(cell_stats[key])
-                cs = cell_stats[key]
-                tag = f"w{w}_s{s}_p{p:.2f}"
-                print(f"{tag:<14} | IS  {fmt(cs['is'])[2:]} | OOS {fmt(cs['oos'])[2:]}")
-                rows.append((k, w))
-        csv_b = os.path.join(OUT_DIR, f"grid_{args.interval}_{stamp}_B.csv")
-        with open(csv_b, "w", newline="") as f:
-            wr = csv.writer(f)
-            wr.writerow(["cell", "window", "span", "poke", "phase", "coin", "n",
-                         "wins", "net_pct", "mean_pct", "winrate", "reasons"])
-            for (base_k, w) in rows:
-                _, s, p = base_k
-                for coin in coins:
-                    for ph in ("is", "oos"):
-                        r = results[(w, s, p)][coin][ph]
-                        d = r.get("dsl") or {"n": 0}
-                        if d.get("n", 0):
-                            wr.writerow([f"w{w}_s{s}_p{p:.2f}", w, s, f"{p:.2f}",
-                                         ph, coin, d["n"], d["wins"],
-                                         f"{d['net']:.3f}", f"{d['mean']:.3f}",
-                                         f"{d['winrate']:.3f}",
-                                         json.dumps(r.get("reasons", {}))])
-        print(f"CSV: {csv_b}")
 
     # ── Charts for the best OOS configs ─────────────────────────────────
     if args.plot_top > 0:
@@ -440,8 +387,8 @@ def main():
         oos_ranked = [k for k in cell_stats if cell_stats[k]["oos"]["n"] >= 5]
         oos_ranked.sort(key=lambda k: cell_stats[k]["oos"]["mean"], reverse=True)
         for k in oos_ranked[:args.plot_top]:
-            w, s, p = k
-            tag = f"w{w}_s{s}_p{p:.2f}"
+            s, p = k
+            tag = f"s{s}_p{p:.2f}"
             for coin in coins:
                 r = results[k][coin]
                 for ph in ("is", "oos"):

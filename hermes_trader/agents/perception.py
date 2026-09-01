@@ -134,9 +134,9 @@ def _scan_single_market(
 
         # 1h candles for slow-burn / accumulation triggers. Cached far longer
         # than 5m (1h bars don't change intra-hour). 100 bars: the band
-        # snapback (when on the 1h interval) needs 2*window (98) for its band
-        # edges + drift reference. Failure here doesn't block the scan —
-        # slow-burn triggers just won't fire.
+        # snapback (when on the 1h interval) needs 2*band_span+2 (34 for the
+        # default span-16) for its band edges + drift reference. Failure here
+        # doesn't block the scan — slow-burn triggers just won't fire.
         candles_1h = _fetch_candles_sync(
             market["coin"], "1h", 100,
             config["scan"].get("cacheTtlMs1h", 600_000),
@@ -199,17 +199,19 @@ def _scan_single_market(
 
         # Band snapback — OFF by default. MA-band poke-out + snapback in CHOP:
         # the band edges are the rolling `ma_type` average of the HIGHs (upper)
-        # and LOWs (lower) over `window` bars — a CURVED band that hugs price.
-        # A wick that pierces a band edge by >= min_poke_atr * ATR and price
-        # back inside proposes a mean-reversion (lower poke -> LONG, upper poke
-        # -> SHORT). The drift gate keeps it silent when the band is trending.
-        # Runs on its OWN interval (15m/1h are the primary timeframes; 5m works
-        # too) so the timeframe is configurable, independent of the 5m scan.
+        # and LOWs (lower) over `band_span` bars — a CURVED band that hugs
+        # price. A wick that pierces a band edge by >= min_poke_atr * ATR and
+        # price back inside proposes a mean-reversion (lower poke -> LONG,
+        # upper poke -> SHORT). The drift/direction verdict ("trending") is
+        # measured over the SAME band_span window — no separate longer
+        # lookback. Runs on its OWN interval (15m/1h are the primary
+        # timeframes; 5m works too) so the timeframe is configurable,
+        # independent of the 5m scan.
         # Surfacing bypass (weight 0) — the AI + risk gates adjudicate.
         _bs = config.get("band_snapback", {}) or {}
         if _bs.get("enabled"):
             # Per-coin overrides (asset-class separation): `overrides` is a
-            # map of coin -> {interval, window, band_span, min_poke_atr, ...}.
+            # map of coin -> {interval, band_span, min_poke_atr, ...}.
             # The grid found 1h suits majors and 15m suits the choppy meme
             # coins, so each coin can run its own interval/params here. An
             # omitted key falls back to the base block.
@@ -219,27 +221,26 @@ def _scan_single_market(
                 # (A per-coin override with enabled=false falls through here
                 # and skips the fetch — that's the opt-out path.)
                 _bs_interval = str(_bs.get("interval", "15m"))
-                _bs_window = int(_bs.get("window", 48))
+                _bs_span = max(2, int(_bs.get("band_span", 16)))
                 # Fetch the band interval's candles (TTL-cached, so a stable
                 # interval costs one fetch per coin per scan window). We need
-                # 2*window bars: window for the band edges + window for the
-                # drift reference. Reuse the 1h fetch when the interval is 1h.
+                # 2*band_span bars: the drift reference sits one full span
+                # back in the fit, so the MA must be warm there. Reuse the 1h
+                # fetch when the interval is 1h (100 bars fetched above covers
+                # span up to 49).
                 _band_candles = candles_1h if _bs_interval == "1h" else None
                 if _band_candles is None:
                     _band_candles = _fetch_candles_sync(
-                        market["coin"], _bs_interval, _bs_window * 2 + 4,
+                        market["coin"], _bs_interval, 2 * _bs_span + 4,
                         config["scan"].get("cacheTtlMs1h", 600_000),
                     )
-                if _band_candles and len(_band_candles) >= _bs_window * 2 + 2:
+                if _band_candles and len(_band_candles) >= 2 * _bs_span + 2:
                     hits.append(trigger_mod.band_snapback(
                         _band_candles,
-                        window=_bs_window,
+                        band_span=_bs_span,
                         max_drift_pct=float(_bs.get("max_drift_pct", 1.5)),
                         min_poke_atr=float(_bs.get("min_poke_atr", 0.5)),
                         ma_type=str(_bs.get("ma_type", "ema")),
-                        # LAG dial: band-span < window = tighter, faster-hugging
-                        # band. None (unset) falls back to window — old behavior.
-                        band_span=_bs.get("band_span"),
                         # Overshoot guard for the de-lagged band edge: clamp the
                         # 1-bar projection to this many ATR (0.25 = measured p99
                         # overshoot on 15m/1h). None/0 disables the cap.
