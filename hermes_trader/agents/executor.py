@@ -1654,6 +1654,24 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
                 "chronos_aligned_if_short": None,
                 "chronos_error": str(e),
             }
+        # TimesFM-3 shadow read, same PASS shape (direction-agnostic: one
+        # median + both-side alignment flags — two calls would return
+        # identical medians). Separate try/except so a timesfm outage can
+        # never blank the chronos fields above. Disabled => error field only.
+        try:
+            from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync
+            tsig = get_timesfm_signal_sync(coin or "unknown", "long")
+            tm = tsig.median_pct if tsig.median_pct is not None else None
+            _res["timesfm_median_pct"] = round(tm * 10) / 10 if tm is not None else None
+            _res["timesfm_aligned_if_long"] = bool(tm is not None and tm > 0)
+            _res["timesfm_aligned_if_short"] = bool(tm is not None and tm < 0)
+            if tsig.error:
+                _res["timesfm_error"] = tsig.error
+        except Exception as e:
+            _res["timesfm_median_pct"] = None
+            _res["timesfm_aligned_if_long"] = None
+            _res["timesfm_aligned_if_short"] = None
+            _res["timesfm_error"] = str(e)
         return _res
     # Should be unreachable (parse_verdict normalizes to one of the above),
     # but never silently drop — surface it so a new verdict can't go unhandled.

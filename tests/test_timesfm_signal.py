@@ -289,3 +289,62 @@ def test_attach_disabled_fills_error_fields():
     assert result["timesfm_median_pct"] is None
     assert result["timesfm_aligned"] is None
     assert result["timesfm_error"] == "disabled"
+
+
+def test_route_verdict_pass_carries_timesfm_fields():
+    """PASS verdicts log via route_verdict's own forecast block (not the
+    executor attach path), so timesfm fields must be added there too — and a
+    disabled/failed timesfm read must never blank the chronos fields."""
+    from hermes_trader.agents import executor as ex
+    import hermes_trader.agents.chronos_signal as cs
+    real_cs = cs.get_chronos_signal_sync
+
+    def _boom(coin, side):
+        raise RuntimeError("chronos down")
+
+    cs.get_chronos_signal_sync = _boom  # chronos into its except arm; hermetic
+    try:
+        routed = ex.route_verdict({"verdict": "PASS", "coin": "X", "confidence": 0.0})
+    finally:
+        cs.get_chronos_signal_sync = real_cs
+    assert routed["action"] == "none"
+    assert "timesfm_median_pct" in routed
+    assert "timesfm_aligned_if_long" in routed
+    assert "timesfm_aligned_if_short" in routed
+    # disabled default -> error field, no median
+    assert routed["timesfm_median_pct"] is None
+    assert routed["timesfm_error"] == "disabled"
+    # chronos keys exist regardless (error shape) — timesfm never blanks them
+    assert "chronos_median_pct" in routed
+
+
+def test_route_verdict_pass_renders_enabled_timesfm():
+    """Enabled + warm signal -> median and alignment flags render on PASS."""
+    import hermes_trader.agents.chronos_signal as cs
+    from hermes_trader.agents import executor as ex
+    real_cs = cs.get_chronos_signal_sync
+
+    def _fake_chronos(coin, side):
+        return cs.ChronosSignal(
+            coin=coin, side=side, context_last=100.0,
+            median=101.0, q_low=100.0, q_high=102.0,
+            median_pct=0.5, spread_pct=2.0,
+            horizon=12, model_id="amazon/chronos-2", inference_ms=1.0)
+
+    cs.get_chronos_signal_sync = _fake_chronos
+    real = _with_cfg({"enabled": True, "cache_ttl_seconds": 300})
+    real_compute = ts._compute_signal
+    try:
+        ts._cache_get = lambda coin, ttl: None
+        ts._compute_signal = lambda coin, side, cfg: _mk_signal(median_pct=1.0)
+        routed = ex.route_verdict({"verdict": "PASS", "coin": "ROUTE-TFM",
+                                   "confidence": 0.0})
+    finally:
+        ts._get_timesfm_config = real
+        ts._compute_signal = real_compute
+        cs.get_chronos_signal_sync = real_cs
+        ts._cache.pop("ROUTE-TFM", None)
+    assert routed["timesfm_median_pct"] == 1.0
+    assert routed["timesfm_aligned_if_long"] is True
+    assert routed["timesfm_aligned_if_short"] is False
+    assert routed["chronos_median_pct"] == 0.5  # chronos block intact
