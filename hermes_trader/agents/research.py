@@ -726,7 +726,9 @@ def _duelist_verdict(
         # primary that said PASS. A failed duelist is "no observation", not an
         # opinion — record nothing.
         if not (dl_text or "").strip():
-            logger.warning(f"[duel] {coin}: duelist returned no text — not recorded")
+            logger.warning(
+                f"[duel] {coin}: duelist {cfg['model']} returned no text — not recorded"
+            )
             return None
         dl_parsed = parse_verdict(dl_text, coin, perception)
         row = {
@@ -749,9 +751,9 @@ def _duelist_verdict(
         }
         record_duel(row)
         logger.info(
-            f"[duel] {coin}: primary {primary_verdict} "
+            f"[duel] {coin}: primary {row['primary_model']} {primary_verdict} "
             f"(conf {primary_confidence:.2f}, {row['primary_ms']}ms) "
-            f"vs duelist {row['duelist_verdict']} "
+            f"vs duelist {row['duelist_model']} {row['duelist_verdict']} "
             f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms) — "
             f"{'AGREE' if row['duelist_verdict'] == primary_verdict else 'SPLIT'}"
         )

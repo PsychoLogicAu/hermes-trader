@@ -719,7 +719,10 @@ def _process_coin_run(perception, ctx):
 
     try:
         analysis = research(coin, perception)
-        logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
+        # Model name on every verdict line (mirrors research.py's resolution) —
+        # the historical gap that made model-switch forensics a triangulation job.
+        _pm = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']} (model: {_pm})")
         # Store the full LLM reasoning verbatim — no character cap.
         # The feed shows the complete rationale.
         _r = (analysis.get('reasoning') or '').strip()
