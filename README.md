@@ -304,7 +304,9 @@ A minimal starting shape:
   "tp_scale_fraction": 0.5,
   "max_concurrent": 5,
   "max_total_notional_pct": 2.0,
-  "max_daily_loss_usd": -20,
+  "daily_kill_pct_of_equity": 0.2,
+  "daily_kill_cap_usd": 100,
+  "daily_kill_flatten_mult": 1.25,
   "daily_giveback_halt_pct": 0.5,
   "daily_giveback_min_peak_usd": 25.0,
   "min_ai_confidence": 0.7,
@@ -331,7 +333,7 @@ Key parameters:
 | `max_trade_notional_usd` | Hard ceiling per trade notional |
 | `max_concurrent` | Max open positions |
 | `max_total_notional_pct` | Max portfolio notional as multiple of equity |
-| `max_daily_loss_usd` | Hard daily loss floor (triggers flatten-all killswitch) |
+| `daily_kill_pct_of_equity` | Equity-relative daily-loss kill T: entries blocked + halt armed at −T, flatten-all at −1.25·T (`daily_kill_flatten_mult`); `daily_kill_cap_usd` is the absolute USD ceiling |
 | `daily_giveback_*` | Once day peaks ≥ `min_peak`, halts NEW entries if retraced > `halt_pct` |
 | `min_ai_confidence` | Minimum LLM confidence to execute |
 | `leverage` | Leverage ceiling per trade |

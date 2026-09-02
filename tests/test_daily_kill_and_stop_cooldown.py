@@ -4,7 +4,8 @@ import time
 import pytest
 
 from hermes_trader.agents.risk_gates import (
-    GateContext, daily_loss_kill_switch, effective_daily_kill_usd)
+    GateContext, daily_loss_kill_switch, effective_daily_kill_usd,
+    flatten_daily_kill_usd)
 
 
 def _ctx(daily_pnl=0.0, equity=100.0):
@@ -38,19 +39,47 @@ def test_floor_binds_on_small_equity():
     assert effective_daily_kill_usd(cfg, 30.0) == 8.0
 
 
-def test_legacy_flat_when_pct_off():
-    assert effective_daily_kill_usd({"max_daily_loss_usd": -20.0}, 500.0) == 20.0
-    assert effective_daily_kill_usd({}, 500.0) == 100.0  # default -100
-    assert effective_daily_kill_usd({"max_daily_loss_usd": 0}, 500.0) == 0.0
+def test_disabled_when_pct_unset_or_zero():
+    assert effective_daily_kill_usd({"daily_kill_pct_of_equity": 0}, 500.0) == 0.0
+    assert effective_daily_kill_usd({}, 500.0) == 0.0  # pct unset → disabled
+    # gate passes outright when the kill is disabled, even deep in the red
+    r = daily_loss_kill_switch(_ctx(daily_pnl=-25.0), 0.0)
+    assert r["pass"] is True
+
+
+# ── flatten_daily_kill_usd (hard flatten = mult × halt threshold) ──────────
+
+def test_flatten_is_125x_the_halt_threshold_by_default():
+    base = {"daily_kill_pct_of_equity": 0.20}
+    assert effective_daily_kill_usd(base, 100.0) == 20.0
+    assert flatten_daily_kill_usd(base, 100.0) == 25.0  # 1.25 × 20
+
+
+def test_flatten_mult_overridable():
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_flatten_mult": 1.5}
+    assert flatten_daily_kill_usd(cfg, 100.0) == 30.0
+
+
+def test_flatten_mult_one_restores_flat_behaviour():
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_flatten_mult": 1.0}
+    assert flatten_daily_kill_usd(cfg, 100.0) == effective_daily_kill_usd(cfg, 100.0)
+
+
+def test_flatten_disabled_with_kill_switch():
+    assert flatten_daily_kill_usd({}, 500.0) == 0.0
+    assert flatten_daily_kill_usd({"daily_kill_pct_of_equity": 0}, 500.0) == 0.0
+
+
+def test_flatten_respects_cap_and_floor():
+    # base clamps to the $100 cap on a big account; flatten = 1.25 × capped
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 100}
+    assert flatten_daily_kill_usd(cfg, 10_000.0) == 125.0
+    # floor binds on a tiny account; flatten = 1.25 × floored
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_min_usd": 8}
+    assert flatten_daily_kill_usd(cfg, 10.0) == 10.0  # 8 × 1.25
 
 
 # ── daily_loss_kill_switch ──────────────────────────────────────────────────
-
-def test_legacy_negative_shape_blocks():
-    r = daily_loss_kill_switch(_ctx(daily_pnl=-25.0), -20.0)
-    assert r["pass"] is False
-    assert daily_loss_kill_switch(_ctx(daily_pnl=-19.0), -20.0)["pass"] is True
-
 
 def test_equity_relative_positive_shape_blocks():
     # threshold +9 means block when day PnL <= -9

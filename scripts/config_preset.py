@@ -33,7 +33,8 @@ PRESETS: dict[str, dict] = {
         "max_concurrent": 18,
         "max_trade_notional_usd": 100000,
         "max_total_notional_pct": 40.0,
-        "max_daily_loss_usd": -30,
+        "daily_kill_pct_of_equity": 0.12,  # ~12% of equity/day
+        "daily_kill_cap_usd": 30,          # never more than $30 in a day
         "min_available_margin_pct": 0.10,
         "cooldown_min": 60,
         "min_ai_confidence": 0.30,
@@ -60,7 +61,8 @@ PRESETS: dict[str, dict] = {
         "max_concurrent": 8,
         "max_trade_notional_usd": 5000,
         "max_total_notional_pct": 5.0,
-        "max_daily_loss_usd": -25,
+        "daily_kill_pct_of_equity": 0.10,  # ~10% of equity/day
+        "daily_kill_cap_usd": 25,          # never more than $25 in a day
         "min_available_margin_pct": 0.20,
         "cooldown_min": 120,
         "min_ai_confidence": 0.50,
@@ -88,7 +90,8 @@ PRESETS: dict[str, dict] = {
         "max_concurrent": 12,
         "max_trade_notional_usd": 50000,
         "max_total_notional_pct": 15.0,
-        "max_daily_loss_usd": -150,
+        "daily_kill_pct_of_equity": 0.15,  # ~15% of equity/day
+        "daily_kill_cap_usd": 150,         # never more than $150 in a day
         "min_available_margin_pct": 0.15,
         "cooldown_min": 60,
         "min_ai_confidence": 0.40,
@@ -117,7 +120,8 @@ PRESETS: dict[str, dict] = {
         "max_concurrent": 15,
         "max_trade_notional_usd": 25000,
         "max_total_notional_pct": 8.0,
-        "max_daily_loss_usd": -500,
+        "daily_kill_pct_of_equity": 0.25,  # ~25% of equity/day (loose, large acct)
+        "daily_kill_cap_usd": 500,         # never more than $500 in a day
         "min_available_margin_pct": 0.20,
         "cooldown_min": 90,
         "min_ai_confidence": 0.45,
