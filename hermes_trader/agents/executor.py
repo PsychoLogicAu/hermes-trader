@@ -296,6 +296,37 @@ def _attach_squeeze_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["squeeze_extreme_no_breakout"] = None
 
 
+def _attach_timesfm_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact TimesFM-3 shadow fields to a trade result dict.
+
+    SHADOW ONLY (Google TimesFM-3, Aug 2026): logged next to the Chronos
+    fields so the two forecasters are directly comparable on the identical
+    5m context (same candle cache, same horizon default). Never gates, never
+    sizes. Config-gated off by default — and note the weights are under the
+    non-commercial license, so enabling against the live book is a conscious
+    operator decision. Wrapped in try/except so it never breaks the trade
+    path. Output shape:
+      timesfm_median_pct: float | null
+      timesfm_aligned: bool | null (True if median move agrees with side)
+      timesfm_error: str | null
+    """
+    try:
+        from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync
+        sig = get_timesfm_signal_sync(coin, side)
+        result["timesfm_median_pct"] = round(sig.median_pct * 10) / 10 if sig.median_pct is not None else None
+        if sig.median_pct is not None:
+            result["timesfm_aligned"] = (
+                (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+            )
+        else:
+            result["timesfm_aligned"] = None
+        result["timesfm_error"] = sig.error
+    except Exception as e:
+        result["timesfm_median_pct"] = None
+        result["timesfm_aligned"] = None
+        result["timesfm_error"] = str(e)
+
+
 def build_open_config_snapshot(regime: str, exit_policy_label: str,
                                sl_atr_mult: float, tp_atr_mult: float) -> Dict[str, Any]:
     """Build the OPEN-row config snapshot for the append-only ledger.
@@ -576,6 +607,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             }
             _attach_chronos_to_result(result, coin, side)
             _attach_squeeze_to_result(result, coin, side)
+            _attach_timesfm_to_result(result, coin, side)
             return result
 
     # Idempotency: don't double-execute
@@ -1157,6 +1189,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(result, coin, side)
         _attach_squeeze_to_result(result, coin, side)
+        _attach_timesfm_to_result(result, coin, side)
         return result
 
     if shadow_mode:
@@ -1170,6 +1203,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(_res, coin, _side)
         _attach_squeeze_to_result(_res, coin, _side)
+        _attach_timesfm_to_result(_res, coin, _side)
         return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
@@ -1426,6 +1460,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     }
     _attach_chronos_to_result(result, coin, trade_side)
     _attach_squeeze_to_result(result, coin, trade_side)
+    _attach_timesfm_to_result(result, coin, trade_side)
     return result
 
 
@@ -1619,6 +1654,24 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
                 "chronos_aligned_if_short": None,
                 "chronos_error": str(e),
             }
+        # TimesFM-3 shadow read, same PASS shape (direction-agnostic: one
+        # median + both-side alignment flags — two calls would return
+        # identical medians). Separate try/except so a timesfm outage can
+        # never blank the chronos fields above. Disabled => error field only.
+        try:
+            from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync
+            tsig = get_timesfm_signal_sync(coin or "unknown", "long")
+            tm = tsig.median_pct if tsig.median_pct is not None else None
+            _res["timesfm_median_pct"] = round(tm * 10) / 10 if tm is not None else None
+            _res["timesfm_aligned_if_long"] = bool(tm is not None and tm > 0)
+            _res["timesfm_aligned_if_short"] = bool(tm is not None and tm < 0)
+            if tsig.error:
+                _res["timesfm_error"] = tsig.error
+        except Exception as e:
+            _res["timesfm_median_pct"] = None
+            _res["timesfm_aligned_if_long"] = None
+            _res["timesfm_aligned_if_short"] = None
+            _res["timesfm_error"] = str(e)
         return _res
     # Should be unreachable (parse_verdict normalizes to one of the above),
     # but never silently drop — surface it so a new verdict can't go unhandled.

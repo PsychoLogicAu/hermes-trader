@@ -1,6 +1,12 @@
 # Time-series forecasting (Chronos-2 shadow signal)
 chronos-forecasting>=2.0,<3
 
+# Time-series forecasting (TimesFM-3 shadow signal, side-by-side with Chronos).
+# 3.0.0 is the first release exposing the timesfm3 PyTorch API; pin major so a
+# future 4.x can't silently change ForecastOutput shapes. Weights under the
+# non-commercial license — module ships disabled by default.
+timesfm[torch]==3.0.0
+
 # Dashboard + operator console (python -m hermes_trader.server)
 fastapi>=0.141
 uvicorn>=0.52

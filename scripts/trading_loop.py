@@ -192,6 +192,17 @@ try:
         preload_model(float(os.environ.get('HERMES_CHRONOS_PRELOAD_TIMEOUT_S', '60')))
 except Exception as e:
     logger.warning(f"[startup] chronos preload skipped (lazy fallback): {e}")
+# TimesFM-3 shadow model (side-by-side with Chronos, logged only). Same
+# bounded preload; longer default timeout because the 330M fp32 checkpoint
+# (~1.3GB) takes noticeably longer to init than chronos on CPU, and the
+# first-ever load also downloads into the hf-cache volume. Skipped unless
+# timesfm_signal is enabled (it ships disabled).
+try:
+    if startup_agent_config.get("timesfm_signal", {}).get("enabled", False):
+        from hermes_trader.agents.timesfm_signal import preload_model as _tfm_preload
+        _tfm_preload(float(os.environ.get('HERMES_TIMESFM_PRELOAD_TIMEOUT_S', '180')))
+except Exception as e:
+    logger.warning(f"[startup] timesfm preload skipped (lazy fallback): {e}")
 # The universe carries prevDayPx / dayNtlVlm / funding which DRIFT over the
 # day; fetched once here they'd freeze at loop-start for the whole process,
 # so mover-selection + volume-ranking would rank stale 24h windows (a coin
@@ -708,7 +719,10 @@ def _process_coin_run(perception, ctx):
 
     try:
         analysis = research(coin, perception)
-        logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']}")
+        # Model name on every verdict line (mirrors research.py's resolution) —
+        # the historical gap that made model-switch forensics a triangulation job.
+        _pm = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']} (model: {_pm})")
         # Store the full LLM reasoning verbatim — no character cap.
         # The feed shows the complete rationale.
         _r = (analysis.get('reasoning') or '').strip()
