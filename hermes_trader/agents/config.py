@@ -68,7 +68,19 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         "max_crypto_long_correlated": 2,
         # Risk caps — notional, daily, equity exposure
         "max_trade_notional_usd": 300,      # per-trade hard cap
-        "max_daily_loss_usd": -100,         # PnL <= this kills the engine
+        "max_daily_loss_usd": -100,         # legacy flat kill (used when daily_kill_pct_of_equity is 0)
+        # Equity-relative daily kill: thr = clamp(pct*equity, min, cap), block
+        # NEW ENTRIES (not flatten) while day PnL <= -thr or a halt timer runs.
+        "daily_kill_pct_of_equity": 0.10,   # 10% of account equity per day
+        "daily_kill_cap_usd": 100,          # absolute ceiling whatever the equity says
+        "daily_kill_min_usd": 8,            # small-account floor (noise guard)
+        "daily_loss_halt": {                # halt timer (breakable, not UTC-locked)
+            "halt_min": 360,                # default halt length after a breach
+            "release_band_pct": 0.5,        # clear early once day PnL > -(thr*this)
+        },
+        # Longer per-coin re-entry lock after a max_loss (stop) close; plain
+        # loss cooldown stays at `loss_cooldown_min`. 0 = same as plain.
+        "stop_loss_cooldown_min": 360,
         "max_total_notional_pct": 1.0,      # total notional as % of equity
         # Regime discipline — counter-trend bar (0.70-0.80 calibrated from 2026-06-06 bleed)
         "counter_regime_min_conf": 0.7,

@@ -751,6 +751,34 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     memory.track_daily_pnl(agg_equity)
     daily_pnl = memory.get_daily_pnl()
 
+    # Daily-halt timer policy (pairs with daily_loss_kill_switch): arm when
+    # the day breaches the equity-relative kill threshold; clear early when
+    # the day has recovered above the release band (a real regime change
+    # back), so entries resume before the timer would expire. Early-release
+    # only counts on the day the halt was ARMED — after a UTC roll the fresh
+    # day's ~0 PnL proves nothing, and the halt runs to its own expiry.
+    from hermes_trader.agents.risk_gates import effective_daily_kill_usd
+    from datetime import datetime as _dt_halt, timezone as _tz_halt
+    _kill_thr = effective_daily_kill_usd(config, agg_equity)
+    if _kill_thr > 0:
+        _halt_cfg = config.get("daily_loss_halt") or {}
+        _halt_min = float(_halt_cfg.get("halt_min", 360) or 360)
+        _rel_band = float(_halt_cfg.get("release_band_pct", 0.5) or 0.5)
+        _today_utc = _dt_halt.now(_tz_halt.utc).strftime("%Y-%m-%d")
+        if daily_pnl <= -_kill_thr:
+            if memory.daily_halt_remaining_min() <= 0:
+                memory.arm_daily_halt(_halt_min, utc_day=_today_utc)
+                logger.warning(
+                    f"[executor] DAILY LOSS HALT armed: day PnL ${daily_pnl:.2f} "
+                    f"<= -${_kill_thr:.2f} (equity ${agg_equity:.2f}) — no new "
+                    f"entries for {_halt_min:.0f}min unless day recovers")
+        elif (memory.daily_halt_remaining_min() > 0
+                and memory.daily_halt_armed_day() == _today_utc
+                and daily_pnl > -_kill_thr * _rel_band):
+            memory.clear_daily_halt()
+            logger.info(f"[executor] daily loss halt CLEARED early: day PnL recovered "
+                        f"to ${daily_pnl:.2f} (release band -${_kill_thr * _rel_band:.2f})")
+
     positions = [
         {
             "coin": p["position"]["coin"],
@@ -927,8 +955,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # chronological, so `next()` over recent_trades would pick the OLDEST —
     # letting a second entry through 30min after the first while the coin was
     # re-traded minutes ago (observed: ACE leg 2 at 32min after leg 1, leg 3 at
-    # 59min, all into one position).
-    last_trade_time = memory.latest_trade_ts_by_coin(50).get(analysis["coin"])
+    # 59min, all into one position). 2026-09-02: close-armed — the map floors
+    # at the newest close too, so exiting a long hold no longer leaves a
+    # zero-breathing-room re-entry window (open fills still count, ACE legs
+    # behave unchanged).
+    last_trade_time = memory.cooldown_floor_ts_by_coin().get(analysis["coin"])
 
     # News blackout: stand down only on GENUINELY adverse news. The AI judges
     # the recent (last 48h) headlines and emits news_risk; only "negative"
@@ -2111,9 +2142,17 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
             # this coin (config `loss_cooldown_min`, 0 = off). Anti-revenge rule:
             # TON was churned 3x in one day because the standard cooldown expired
             # and the AI re-bought the same falling name each time.
+            # A max_loss (stop) close arms the LONGER `stop_loss_cooldown_min`
+            # window when set — a stopped name is the falling-knife case the
+            # plain cooldown was calibrated for, and re-entry into the same
+            # regime is what compounds stop clusters (2026-09 ledger: top-5
+            # stop coins held 53% of all stop losses).
             if out["realized_pnl_pct"] < 0:
                 try:
-                    lc_min = float(read_agent_config().get("loss_cooldown_min", 0) or 0)
+                    _acfg = read_agent_config()
+                    lc_min = float(_acfg.get("loss_cooldown_min", 0) or 0)
+                    if _exit_type(exit_reason) == "max_loss":
+                        lc_min = max(lc_min, float(_acfg.get("stop_loss_cooldown_min", 0) or 0))
                     if lc_min > 0:
                         until = int(time.time() * 1000 + lc_min * 60_000)
                         memory.set_loss_cooldown(coin, until)

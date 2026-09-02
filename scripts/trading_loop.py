@@ -1019,7 +1019,11 @@ while True:
         # Newest trade timestamp per coin (NOT oldest — see the method docstring;
         # the prior inline `setdefault` kept the oldest, so a coin traded twice
         # in the window paid for redundant LLM research every cycle).
-        recent_trades_by_coin = memory.latest_trade_ts_by_coin(20)
+        # 2026-09-02: cooldown_floor_ts_by_coin — floors at the newest CLOSE
+        # too, matching the executor's close-armed `cooldown_min` (a coin whose
+        # position just exited stays in its cooldown window; research would
+        # only be gate-refused anyway). Held coins are exempt below.
+        recent_trades_by_coin = memory.cooldown_floor_ts_by_coin()
         held_coins = memory.open_position_coins()
         # Blocklisted coins can never execute (coin_filter gate blocks them), so
         # we skip the paid LLM research for any we don't hold — see the else
