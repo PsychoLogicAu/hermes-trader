@@ -92,14 +92,25 @@ So at `equity_fraction_per_trade: 0.10`, a 0.90-confidence trade sizes at an eff
 
 ## Risk safety
 
-### `max_daily_loss_usd` (negative number, default `-100`)
-Daily-loss killswitch. When `daily_pnl <= this`, ALL new trades blocked until UTC midnight reset.
+### `daily_kill_pct_of_equity` (float 0-1, default `0.10`)
+Daily-loss killswitch, equity-relative (2026-09). Threshold =
+`clamp(pct × equity, daily_kill_min_usd, daily_kill_cap_usd)`. When
+`daily_pnl <= -threshold` the entry gate blocks NEW trades and the
+heartbeat's HARD killswitch flattens all open positions (loss can't run
+further). A breach also arms a halt *timer* (`daily_loss_halt.halt_min`,
+default 360 min) that blocks re-entry until it expires or the day's PnL
+recovers above the release band — not a UTC-midnight lock. `0` disables
+both the gate and the flatten.
 
-| Account size | Recommended |
+| Account size | Suggested pct (cap $) |
 |---|---|
-| < $500 | -25 to -50 (10-20% of equity) |
-| $500–$2000 | -100 to -200 |
-| $2000+ | -500+ |
+| < $500 | 0.10–0.15 (cap $25–50) |
+| $500–$2000 | 0.15–0.20 (cap $150) |
+| $2000+ | 0.25 (cap $500) |
+
+`daily_kill_cap_usd` (default `100`) is the absolute ceiling — "never lose
+more than $X in one day" regardless of equity growth. `daily_kill_min_usd`
+(default `8`) is a small-account noise guard.
 
 Too loose = catastrophic days possible. Too tight = locks you out on a normal variance day.
 
@@ -266,7 +277,7 @@ Duelist-veto conviction gate (the 19th gate). Keys off the A/B duelist — the s
 Most of these knobs you set once and leave. The three you'd realistically touch:
 
 1. **`mode`**: flip to `OFF` when you want the bot to stop trading (it keeps scanning, just doesn't execute)
-2. **`max_daily_loss_usd`**: drop if you want a tighter circuit breaker for the day
+2. **`daily_kill_pct_of_equity`**: raise if you want a looser circuit breaker for the day; pair with `daily_kill_cap_usd` for the absolute ceiling
 3. **`min_ai_confidence`**: raise to filter trades when the AI is being too loose; lower to accept more
 
 Everything else is structural — change it deliberately, not reactively.

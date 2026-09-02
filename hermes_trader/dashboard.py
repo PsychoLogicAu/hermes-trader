@@ -1678,7 +1678,7 @@ _CONFIG_HTML = """<!doctype html>
 // still appear without code changes.
 const SECTIONS = [
   { label: 'mode + sizing', keys: ['mode','equity_fraction_per_trade','leverage','max_concurrent','max_trade_notional_usd','max_total_notional_pct'] },
-  { label: 'safety',        keys: ['max_daily_loss_usd','daily_kill_pct_of_equity','daily_kill_cap_usd','daily_kill_min_usd','daily_loss_halt','stop_loss_cooldown_min','cooldown_min','min_ai_confidence','counter_regime_min_conf','max_crypto_long_correlated'] },
+  { label: 'safety',        keys: ['daily_kill_pct_of_equity','daily_kill_cap_usd','daily_kill_min_usd','daily_loss_halt','stop_loss_cooldown_min','cooldown_min','min_ai_confidence','counter_regime_min_conf','max_crypto_long_correlated'] },
   { label: 'liquidity',     keys: ['min_market_volume_usd','min_hip3_volume_usd'] },
   { label: 'filters',       keys: ['coin_allowlist','coin_blocklist'] },
   { label: 'markets',       keys: ['enable_crypto','enable_hip3'] },

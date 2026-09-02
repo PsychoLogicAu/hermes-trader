@@ -286,7 +286,7 @@ def _ctx(**kw):
 def test_risk_gates_pass_and_block():
     from hermes_trader.agents.risk_gates import eval_all_gates
     cfg = {"min_ai_confidence": 0.8, "max_concurrent": 3, "max_trade_notional_usd": 200,
-           "max_daily_loss_usd": -100, "min_market_volume_usd": 5e6,
+           "min_market_volume_usd": 5e6,
            "max_total_notional_pct": 1.0, "cooldown_min": 60}
     assert eval_all_gates(_ctx(), cfg)["blocked"] is False
     blocked = eval_all_gates(_ctx(confidence=0.1), cfg)
@@ -313,7 +313,7 @@ def test_aligned_min_conf_lets_aligned_shorts_through(monkeypatch):
     from hermes_trader.agents.risk_gates import eval_all_gates
     monkeypatch.setattr(mr, "detect_regime", lambda coin, **k: "down")
     cfg = {"min_ai_confidence": 0.78, "aligned_min_conf": 0.70, "max_concurrent": 5,
-           "max_trade_notional_usd": 500, "max_daily_loss_usd": -300,
+           "max_trade_notional_usd": 500,
            "min_market_volume_usd": 8e5, "max_total_notional_pct": 1.0,
            "cooldown_min": 60, "counter_regime_min_conf": 0.80,
            "min_short_volume_usd": 50_000_000}
@@ -352,7 +352,7 @@ def test_short_liquidity_floor_blocks_thin_shorts_only():
 def test_eval_all_gates_short_volume_floor_integration():
     from hermes_trader.agents.risk_gates import eval_all_gates
     cfg = {"min_ai_confidence": 0.78, "max_concurrent": 5, "max_trade_notional_usd": 500,
-           "max_daily_loss_usd": -300, "min_market_volume_usd": 8e5,
+           "min_market_volume_usd": 8e5,
            "max_total_notional_pct": 1.0, "cooldown_min": 60,
            "min_short_volume_usd": 50_000_000}
     # thin short blocked by the new floor
@@ -866,7 +866,7 @@ def test_market_regime_gate_wired_into_eval_all(monkeypatch):
     monkeypatch.setattr(hyperfeed, "market_get_funding_regime",
                         lambda: {"regime": "NEUTRAL", "assets": []})
     cfg = {"min_ai_confidence": 0.3, "max_concurrent": 10,
-           "max_trade_notional_usd": 1000, "max_daily_loss_usd": -100,
+           "max_trade_notional_usd": 1000,
            "min_market_volume_usd": 5e6, "max_total_notional_pct": 10.0,
            "cooldown_min": 0, "counter_regime_min_conf": 0.7}
     # Low-conf short in an up regime → blocked, with the new reason surfaced
@@ -2361,7 +2361,7 @@ def _exec_baseline(monkeypatch, cfg_overrides=None, state_overrides=None):
         "mode": "LIVE", "enable_crypto": True, "enable_hip3": True,
         "equity_fraction_per_trade": 0.10, "leverage": 10,
         "max_trade_notional_usd": 100000, "max_concurrent": 18,
-        "max_total_notional_pct": 40.0, "max_daily_loss_usd": -1000,
+        "max_total_notional_pct": 40.0,
         "min_available_margin_pct": 0.10, "cooldown_min": 60,
         "min_ai_confidence": 0.30, "counter_regime_min_conf": 0.65,
         "max_crypto_long_correlated": 5, "min_market_volume_usd": 5_000_000,

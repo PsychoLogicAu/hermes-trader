@@ -872,7 +872,7 @@ while True:
                 "notional_cap": _cfg.get("max_total_notional_pct"),
                 "cool_min": _cfg.get("cooldown_min"),
                 "min_conf": _cfg.get("min_ai_confidence"),
-                "kill": _cfg.get("max_daily_loss_usd"),
+                "kill": _cfg.get("daily_kill_pct_of_equity"),
                 "crypto": bool(_cfg.get("enable_crypto", True)),
                 "hip3": bool(_cfg.get("enable_hip3", False)),
             },
@@ -888,16 +888,20 @@ while True:
         # positions keep bleeding to their DSL stops (2026-06-09: hit -$35 vs a
         # -$30 cap). Make the floor HARD: once the day's loss breaches the limit,
         # FLATTEN every open position so the loss can't run further. The gate then
-        # keeps re-entry blocked until the UTC roll. Guarded by equity>0: every
+        # keeps re-entry blocked while the halt timer runs (breakable on
+        # recovery — see risk_gates.daily_loss). Guarded by equity>0: every
         # degraded/partial-read path in _sync_account_state returns equity=0 (and
         # preserves last-known-good daily_pnl), so a bad read can NEVER trigger a
         # flatten. Idempotent: after flattening, the next tick's positions are
-        # empty so it won't re-fire.
-        _max_daily_loss = float(_cfg.get("max_daily_loss_usd", -100) or -100)
-        if equity > 0 and positions and daily_pnl <= _max_daily_loss:
+        # empty so it won't re-fire. 2026-09-02: threshold is the SAME
+        # equity-relative kill value as the entry gate (daily_kill_* keys),
+        # so gate + flatten move together; pct=0 disables both.
+        from hermes_trader.agents.risk_gates import effective_daily_kill_usd
+        _kill_thr = effective_daily_kill_usd(_cfg, equity)  # 0 = disabled
+        if _kill_thr > 0 and equity > 0 and positions and daily_pnl <= -_kill_thr:
             logger.warning(
                 f"[killswitch] HARD daily-loss floor breached: PnL ${daily_pnl:.2f} "
-                f"<= ${_max_daily_loss:.0f} — flattening {len(positions)} open "
+                f"<= -${_kill_thr:.2f} (equity-relative) — flattening {len(positions)} open "
                 f"position(s) to cap the loss")
             for _p in positions:
                 _coin = (_p.get("position") or {}).get("coin")
@@ -909,7 +913,7 @@ while True:
                 except Exception as _e:
                     logger.error(f"[killswitch] failed to flatten {_coin}: {_e}")
             log_event({"event": "hard_killswitch", "daily_pnl": round(daily_pnl, 2),
-                       "limit": _max_daily_loss, "flattened": len(positions)})
+                       "limit": _kill_thr, "flattened": len(positions)})
 
         # ── DSL exit pass ───────────────────────────────────────────────────
         # Reconcile trackers with live exchange positions (handles restarts,

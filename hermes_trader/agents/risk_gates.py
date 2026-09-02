@@ -132,15 +132,12 @@ def effective_daily_kill_usd(config: Dict[str, Any], equity: float) -> float:
     thr = clamp(pct_of_equity * equity, min_usd, cap_usd). The pct form keeps
     the brake proportional as the account grows; the cap is the absolute
     ceiling ("never lose $X in one day no matter the equity"); the min stops
-    a small account from halting on ordinary noise. When pct is unset/0 the
-    legacy fixed `max_daily_loss_usd` is used as a constant.
-    Returns 0.0 when the kill switch is disabled entirely.
-    """
+    a small account from halting on ordinary noise.
+    Returns 0.0 when the kill switch is disabled (pct unset/0) — the entry
+    gate AND the heartbeat's hard flatten then both stand down."""
     pct = float(_cfg(config, "daily_kill_pct_of_equity", 0) or 0)
     if pct <= 0:
-        legacy = _cfg(config, "max_daily_loss_usd", -100)
-        legacy = float(legacy) if legacy is not None else -100.0
-        return abs(legacy) if legacy < 0 else 0.0
+        return 0.0
     thr = pct * max(0.0, float(equity or 0))
     cap = float(_cfg(config, "daily_kill_cap_usd", 0) or 0)
     if cap > 0:
@@ -154,25 +151,18 @@ def effective_daily_kill_usd(config: Dict[str, Any], equity: float) -> float:
 def daily_loss_kill_switch(ctx: GateContext, max_daily_loss: float,
                            halt_remaining_min: float = 0.0) -> GateResult:
     """Block new ENTRIES when the day is deep in the red (or a halt timer is
-    active). Two shapes, config-selected:
-
-    - legacy (max_daily_loss < 0, flat USD): block while daily_pnl <= it.
-    - equity-relative (max_daily_loss > 0, the effective USD threshold from
-      effective_daily_kill_usd): block while daily_pnl <= -threshold OR a
-      halt timer from a previous breach is still running. The halt is a
-      TIMER (memory.arm_daily_halt) that expires or is cleared early on
-      recovery — deliberately NOT a UTC-rollover lock, so a genuine regime
-      change back can resume trading the same day.
-    """
+    active). `max_daily_loss` is the effective USD threshold from
+    effective_daily_kill_usd (0 = disabled → this gate passes). Block while
+    daily_pnl <= -threshold OR a halt timer from a previous breach is still
+    running. The halt is a TIMER (memory.arm_daily_halt) that expires or is
+    cleared early on recovery — deliberately NOT a UTC-rollover lock, so a
+    genuine regime change back can resume trading the same day."""
+    if max_daily_loss <= 0:
+        return {"pass": True}
     if halt_remaining_min > 0:
         return {"pass": False,
                 "reason": (f"daily loss halt active ({halt_remaining_min:.0f}min "
                            f"remaining; lifts early on PnL recovery)")}
-    if max_daily_loss <= 0:
-        if ctx.daily_pnl > max_daily_loss:
-            return {"pass": True}
-        return {"pass": False,
-                "reason": f"daily loss killswitch triggered (PnL ${ctx.daily_pnl:.2f} <= ${max_daily_loss})"}
     if ctx.daily_pnl > -max_daily_loss:
         return {"pass": True}
     return {"pass": False,

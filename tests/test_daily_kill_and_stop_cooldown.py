@@ -38,19 +38,15 @@ def test_floor_binds_on_small_equity():
     assert effective_daily_kill_usd(cfg, 30.0) == 8.0
 
 
-def test_legacy_flat_when_pct_off():
-    assert effective_daily_kill_usd({"max_daily_loss_usd": -20.0}, 500.0) == 20.0
-    assert effective_daily_kill_usd({}, 500.0) == 100.0  # default -100
-    assert effective_daily_kill_usd({"max_daily_loss_usd": 0}, 500.0) == 0.0
+def test_disabled_when_pct_unset_or_zero():
+    assert effective_daily_kill_usd({"daily_kill_pct_of_equity": 0}, 500.0) == 0.0
+    assert effective_daily_kill_usd({}, 500.0) == 0.0  # pct unset → disabled
+    # gate passes outright when the kill is disabled, even deep in the red
+    r = daily_loss_kill_switch(_ctx(daily_pnl=-25.0), 0.0)
+    assert r["pass"] is True
 
 
 # ── daily_loss_kill_switch ──────────────────────────────────────────────────
-
-def test_legacy_negative_shape_blocks():
-    r = daily_loss_kill_switch(_ctx(daily_pnl=-25.0), -20.0)
-    assert r["pass"] is False
-    assert daily_loss_kill_switch(_ctx(daily_pnl=-19.0), -20.0)["pass"] is True
-
 
 def test_equity_relative_positive_shape_blocks():
     # threshold +9 means block when day PnL <= -9

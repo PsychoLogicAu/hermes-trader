@@ -87,7 +87,7 @@ Requirements:
 4. Trade frequency is secondary to regime alignment.
 
 Constraints:
-- Do NOT change max_daily_loss_usd.
+- Do NOT change the daily-loss kill (daily_kill_pct_of_equity / daily_kill_cap_usd).
 - Do NOT weaken or remove the binary trigger bypasses.
 - Do NOT create new bypasses just to increase trade count.
 - Do NOT solve this by raising min_ai_confidence globally.

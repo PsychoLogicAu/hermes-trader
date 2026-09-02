@@ -157,7 +157,7 @@ used by the old MCP-server status display.
 | `confidence` | AI confidence ≥ `min_ai_confidence` (in-code default 0.8; live config typically 0.25–0.3) |
 | `max_concurrent` | Open positions < `max_concurrent` |
 | `notional_cap` | Per-trade notional ≤ `max_trade_notional_usd` |
-| `daily_loss` | Daily PnL > `max_daily_loss_usd` (kill switch) |
+| `daily_loss` | Daily PnL ≤ −`clamp(daily_kill_pct_of_equity × equity, min, cap)` (kill switch; entry-block + hard flatten) |
 | `daily_giveback` | Once the day's PnL has peaked ≥ `daily_giveback_min_peak_usd`, new entries halt if it retraces > `daily_giveback_halt_pct` |
 | `liquidity` | Asset-class-aware floor. Crypto: ≥ `min_market_volume_usd` (default 5M). HIP-3 (colon-namespaced): ≥ `min_hip3_volume_usd` (default 500k). Same floor would have wrongly blocked legitimately-liquid tokenized markets like `xyz:CRCL` ($4.7M) and `km:USTECH` ($1.06M). High-confidence bypass available via `runner_entry_gate.bypass_low_volume`. |
 | `short_liquidity` | Shorts require ≥ `min_short_volume_usd` 24h volume — deeper floor than the long-side liquidity gate |
@@ -933,9 +933,13 @@ to all positions opened by the standard executor path.
 
 ### Daily killswitch + the equity-spike bug
 
-`max_daily_loss_usd` (default -$100, often tuned tighter) stops new trades
-for the rest of the UTC day when realized PnL drops below it. Cap-only —
-existing positions still get DSL-managed.
+The daily killswitch is equity-relative (2026-09): threshold =
+`clamp(daily_kill_pct_of_equity × equity, daily_kill_min_usd,
+daily_kill_cap_usd)`. When realized PnL drops below it, the entry gate
+blocks new trades AND the heartbeat's HARD killswitch flattens every open
+position so the loss can't run further. A breach also arms a halt timer
+(`daily_loss_halt.halt_min`) — not a UTC-midnight lock — that breaks early
+on recovery.
 
 **Known weakness (pending fix):** the heartbeat computes daily PnL from
 HL's `accountValue`, which occasionally returns `0` on a transient API
@@ -1044,7 +1048,7 @@ Posture: **stand down, or only trade with massive conviction.**
   "min_ai_confidence": 0.85,
   "counter_regime_min_conf": 1.01,   // effectively disable counter-trades
   "max_concurrent": 3,
-  "max_daily_loss_usd": -15,         // tight killswitch
+  "daily_kill_pct_of_equity": 0.05,   // very tight killswitch (5% of equity)
   "max_total_notional_pct": 3.0      // 3x equity max — way under normal
 }
 ```

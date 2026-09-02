@@ -118,7 +118,9 @@ logs would-blocks until `chronos_mismatch_gate.shadow_mode` is set false.)
    floor override via `aligned_min_conf`)
 2. **Max concurrent** — open positions < `max_concurrent`
 3. **Notional cap** — trade notional ≤ `max_trade_notional_usd`
-4. **Daily loss** — daily PnL above `max_daily_loss_usd` kills trading
+4. **Daily loss** — daily PnL below the equity-relative kill threshold
+   (`daily_kill_pct_of_equity`) kills new entries (and flattens via the
+   heartbeat hard-killswitch)
 5. **Daily giveback** — halts new entries if daily PnL retraces
    > `daily_giveback_halt_pct` from a peak ≥ `daily_giveback_min_peak_usd`
 6. **Liquidity** — 24h volume ≥ `min_market_volume_usd` (HIP-3:

@@ -70,7 +70,6 @@ def _cfg():
         "max_concurrent": 1,            # one capital slot — the race window
         "min_ai_confidence": 0.8,
         "max_trade_notional_usd": 200,
-        "max_daily_loss_usd": -100,
         "daily_giveback_halt_pct": 0.0,
         "min_market_volume_usd": 5_000_000,
         "min_short_volume_usd": 0,

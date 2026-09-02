@@ -68,9 +68,9 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         "max_crypto_long_correlated": 2,
         # Risk caps — notional, daily, equity exposure
         "max_trade_notional_usd": 300,      # per-trade hard cap
-        "max_daily_loss_usd": -100,         # legacy flat kill (used when daily_kill_pct_of_equity is 0)
-        # Equity-relative daily kill: thr = clamp(pct*equity, min, cap), block
-        # NEW ENTRIES (not flatten) while day PnL <= -thr or a halt timer runs.
+        # Equity-relative daily kill: thr = clamp(pct*equity, min, cap).
+        # Drives BOTH the entry gate (risk_gates.daily_loss) and the
+        # heartbeat's hard flatten (trading_loop). 0 = disabled.
         "daily_kill_pct_of_equity": 0.10,   # 10% of account equity per day
         "daily_kill_cap_usd": 100,          # absolute ceiling whatever the equity says
         "daily_kill_min_usd": 8,            # small-account floor (noise guard)

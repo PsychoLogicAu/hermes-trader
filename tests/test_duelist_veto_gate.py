@@ -178,7 +178,6 @@ def test_eval_all_gates_carries_duelist_veto():
         "min_ai_confidence": 0.5,
         "max_concurrent": 5,
         "max_trade_notional_usd": 300,
-        "max_daily_loss_usd": -100,
         "min_market_volume_usd": 1_000_000,
         "coin_allowlist": [],
         "coin_blocklist": [],
