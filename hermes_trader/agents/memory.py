@@ -46,6 +46,8 @@ class AgentMemory:
         self._peak_daily_pnl: float = 0  # high-water mark of daily_pnl (intraday, resets at UTC roll)
         self._start_of_day_equity: float = 0
         self._day_start_ts: int = 0
+        self._daily_halt_until: int = 0  # epoch ms; daily-halt timer (see arm_daily_halt)
+        self._daily_halt_day: str = ""   # UTC day the active halt was armed on
         self._open_positions: List[Dict[str, Any]] = []
         self._initialized = False
         # Guards every mutation of the in-memory lists/dicts AND flush(). The
@@ -89,6 +91,9 @@ class AgentMemory:
             self._daily_pnl = data.get("dailyPnl", 0)
             self._start_of_day_equity = data.get("startOfDayEquity", 0)
             self._day_start_ts = data.get("dayStartTs", 0)
+            _dh = int(data.get("dailyHaltUntil", 0) or 0)
+            self._daily_halt_until = _dh if _dh > now else 0
+            self._daily_halt_day = str(data.get("dailyHaltDay", "") or "") if self._daily_halt_until else ""
             self._open_positions = data.get("openPositions", [])
 
             logger.info(
@@ -127,6 +132,8 @@ class AgentMemory:
                     "dailyPnl": self._daily_pnl,
                     "startOfDayEquity": self._start_of_day_equity,
                     "dayStartTs": self._day_start_ts,
+                    "dailyHaltUntil": self._daily_halt_until,
+                    "dailyHaltDay": self._daily_halt_day,
                     "openPositions": self._open_positions,
                 }
                 tmp = MEMORY_FILE + ".tmp"
@@ -234,6 +241,11 @@ class AgentMemory:
             self._day_start_ts = today_utc
             self._daily_pnl = 0
             self._peak_daily_pnl = 0  # reset high-water mark at the UTC day roll
+            # NOTE: the daily-halt timer deliberately SURVIVES the UTC roll —
+            # a halt armed at 23:55 must not be laundered by midnight (the
+            # fresh day's PnL≈0 would falsely read as "recovered"). It runs to
+            # its own timer expiry; early-release only applies on the armed day
+            # (see daily_halt_armed_day).
         else:
             self._daily_pnl = current_equity - self._start_of_day_equity - net_contributions
         # Track the day's peak PnL so a give-back breaker can lock in green days.
@@ -243,6 +255,40 @@ class AgentMemory:
     def peak_daily_pnl(self) -> float:
         """Intraday high-water mark of daily PnL (resets at UTC midnight)."""
         return self._peak_daily_pnl
+
+    # ── Daily-halt timer (equity-relative kill switch) ──────────────────────
+    # When daily PnL breaches the equity-relative kill threshold, new entries
+    # are blocked for `halt_min` (a TIMER, not a UTC-rollover lock): it lifts
+    # on expiry, or early once the day's PnL recovers past the release band
+    # (the regime changed back). Persisted so a restart can't launder the halt.
+
+    def daily_halt_remaining_min(self) -> float:
+        exp = getattr(self, "_daily_halt_until", 0) or 0
+        remaining = (exp - int(time.time() * 1000)) / 60_000
+        return remaining if remaining > 0 else 0.0
+
+    def daily_halt_armed_day(self) -> str:
+        """UTC day ('YYYY-MM-DD') the ACTIVE halt was armed on ('' if none).
+        The early-release path only applies on that day: after a UTC roll the
+        fresh day's PnL (≈0) says nothing about the old day's regime, and a
+        halt armed near midnight must not be laundered by the day rolling."""
+        if self.daily_halt_remaining_min() <= 0:
+            return ""
+        return getattr(self, "_daily_halt_day", "") or ""
+
+    def arm_daily_halt(self, minutes: float, utc_day: str = "") -> None:
+        """Extend-or-set the halt timer (never shortens an active halt)."""
+        until = int(time.time() * 1000 + minutes * 60_000)
+        if until > (getattr(self, "_daily_halt_until", 0) or 0):
+            self._daily_halt_until = until
+            self._daily_halt_day = utc_day
+            self.flush()
+
+    def clear_daily_halt(self) -> None:
+        if getattr(self, "_daily_halt_until", 0):
+            self._daily_halt_until = 0
+            self._daily_halt_day = ""
+            self.flush()
 
     # ── Loss cooldown (anti-revenge re-entry) ───────────────────────────────
     # Backed by the persisted `_cooldowns` dict (coin -> expires_ms), which was
@@ -308,6 +354,31 @@ class AgentMemory:
         for t in self.get_recent_trades(limit):  # chronological → newest wins
             if t.get("coin") and t.get("executed_at"):
                 out[t["coin"]] = t["executed_at"]
+        return out
+
+    def latest_close_ts_by_coin(self, limit: int = 200) -> Dict[str, int]:
+        """Map each coin to its NEWEST realized close (closed_at ms)."""
+        out: Dict[str, int] = {}
+        for c in self.get_closes(limit):  # chronological → newest wins
+            if c.get("coin") and c.get("closed_at"):
+                out[c["coin"]] = int(c["closed_at"])
+        return out
+
+    def cooldown_floor_ts_by_coin(self, trade_limit: int = 50,
+                                  close_limit: int = 200) -> Dict[str, int]:
+        """Per coin: max(newest open fill, newest close) — the timestamp the
+        standard `cooldown_min` counts from (2026-09-02: close-armed).
+
+        Arming at OPEN meant a position held longer than `cooldown_min` had
+        already burned its cooldown mid-trade, so the instant it exited it was
+        re-enterable with zero breathing room. Taking the max of the two
+        timestamps arms the window from whichever came later — a live
+        position's open fill still counts as the floor, so nothing changes
+        for coins we are holding."""
+        out = self.latest_trade_ts_by_coin(trade_limit)
+        for coin, ts in self.latest_close_ts_by_coin(close_limit).items():
+            if ts > out.get(coin, 0):
+                out[coin] = ts
         return out
 
     def get_all_trades(self) -> List[Dict[str, Any]]:
