@@ -893,11 +893,15 @@ while True:
         # degraded/partial-read path in _sync_account_state returns equity=0 (and
         # preserves last-known-good daily_pnl), so a bad read can NEVER trigger a
         # flatten. Idempotent: after flattening, the next tick's positions are
-        # empty so it won't re-fire. 2026-09-02: threshold is the SAME
-        # equity-relative kill value as the entry gate (daily_kill_* keys),
-        # so gate + flatten move together; pct=0 disables both.
-        from hermes_trader.agents.risk_gates import effective_daily_kill_usd
-        _kill_thr = effective_daily_kill_usd(_cfg, equity)  # 0 = disabled
+        # empty so it won't re-fire. 2026-09-02: the flatten uses
+        # flatten_daily_kill_usd = effective_daily_kill_usd × flatten_mult
+        # (default 1.25) — deliberately HIGHER than the entry gate / halt so
+        # the open book has a grace band (-T .. -mult*T) to claw the day back
+        # above the release band and clear the halt early; a flat flatten at
+        # T would pin the equity-based daily PnL red and make early release
+        # unreachable. pct=0 disables the gate, halt AND flatten.
+        from hermes_trader.agents.risk_gates import flatten_daily_kill_usd
+        _kill_thr = flatten_daily_kill_usd(_cfg, equity)  # 0 = disabled
         if _kill_thr > 0 and equity > 0 and positions and daily_pnl <= -_kill_thr:
             logger.warning(
                 f"[killswitch] HARD daily-loss floor breached: PnL ${daily_pnl:.2f} "

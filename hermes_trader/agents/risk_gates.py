@@ -134,7 +134,10 @@ def effective_daily_kill_usd(config: Dict[str, Any], equity: float) -> float:
     ceiling ("never lose $X in one day no matter the equity"); the min stops
     a small account from halting on ordinary noise.
     Returns 0.0 when the kill switch is disabled (pct unset/0) — the entry
-    gate AND the heartbeat's hard flatten then both stand down."""
+    gate, the halt timer AND the heartbeat's hard flatten then all stand
+    down. This is the ENTRY-GATE / HALT threshold; the hard flatten fires
+    at `flatten_daily_kill_usd` (a multiple of this) so the book has a
+    grace band to recover in."""
     pct = float(_cfg(config, "daily_kill_pct_of_equity", 0) or 0)
     if pct <= 0:
         return 0.0
@@ -146,6 +149,25 @@ def effective_daily_kill_usd(config: Dict[str, Any], equity: float) -> float:
     if floor > 0:
         thr = max(thr, floor)
     return thr
+
+
+def flatten_daily_kill_usd(config: Dict[str, Any], equity: float) -> float:
+    """Hard flatten threshold for the heartbeat kill-switch: the entry-gate /
+    halt threshold times `daily_kill_flatten_mult` (default 1.25).
+
+    The flatten is deliberately HIGHER than the halt so the book has a
+    grace band (-T .. -mult*T): once the day breaches -T the halt blocks
+    new entries, but the open positions are still alive and can claw the
+    day back above the release band (clearing the halt early). A flat
+    flatten at T would kill that recovery path — daily PnL is equity-based
+    and stays pinned red once the book is empty, so the early release
+    would be unreachable and the halt a hard 6h lock. 0 = disabled
+    (kill switch off), mirroring effective_daily_kill_usd."""
+    base = effective_daily_kill_usd(config, equity)
+    if base <= 0:
+        return 0.0
+    mult = float(_cfg(config, "daily_kill_flatten_mult", 1.25) or 1.25)
+    return base * mult
 
 
 def daily_loss_kill_switch(ctx: GateContext, max_daily_loss: float,

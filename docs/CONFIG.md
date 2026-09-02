@@ -93,14 +93,23 @@ So at `equity_fraction_per_trade: 0.10`, a 0.90-confidence trade sizes at an eff
 ## Risk safety
 
 ### `daily_kill_pct_of_equity` (float 0-1, default `0.10`)
-Daily-loss killswitch, equity-relative (2026-09). Threshold =
-`clamp(pct × equity, daily_kill_min_usd, daily_kill_cap_usd)`. When
-`daily_pnl <= -threshold` the entry gate blocks NEW trades and the
-heartbeat's HARD killswitch flattens all open positions (loss can't run
-further). A breach also arms a halt *timer* (`daily_loss_halt.halt_min`,
-default 360 min) that blocks re-entry until it expires or the day's PnL
-recovers above the release band — not a UTC-midnight lock. `0` disables
-both the gate and the flatten.
+Daily-loss killswitch, equity-relative (2026-09). Threshold T =
+`clamp(pct × equity, daily_kill_min_usd, daily_kill_cap_usd)`. Two tiers,
+both off the same T:
+
+1. **Halt / entry gate** at **−T**: blocks NEW trades and arms a halt
+   *timer* (`daily_loss_halt.halt_min`, default 360 min) that blocks
+   re-entry until it expires or the day's PnL recovers into the release
+   band — not a UTC-midnight lock.
+2. **Hard flatten** at **−1.25·T** (override with
+   `daily_kill_flatten_mult`, `1.0` = old flat behaviour): the heartbeat
+   closes ALL open positions. It is deliberately higher than the halt so
+   the open book has a grace band (−T … −1.25·T) to claw the day back
+   and clear the halt early — daily PnL is equity-based and stays pinned
+   red once the book is empty, so a flat flatten at T would make that
+   early release unreachable.
+
+`0` disables all three (gate, halt, flatten).
 
 | Account size | Suggested pct (cap $) |
 |---|---|
@@ -108,9 +117,10 @@ both the gate and the flatten.
 | $500–$2000 | 0.15–0.20 (cap $150) |
 | $2000+ | 0.25 (cap $500) |
 
-`daily_kill_cap_usd` (default `100`) is the absolute ceiling — "never lose
-more than $X in one day" regardless of equity growth. `daily_kill_min_usd`
-(default `8`) is a small-account noise guard.
+`daily_kill_cap_usd` (default `100`) is the absolute ceiling on T — "never
+lose more than $X in one day" regardless of equity growth (the flatten
+then tops out at 1.25·cap). `daily_kill_min_usd` (default `8`) is a
+small-account noise guard.
 
 Too loose = catastrophic days possible. Too tight = locks you out on a normal variance day.
 

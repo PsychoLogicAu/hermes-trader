@@ -17,6 +17,7 @@
   "max_total_notional_pct": 2.0,
   "daily_kill_pct_of_equity": 0.2,
   "daily_kill_cap_usd": 100,
+  "daily_kill_flatten_mult": 1.25,
   "daily_kill_min_usd": 8,
   "daily_loss_halt": { "halt_min": 360, "release_band_pct": 0.5 },
   "daily_giveback_halt_pct": 0.5,

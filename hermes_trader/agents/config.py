@@ -74,6 +74,10 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         "daily_kill_pct_of_equity": 0.10,   # 10% of account equity per day
         "daily_kill_cap_usd": 100,          # absolute ceiling whatever the equity says
         "daily_kill_min_usd": 8,            # small-account floor (noise guard)
+        "daily_kill_flatten_mult": 1.25,    # hard flatten fires at mult× the
+                                            # halt threshold (grace band for
+                                            # the book to recover; 1.0 = old
+                                            # flat behaviour)
         "daily_loss_halt": {                # halt timer (breakable, not UTC-locked)
             "halt_min": 360,                # default halt length after a breach
             "release_band_pct": 0.5,        # clear early once day PnL > -(thr*this)
