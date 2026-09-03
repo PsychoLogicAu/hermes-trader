@@ -1020,6 +1020,22 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _chronos_med = None
         _chronos_spread = None
         _chronos_q10p = _chronos_q90p = None
+    # Gate-side TimesFM-3 read for forecast_agreement_veto_gate: same warm
+    # sync pattern as chronos above (the trade-result attach shares the 300s
+    # per-coin cache, so steady state is a dict read). Paths only — the
+    # agreement gate needs the per-step tails, not the scalar. Error/disabled
+    # → None → the gate has no opinion and passes. Guarded on the passed
+    # config's timesfm_signal.enabled (fail-closed: a config without the key
+    # never pays the fetch, and tests can't reach the wire through here).
+    _timesfm_q10p = _timesfm_q90p = None
+    if (config.get("timesfm_signal") or {}).get("enabled", False):
+        try:
+            from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync as _ts
+            _tsig = _ts(analysis["coin"], trade_side)
+            _timesfm_q10p = _tsig.q10_path_pct if _tsig else None
+            _timesfm_q90p = _tsig.q90_path_pct if _tsig else None
+        except Exception as _te:
+            logger.debug(f"[executor] timesfm gate-side read failed for {analysis['coin']}: {_te}")
     # Gate-side squeeze read for the squeeze_extreme gate: same sync,
     # cache-first read the attach uses below (the attach runs later, at the
     # trade-result site, so it sees whatever this read leaves in the cache).
@@ -1063,6 +1079,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         chronos_q10_path_pct=_chronos_q10p,
         chronos_q90_path_pct=_chronos_q90p,
         squeeze_extreme_no_breakout=_squeeze_extreme,
+        timesfm_q10_path_pct=_timesfm_q10p,
+        timesfm_q90_path_pct=_timesfm_q90p,
         duelist_verdict=_duelist_verdict,
     )
 
@@ -1149,6 +1167,21 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{((analysis.get('duelist_at_entry') or {}).get('verdict') or '?').upper()}"
             f"; conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_dv.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Forecast-agreement veto shadow: BOTH zero-shot forecasters (chronos AND
+    # timesfm) show an adverse quantile tail past their own thresholds. The
+    # 2026-09-02 two-model sweep picked this AND shape over either model
+    # alone (most split-half-robust cell, vetoes fewer entries than the
+    # chronos-alone X2.5 rule for equal savings). Shadow marker only until
+    # shadow_mode is flipped.
+    _fav = gate_output["results"].get("forecast_agreement_veto") or {}
+    if _fav.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] forecast_agreement_veto WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_fav.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     if gate_output["blocked"]:
@@ -1711,12 +1744,13 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
 
 
 def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
-                              side: str) -> Tuple[Optional[int], tuple]:
+                              side: str) -> Tuple[Optional[int], tuple, tuple]:
     """Count independent signals corroborating a late-trend-chase entry.
 
-    Returns (n, names): n is the count of ALIGNED independent signals in
-    [0, 2] (clamped to the available signals), or None when the dynamic-bar
-    feature is disabled (`late_chase_dynamic_per_signal_drop` <= 0) — the gate
+    Returns (n, names, shadow_names): n is the count of ALIGNED independent
+    signals that COUNT toward the bar in [0, 3] (clamped to the available
+    signals), or None when the dynamic-bar feature is disabled
+    (`late_chase_dynamic_per_signal_drop` <= 0) — the gate
     then behaves exactly as before (fixed bar, and no signal fetches at all).
 
     Signals (independent pipelines, NOT the LLM's own confidence):
@@ -1724,6 +1758,15 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
                         (300s cache: a silent hit in steady state)
       squeeze_aligned — squeeze_signal Donchian breakout side == side
                         (300s cache, same reason)
+      timesfm_aligned — get_timesfm_signal_sync median sign agrees with side
+                        (300s cache). COUNTED only when
+                        `late_chase_timesfm_vote` is true; while the flag is
+                        off (default) an aligned read instead logs a
+                        [COUNTERFACTUAL] line so the additive vote accrues a
+                        sample before it can move the live bar (the
+                        2026-09-02 two-model sweep backed the additive vote,
+                        but the marginal release cohort was +10.24 with a
+                        weak second split-half — shadow first).
 
     A signal only votes when it is exactly True; missing/None/error/
     counter-direction counts as 0. Failures never raise (fail-closed: fewer
@@ -1732,7 +1775,7 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
     gate = config.get("runner_entry_gate") or {}
     drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
     if drop <= 0:
-        return (None, ())
+        return (None, (), ())
     names: list = []
     # Chronos alignment — median sign vs side; None median or error = no vote.
     try:
@@ -1755,7 +1798,26 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
     except Exception as e:
         logger.debug(f"[executor] late-chase corroboration: squeeze read failed "
                      f"(non-fatal): {e}")
-    return (len(names), tuple(names))
+    # TimesFM-3 alignment — median sign vs side. Counted into the bar only
+    # when `late_chase_timesfm_vote` is true; while the flag is off an
+    # aligned read lands in shadow_names so the caller can log the would-
+    # rescue counterfactual (sample accrual; the live bar is byte-identical
+    # either way).
+    shadow_names: list = []
+    vote_target = names if bool(gate.get("late_chase_timesfm_vote", False)) else shadow_names
+    if (config.get("timesfm_signal") or {}).get("enabled", False):
+        try:
+            from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync
+            tsig = get_timesfm_signal_sync(analysis.get("coin") or "unknown", side)
+            tm = tsig.median_pct if tsig.median_pct is not None else None
+            if not tsig.error and tm is not None:
+                aligned = (tm > 0) if side == "long" else (tm < 0)
+                if aligned:
+                    vote_target.append("timesfm_aligned")
+        except Exception as e:
+            logger.debug(f"[executor] late-chase corroboration: timesfm read failed "
+                         f"(non-fatal): {e}")
+    return (len(names), tuple(names), tuple(shadow_names))
 
 
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
@@ -1858,7 +1920,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # key absent) → the fixed bar, byte-identical to before.
         fixed_bar = float(gate.get("bypass_late_trend_chase_min_conf", 0))
         drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
-        corr, corr_names = _late_chase_corroboration(analysis, config, side)
+        corr, corr_names, corr_shadow = _late_chase_corroboration(analysis, config, side)
         if corr is None:
             bar, bar_note = fixed_bar, ""
         else:
@@ -1871,6 +1933,23 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             logger.info(f"[executor] late-trend chase bypassed on {coin} "
                         f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
         else:
+            # Log-only counterfactual (never changes pass/fail): timesfm
+            # aligned this late-chase entry but its vote is not counted
+            # (late_chase_timesfm_vote off) — had it counted, the bar would
+            # have been one `drop` lower and this block may have released.
+            # Strictly rescue-side: the candidate bar is always ≤ the live
+            # bar, so the marker can only name an over-block, never add one.
+            # Accrue these against P/L before flipping the vote on
+            # (2026-09-02 two-model sweep).
+            if corr is not None and corr_shadow \
+                    and conf >= max(bar - drop, min_conf):
+                logger.warning(
+                    f"[gate][COUNTERFACTUAL] late_chase block RESCUED by "
+                    f"timesfm additive vote for {coin} {side.upper()}: conf "
+                    f"{conf:.2f} < live bar {bar:.2f} but >= candidate bar "
+                    f"{max(bar - drop, min_conf):.2f} "
+                    f"({'+'.join(corr_shadow)}) — live rule stands, vote-on "
+                    f"rule would have passed")
             return (f"runner_gate_blocked (late trend-only chase; no fresh "
                     f"breakout/burst, bar {bar:.2f}){bar_note}")
     else:

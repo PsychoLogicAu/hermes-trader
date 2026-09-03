@@ -39,6 +39,8 @@ class GateContext:
         chronos_q10_path_pct: Optional[List[float]] = None,
         chronos_q90_path_pct: Optional[List[float]] = None,
         squeeze_extreme_no_breakout: Optional[bool] = None,
+        timesfm_q10_path_pct: Optional[List[float]] = None,
+        timesfm_q90_path_pct: Optional[List[float]] = None,
         duelist_verdict: Optional[str] = None,
     ):
         self.confidence = confidence
@@ -93,6 +95,12 @@ class GateContext:
         # opinion and passes. True/False = the flag's actual value; the gate
         # only ever has an opinion on True.
         self.squeeze_extreme_no_breakout = squeeze_extreme_no_breakout
+        # TimesFM-3 per-step quantile paths, % vs last close (gate-side warm
+        # sync read, same pattern as the chronos paths above; None on error
+        # signals). Fed to forecast_agreement_veto_gate — the AND-agreement
+        # tail veto from the 2026-09-02 two-model sweep.
+        self.timesfm_q10_path_pct = timesfm_q10_path_pct
+        self.timesfm_q90_path_pct = timesfm_q90_path_pct
         # The A/B duelist's verdict at entry (LONG / SHORT / PASS / None),
         # carried from research.py's `duelist_at_entry` snapshot via
         # maybe_execute. None = the duelist is disabled or failed — the
@@ -661,6 +669,63 @@ def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
     return {"pass": False, "reason": reason}
 
 
+def forecast_agreement_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Chronos ∧ TimesFM agreement tail-veto (SHADOW by default).
+
+    Fires only when BOTH zero-shot forecasters see an adverse tail: the
+    chronos q-path AND the timesfm q-path must breach their own threshold
+    within their own window before the entry needs the elevated-conviction
+    escape (conf >= min_conf OR composite >= min_composite). The 2026-09-02
+    2-model parameter sweep (253 decision events, DSL-simmed P/L) found the
+    AND shape to be the most split-half-robust veto cell: saved ~$24 vs ~$23
+    for chronos-alone at K6/X2.5, while vetoing FEWER entries (44 vs 47 of 96)
+    — timesfm alone vetoed with sign-flipping halves, so it must not veto by
+    itself; agreement is its contribution.
+
+    Per-model thresholds live under `chronos` / `timesfm` sub-keys (same
+    window_steps / min_adv_path_pct semantics as chronos_tail_trigger_gate;
+    sweep-selected defaults 6/2.5 and 12/2.0). Fail-safe: either model's
+    paths missing (cold cache / disabled / inference error) = no agreement =
+    pass. A data gap can never block a trade.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+
+    def _breached(paths, side, k, x):
+        if not paths or len(paths) < k:
+            return False
+        window = paths[:k]
+        tail = min(window) if side == "long" else max(window)
+        return tail <= -x if side == "long" else tail >= x
+
+    ccfg = cfg.get("chronos") or {}
+    tcfg = cfg.get("timesfm") or {}
+    ck = int(ccfg.get("window_steps", 6) or 6)
+    cx = float(ccfg.get("min_adv_path_pct", 2.5) or 2.5)
+    tk = int(tcfg.get("window_steps", 12) or 12)
+    tx = float(tcfg.get("min_adv_path_pct", 2.0) or 2.0)
+    cpath = (ctx.chronos_q10_path_pct if ctx.trade_side == "long"
+             else ctx.chronos_q90_path_pct)
+    tpath = (getattr(ctx, "timesfm_q10_path_pct", None) if ctx.trade_side == "long"
+             else getattr(ctx, "timesfm_q90_path_pct", None))
+    if not _breached(cpath, ctx.trade_side, ck, cx):
+        return {"pass": True}
+    if not _breached(tpath, ctx.trade_side, tk, tx):
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"forecast_agreement_veto (both models adverse: chronos first {ck} "
+              f"steps vs {cx}%, timesfm first {tk} steps vs {tx}%; conf "
+              f"{ctx.confidence:.2f} < {min_conf:.2f}, composite "
+              f"{ctx.composite_score:.1f} < {min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -1025,6 +1090,12 @@ def eval_all_gates(
     # a data gap can never block a trade.
     results["duelist_veto"] = duelist_veto_gate(
         ctx, effective_config.get("duelist_veto_gate") or {})
+    # Forecast-agreement tail veto: chronos AND timesfm both adverse. Shadow
+    # until shadow_mode is flipped (2026-09-02 sweep: the AND shape is the
+    # most split-half-robust veto cell). Passes when either model's paths
+    # are missing — a data gap can never block a trade.
+    results["forecast_agreement_veto"] = forecast_agreement_veto_gate(
+        ctx, effective_config.get("forecast_agreement_veto_gate") or {})
 
     block_reasons = []
     blocked = False

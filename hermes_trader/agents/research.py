@@ -300,6 +300,70 @@ def _chronos_block(coin: str) -> str:
         return ""
 
 
+def _timesfm_block(coin: str) -> str:
+    """TimesFM-3 forward forecast for the AI prompt, when
+    `timesfm_signal.in_prompt` is true. Same determinism contract as
+    _chronos_block: sync, cache-first read (shares the 300s per-coin cache
+    with the executor attach and the gate-side read), '' on disabled /
+    failed / absent so the prompt shape is unchanged.
+
+    The 2026-09-02 two-model sweep: at its sweep-selected context (100 bars
+    vs chronos' 50) TimesFM is the more accurate forecaster on this stream
+    (direction 53% vs 51%) and the two disagree enough to be complementary —
+    hence a SECOND block rather than a replacement. Rendered leaner than the
+    chronos block: headline median + band + early tail, with an explicit
+    cross-check framing so the LLM treats agreement/disagreement between the
+    two forecasters as the informative signal (the sweep's best veto was the
+    both-adverse AND shape).
+    """
+    try:
+        cfg = read_agent_config().get("timesfm_signal", {})
+        if not cfg.get("in_prompt", False) or not cfg.get("enabled", False):
+            return ""
+        from hermes_trader.agents import timesfm_signal as _ts
+        sig = _ts.get_timesfm_signal_sync(coin, "long")
+        if sig is None or sig.error or sig.median_pct is None:
+            return ""
+        med = sig.median_pct
+        span = ""
+        if sig.q_low is not None and sig.q_high is not None and sig.context_last:
+            lo_pct = (sig.q_low - sig.context_last) / sig.context_last * 100
+            hi_pct = (sig.q_high - sig.context_last) / sig.context_last * 100
+            span = f", p10 avg {lo_pct:+.1f}% / p90 avg {hi_pct:+.1f}%"
+        tail_bits = []
+        _tail_steps = 6
+        p10p = sig.q10_path_pct or []
+        p90p = sig.q90_path_pct or []
+        if p10p[:_tail_steps]:
+            tail_bits.append(f"p10 min {min(p10p[:_tail_steps]):+.1f}%")
+        if p90p[:_tail_steps]:
+            tail_bits.append(f"p90 max {max(p90p[:_tail_steps]):+.1f}%")
+        tail_s = f"; early tail, first {_tail_steps * 5}m: {' / '.join(tail_bits)}" if tail_bits else ""
+        hours = sig.horizon * 5 / 60
+        hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
+        # Confidence floor (same HEMI-replay semantics as the chronos block):
+        # the directional note renders only when |median| clears
+        # min_conf_ratio x the model's own p10-p90 spread.
+        min_conf_ratio = _ts.resolve_min_conf_ratio(cfg)
+        ratio = _ts.confidence_ratio(sig)
+        if ratio < min_conf_ratio:
+            note = (f"no confident direction over ~{hours_s}h (median inside its "
+                    f"own band, ratio {ratio:.2f} < {min_conf_ratio:.2f})")
+        elif med > 0:
+            note = f"sees continuation over ~{hours_s}h"
+        else:
+            note = f"expects the move to FADE within ~{hours_s}h"
+        return (
+            "TimesFM-3 forecast (shadow signal, longer 5m context than Chronos — "
+            f"cross-check the two, not obey either single one):\n"
+            f"  - Path-average over the next ~{hours_s}h: {med:+.2f}%{span}{tail_s} — "
+            + note + "."
+        )
+    except Exception as e:
+        logger.debug(f"[research] timesfm block failed for {coin}: {e}")
+        return ""
+
+
 def _squeeze_block(coin: str) -> str:
     """Squeeze-breakout (1h Donchian) state for the AI prompt, when
     `squeeze_signal` is enabled. Same determinism contract as _chronos_block:
@@ -427,32 +491,89 @@ def _build_user_message(
     else:
         whale_block = "Whale accumulation flag: not flagged for this coin"
 
-    # Band-snapback COUNTER-signal block: a wick that poked OUT of the
-    # moving-average band and snapped back INSIDE is a short-term mean-reversion
-    # tell in the fade direction (lower poke + snap-back → LONG; upper poke +
-    # snap-back → SHORT). Fed to the LLM as a VETO/weighting signal, NOT a
-    # standalone entry. The OOS edge is better than a coin flip but fee-thin, so
-    # its value is telling the LLM "don't fade this" — the observed dumb-trade
-    # mode was the LLM taking the OPPOSITE side of an imminent snapback (e.g.
-    # shorting into a lower-poke snap-back that wanted to revert long).
+    # Band-snapback block: a wick that poked OUT of the moving-average band and
+    # snapped back INSIDE is a short-term mean-reversion tell in the fade
+    # direction (lower poke + snap-back → LONG; upper poke + snap-back → SHORT).
+    # Fed to the LLM as a VETO/weighting signal, NOT a standalone entry. The OOS
+    # edge is better than a coin flip but fee-thin, so its value is telling the
+    # LLM "don't fade this" — the observed dumb-trade mode was the LLM taking
+    # the OPPOSITE side of an imminent snapback (e.g. shorting into a lower-poke
+    # snap-back that wanted to revert long).
+    #
+    # Wording note (XMR 2026-09-03 01:26 UTC): the fired branch used to label
+    # this a "COUNTER-signal" without ever saying counter to WHAT. Both live
+    # models read it as "counter to the TREND" — the XMR scan had the snapback
+    # pointing LONG into a bullish 1d (confluence) and the primary PASSed,
+    # reasoning that "fading a strong 4h/1d move based on a thin mean-reversion
+    # signal is dangerous". A trader.log scan of AI reasoning blocks found the
+    # same inversion recurring, always LONG-snapback blocks turned into PASSes.
+    # So: the word "counter" is gone from the fired branch, it names the side
+    # positively, it states the relationship to the 4h/1d trend explicitly, and
+    # it says plainly that the signal is never itself a reason to stand aside.
     _snap = next((t for t in perception.get("triggers", [])
                   if t.get("name") == "bandSnapback"), None)
     if _snap and _snap.get("fired"):
         _snap_reason = _snap.get("reason", "")
         _snap_side = "SHORT" if _snap_reason.startswith("short") else "LONG"
         _opp = "LONG" if _snap_side == "SHORT" else "SHORT"
+        # Relationship to the higher-timeframe trend, computed from the SAME
+        # snapshots the prompt's indicator blocks render (EMA8 vs EMA21 per TF),
+        # so this line cannot contradict what the model reads elsewhere.
+        def _tf_dir(snap: Dict[str, Any]) -> str:
+            if not snap or snap.get("ema8") is None or snap.get("ema21") is None:
+                return "unknown"
+            return "bullish" if snap["ema8"] > snap["ema21"] else "bearish"
+
+        _d4, _d1d = _tf_dir(tf4h), _tf_dir(tf1d)
+        if _d4 == "unknown" and _d1d == "unknown":
+            _htf_line = (
+                f"\n  - Higher-TF context: unknown from the indicators above, so treat "
+                f"{_snap_side} agreement as untested rather than as confluence."
+            )
+        else:
+            _agree = [d for d in (_d4, _d1d) if d != "unknown"
+                      and (d == "bullish") == (_snap_side == "LONG")]
+            _n_known = len([d for d in (_d4, _d1d) if d != "unknown"])
+            if len(_agree) == _n_known:
+                _htf_line = (
+                    f"\n  - Higher-TF context: 4h {_d4}, 1d {_d1d} — the {_snap_side} "
+                    "snapback points WITH this trend. That is confluence, not a reason to "
+                    "stand aside."
+                )
+            elif not _agree:
+                _htf_line = (
+                    f"\n  - Higher-TF context: 4h {_d4}, 1d {_d1d} — the {_snap_side} "
+                    "snapback runs AGAINST the higher-timeframe trend, so it is a local "
+                    "bounce/pullback scalp, not a trend entry. Size and stops accordingly."
+                )
+            else:
+                _htf_line = (
+                    f"\n  - Higher-TF context: 4h {_d4}, 1d {_d1d} — mixed, so the "
+                    f"{_snap_side} snapback agrees with one of them and not the other."
+                )
         snapback_block = (
-            "Band snapback counter-signal (a wick poked OUT of the moving-average band and "
-            f"snapped back INSIDE → a short-term mean reversion is set up to the {_snap_side}):"
+            "Band snapback signal (fired — a wick poked OUT of the moving-average band and "
+            f"snapped back INSIDE, setting up a short-term mean reversion to the "
+            f"{_snap_side} side):"
             f"\n  - signal detail: {_snap_reason}"
-            "\n  - How to weight it: this is a COUNTER-signal, not an entry. Its out-of-sample "
-            "backtest edge is better than a coin flip but thin (fees eat most of it as a "
-            f"standalone trade). If your own analysis is leaning the OPPOSITE side (you're "
-            f"about to go {_opp} while the snapback points {_snap_side}), treat that as a red "
-            "flag: you'd be fading an imminent mean-reversion. Require strong independent "
-            "confirmation (higher-TF trend, funding, structure) before taking that opposite "
-            f"side. Use this signal to raise confidence in the {_snap_side} direction and to "
-            "lower confidence in the opposite one — not to open a trade by itself."
+            f"{_htf_line}"
+            f"\n  - Read it as: the band's short-term reversion pressure currently "
+            f"points {_snap_side}. It is a fresh bounce off a "
+            f"{_snap_side.lower()} extreme — NOT a stretched, late-chase entry and NOT a "
+            "signal that the move is topping out."
+            f"\n  - How to weight it: use it to raise confidence in {_snap_side} and lower "
+            f"confidence in {_opp}. It is not an entry by itself: its out-of-sample edge "
+            "beats a coin flip but is thin once fees are in, so a trade on this alone "
+            f"usually does not pay. A {_snap_side} thesis gains from it; a {_opp} thesis "
+            f"must clear a higher bar, because {_opp} here means fading an imminent mean "
+            "reversion — require explicit independent evidence (higher-TF trend, funding, "
+            "structure, news) before taking that side."
+            "\n  - What this signal is NOT: it is not an instruction to PASS, and it is not "
+            "counter-trend evidence against your own thesis. If your analysis points "
+            f"{_snap_side}, this signal supports it — do not turn it into a reason to stand "
+            "aside. Whether the entry is too late or too extended is a separate call, made "
+            "from the price, the 1h structure and any breakout/burst triggers, not from this "
+            "signal."
         )
     elif _snap and _snap.get("reason", "").startswith("band trending"):
         # Silent but INFORMATIVE: the drift gate vetoes the fade because the
@@ -532,7 +653,7 @@ def _build_user_message(
     else:
         _other_reason = (_snap or {}).get("reason", "")
         snapback_block = (
-            "Band snapback counter-signal: not present (no wick poke-and-snapback in the band "
+            "Band snapback signal: not present (no wick poke-and-snapback in the band "
             f"timeframe this scan"
             + (f"; band state: {_other_reason}" if _other_reason and _other_reason != "flat" else "")
             + ")"
@@ -620,6 +741,7 @@ def _build_user_message(
         "",
         _signals_block(coin),
         _chronos_block(coin),
+        _timesfm_block(coin),
         _squeeze_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
