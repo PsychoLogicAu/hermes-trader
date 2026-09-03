@@ -16,6 +16,10 @@ bar for the existing bypass is a function of how many INDEPENDENT signals
 Corroboration signals at gate time (independent pipelines, not the LLM):
   chronos_aligned — get_chronos_signal_sync median sign vs side (300s cache)
   squeeze_aligned — squeeze_signal Donchian breakout side vs side (300s cache)
+  timesfm_aligned — get_timesfm_signal_sync median sign vs side (300s cache);
+      counted toward the bar only when `late_chase_timesfm_vote` is true —
+      while off, an aligned read yields a [COUNTERFACTUAL] rescue log instead
+      (sample accrual; live bar byte-identical either way).
 
 Both must be exactly True; missing / None / error count as 0. The dynamic bar
 is clamped to >= min_confidence (never undercuts the hard floor). Feature
@@ -81,42 +85,47 @@ def _patch_chronos_fail(monkeypatch):
 def test_corroboration_counts_two_when_both_aligned(monkeypatch):
     _chronos(monkeypatch, aligned=True)
     _squeeze(monkeypatch, aligned=True)
-    n, names = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
     assert n == 2
     assert names == ("chronos_aligned", "squeeze_aligned")
+    assert shadow == ()
 
 
 def test_corroboration_counts_one_when_only_chronos(monkeypatch):
     _chronos(monkeypatch, aligned=True)
     _squeeze(monkeypatch, aligned=False)
-    n, names = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
     assert n == 1
     assert names == ("chronos_aligned",)
+    assert shadow == ()
 
 
 def test_corroboration_zero_when_chronos_error(monkeypatch):
     _chronos(monkeypatch, aligned=True, error="fetch failed")
     _squeeze(monkeypatch, aligned=True)
-    n, names = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
     assert n == 1  # chronos error → not a vote; squeeze still counts
     assert names == ("squeeze_aligned",)
+    assert shadow == ()
 
 
 def test_corroboration_zero_when_both_down(monkeypatch):
     _patch_chronos_fail(monkeypatch)
     _squeeze(monkeypatch, aligned=None, active=False, error="no channel")
-    n, names = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
     assert n == 0
     assert names == ()
+    assert shadow == ()
 
 
 def test_corroboration_none_when_feature_disabled(monkeypatch):
     _chronos(monkeypatch, aligned=True)
     _squeeze(monkeypatch, aligned=True)
-    n, names = executor._late_chase_corroboration(
+    n, names, shadow = executor._late_chase_corroboration(
         _analysis(), _gate(late_chase_dynamic_per_signal_drop=0.0), "long")
     assert n is None  # feature off → gate must behave exactly as before
     assert names == ()
+    assert shadow == ()
 
 
 def test_corroboration_none_when_key_absent(monkeypatch):
@@ -130,9 +139,100 @@ def test_corroboration_none_when_key_absent(monkeypatch):
     _squeeze(monkeypatch, aligned=True)
     g = _gate()
     del g["runner_entry_gate"]["late_chase_dynamic_per_signal_drop"]
-    n, names = executor._late_chase_corroboration(_analysis(), g, "long")
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), g, "long")
     assert n is None
     assert calls == []
+
+
+# ── TimesFM additive vote (shadow by default) ─────────────────────────────────
+
+def _timesfm(monkeypatch, aligned, error=None, enabled=True):
+    sig = types.SimpleNamespace(median_pct=0.3 if aligned else -0.3, error=error)
+    from hermes_trader.agents import timesfm_signal
+    monkeypatch.setattr(timesfm_signal, "get_timesfm_signal_sync",
+                        lambda c, s: sig)
+    return sig
+
+
+def _gate_tf(**over):
+    g = _gate(**over)
+    g["timesfm_signal"] = {"enabled": True}
+    return g
+
+
+def test_timesfm_shadow_vote_off_does_not_count(monkeypatch):
+    # timesfm enabled, flag OFF: aligned read lands in shadow_names only;
+    # the counted n is unchanged (live bar byte-identical).
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    n, names, shadow = executor._late_chase_corroboration(
+        _analysis(), _gate_tf(), "long")
+    assert n == 1
+    assert names == ("chronos_aligned",)
+    assert shadow == ("timesfm_aligned",)
+
+
+def test_timesfm_vote_on_counts_third_signal(monkeypatch):
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    g = _gate_tf(late_chase_timesfm_vote=True)
+    n, names, shadow = executor._late_chase_corroboration(
+        _analysis(), g, "long")
+    assert n == 2
+    assert names == ("chronos_aligned", "timesfm_aligned")
+    assert shadow == ()
+
+
+def test_timesfm_vote_skipped_when_signal_disabled(monkeypatch):
+    # No timesfm_signal key at all → no fetch, no vote, no shadow name.
+    calls = []
+    from hermes_trader.agents import timesfm_signal
+    monkeypatch.setattr(
+        timesfm_signal, "get_timesfm_signal_sync",
+        lambda c, s: calls.append(1) or types.SimpleNamespace(
+            median_pct=0.3, error=None))
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=True)
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    assert n == 2
+    assert calls == []
+    assert shadow == ()
+
+
+def test_timesfm_error_counts_zero(monkeypatch):
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=True)
+    _timesfm(monkeypatch, aligned=True, error="model down")
+    g = _gate_tf(late_chase_timesfm_vote=True)
+    n, names, shadow = executor._late_chase_corroboration(
+        _analysis(), g, "long")
+    assert n == 2  # error → no vote even with the flag on
+    assert "timesfm_aligned" not in names
+    assert shadow == ()
+
+
+def test_timesfm_vote_flag_off_bar_unchanged(monkeypatch):
+    # Gate-level: with the vote flag OFF, conf 0.78 with chronos+timesfm
+    # aligned (squeeze not) stays BLOCKED at bar 0.80 — the live bar.
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    reason = executor._runner_entry_block_reason(
+        _analysis(conf=0.78), _gate_tf())
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason
+
+
+def test_timesfm_vote_flag_on_releases(monkeypatch):
+    # Flag ON: same state → bar drops 0.10 to 0.70 and 0.78 releases.
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    g = _gate_tf(late_chase_timesfm_vote=True)
+    assert executor._runner_entry_block_reason(
+        _analysis(conf=0.78), g) == ""
 
 
 # ── Gate behavior ─────────────────────────────────────────────────────────────

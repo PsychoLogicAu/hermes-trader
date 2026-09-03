@@ -300,6 +300,70 @@ def _chronos_block(coin: str) -> str:
         return ""
 
 
+def _timesfm_block(coin: str) -> str:
+    """TimesFM-3 forward forecast for the AI prompt, when
+    `timesfm_signal.in_prompt` is true. Same determinism contract as
+    _chronos_block: sync, cache-first read (shares the 300s per-coin cache
+    with the executor attach and the gate-side read), '' on disabled /
+    failed / absent so the prompt shape is unchanged.
+
+    The 2026-09-02 two-model sweep: at its sweep-selected context (100 bars
+    vs chronos' 50) TimesFM is the more accurate forecaster on this stream
+    (direction 53% vs 51%) and the two disagree enough to be complementary —
+    hence a SECOND block rather than a replacement. Rendered leaner than the
+    chronos block: headline median + band + early tail, with an explicit
+    cross-check framing so the LLM treats agreement/disagreement between the
+    two forecasters as the informative signal (the sweep's best veto was the
+    both-adverse AND shape).
+    """
+    try:
+        cfg = read_agent_config().get("timesfm_signal", {})
+        if not cfg.get("in_prompt", False) or not cfg.get("enabled", False):
+            return ""
+        from hermes_trader.agents import timesfm_signal as _ts
+        sig = _ts.get_timesfm_signal_sync(coin, "long")
+        if sig is None or sig.error or sig.median_pct is None:
+            return ""
+        med = sig.median_pct
+        span = ""
+        if sig.q_low is not None and sig.q_high is not None and sig.context_last:
+            lo_pct = (sig.q_low - sig.context_last) / sig.context_last * 100
+            hi_pct = (sig.q_high - sig.context_last) / sig.context_last * 100
+            span = f", p10 avg {lo_pct:+.1f}% / p90 avg {hi_pct:+.1f}%"
+        tail_bits = []
+        _tail_steps = 6
+        p10p = sig.q10_path_pct or []
+        p90p = sig.q90_path_pct or []
+        if p10p[:_tail_steps]:
+            tail_bits.append(f"p10 min {min(p10p[:_tail_steps]):+.1f}%")
+        if p90p[:_tail_steps]:
+            tail_bits.append(f"p90 max {max(p90p[:_tail_steps]):+.1f}%")
+        tail_s = f"; early tail, first {_tail_steps * 5}m: {' / '.join(tail_bits)}" if tail_bits else ""
+        hours = sig.horizon * 5 / 60
+        hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
+        # Confidence floor (same HEMI-replay semantics as the chronos block):
+        # the directional note renders only when |median| clears
+        # min_conf_ratio x the model's own p10-p90 spread.
+        min_conf_ratio = _ts.resolve_min_conf_ratio(cfg)
+        ratio = _ts.confidence_ratio(sig)
+        if ratio < min_conf_ratio:
+            note = (f"no confident direction over ~{hours_s}h (median inside its "
+                    f"own band, ratio {ratio:.2f} < {min_conf_ratio:.2f})")
+        elif med > 0:
+            note = f"sees continuation over ~{hours_s}h"
+        else:
+            note = f"expects the move to FADE within ~{hours_s}h"
+        return (
+            "TimesFM-3 forecast (shadow signal, longer 5m context than Chronos — "
+            f"cross-check the two, not obey either single one):\n"
+            f"  - Path-average over the next ~{hours_s}h: {med:+.2f}%{span}{tail_s} — "
+            + note + "."
+        )
+    except Exception as e:
+        logger.debug(f"[research] timesfm block failed for {coin}: {e}")
+        return ""
+
+
 def _squeeze_block(coin: str) -> str:
     """Squeeze-breakout (1h Donchian) state for the AI prompt, when
     `squeeze_signal` is enabled. Same determinism contract as _chronos_block:
@@ -620,6 +684,7 @@ def _build_user_message(
         "",
         _signals_block(coin),
         _chronos_block(coin),
+        _timesfm_block(coin),
         _squeeze_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
