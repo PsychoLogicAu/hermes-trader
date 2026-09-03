@@ -128,8 +128,13 @@ def test_ratchet_persists_state_on_change():
 
 # ── fast_exit_pass: end-to-end with stubbed network ──────────────────────────
 
-def _candle(h, l):
-    return types.SimpleNamespace(h=h, l=l)
+def _candle(h, l, t=None):
+    # t defaults to "now" (the still-forming candle) so pre-existing tests keep
+    # treating their fake candles as post-entry. Tests that exercise the
+    # pre-entry filter pass an explicit old t.
+    if t is None:
+        t = int(time.time() * 1000)
+    return types.SimpleNamespace(t=t, h=h, l=l)
 
 
 def test_fast_exit_pass_catches_unsampled_spike_and_closes(monkeypatch):
@@ -227,6 +232,92 @@ def test_fast_exit_pass_tolerates_fetch_failure(monkeypatch):
     )
     # No mid, no candles -> pass bails out without firing or raising.
     assert executor.fast_exit_pass() == []
+
+
+# ── pre-entry spike must not arm the floor (JUP/ARB 2026-09-03) ──────────────
+
+def _live_policy() -> ExitPolicy:
+    """Mirror the live dsl_exit config: breakeven lock + 0.25 retrace."""
+    return ExitPolicy(
+        max_loss_pct=5.0, max_loss_roe_pct=30.0, protect_pct=1.0,
+        retrace_threshold=0.25, hard_timeout_minutes=1800.0,
+        breakeven_trigger_pct=0.7, breakeven_lock_pct=0.05,
+        phase2_tiers=[RetraceTier(0.0, 0.25)],
+    )
+
+
+def test_fast_exit_pass_ignores_pre_entry_spike_long(monkeypatch):
+    """JUP repro (2026-09-03 09:03).
+
+    Entry @ 0.22656, leverage 5, entered a few seconds ago. The last three
+    1m candles fetched by the pass are: two that CLOSED before entry (their
+    highs carry a +2.2% pre-entry spike at 0.23163) and the still-forming
+    current candle (flat, high ≈ mid ≈ 0.2266).
+
+    WITHOUT the fix the pre-entry high ratchets the peak to 0.23163 on the
+    very first daemon tick -> peak +2.2% arms both the phase-2 retrace floor
+    and the breakeven lock -> the flat mark is instantly "below floor" ->
+    floor_breach close at ~0% (fees only). The position never had post-entry
+    price action to give back.
+
+    WITH the fix the pre-entry candles are filtered out, the peak stays at
+    entry (the flat current candle never beats it), no floor arms, and the
+    position holds.
+    """
+    entry_px = 0.22656
+    now_ms = int(time.time() * 1000)
+    dsl_exit.register_position(
+        coin="JUP", side="long", entry_px=entry_px, leverage=5,
+        entry_time=now_ms / 1000.0, policy=_live_policy(),
+    )
+    # Two closed candles that pre-date the entry, holding a +2.2% spike in
+    # their highs; plus the still-forming candle (t=now) which is flat.
+    monkeypatch.setattr(executor, "fetch_hl_candles", lambda *a, **k: [
+        _candle(0.23163, 0.22786, t=now_ms - 120_000),  # 09:00, closed pre-entry
+        _candle(0.22849, 0.22564, t=now_ms - 60_000),   # 09:01, closed pre-entry
+        _candle(0.22662, 0.22541, t=now_ms),            # 09:03, still forming
+    ])
+    # Live mid is flat (a hair above entry), no post-entry move.
+    monkeypatch.setattr(executor, "get_hl_price", lambda coin: 0.2266)
+
+    exits = executor.fast_exit_pass()
+    assert exits == [], f"pre-entry spike must not close a fresh position: {exits}"
+    tracker = dsl_exit._active_positions.get("JUP_long")
+    assert tracker is not None
+    # Peak must NOT have ratcheted to the pre-entry spike high (0.23163). It
+    # may only have moved off the flat current-candle high (0.22662) or stay
+    # at entry — i.e. far below the spike.
+    assert tracker.peak_px <= 0.22662 + 1e-9
+    assert tracker.peak_px < 0.23000, "peak ratcheted off a pre-entry candle"
+
+
+def test_fast_exit_pass_ignores_pre_entry_dip_short(monkeypatch):
+    """Mirror of the JUP case on the short side.
+
+    A pre-entry LOW (dip) is the short-side analogue: ratcheting the peak off
+    it would arm the trailing floor and instantly "close" a fresh short that
+    never moved. The filter must drop pre-entry lows too.
+    """
+    entry_px = 0.22656
+    now_ms = int(time.time() * 1000)
+    dsl_exit.register_position(
+        coin="MIR", side="short", entry_px=entry_px, leverage=5,
+        entry_time=now_ms / 1000.0, policy=_live_policy(),
+    )
+    monkeypatch.setattr(executor, "fetch_hl_candles", lambda *a, **k: [
+        _candle(0.22990, 0.22149, t=now_ms - 120_000),  # pre-entry dip low 0.22149
+        _candle(0.22900, 0.22400, t=now_ms - 60_000),   # pre-entry
+        _candle(0.22690, 0.22620, t=now_ms),            # forming, flat
+    ])
+    monkeypatch.setattr(executor, "get_hl_price", lambda coin: 0.2266)
+
+    exits = executor.fast_exit_pass()
+    assert exits == [], f"pre-entry dip must not close a fresh short: {exits}"
+    tracker = dsl_exit._active_positions.get("MIR_short")
+    assert tracker is not None
+    # Peak (the best low) must not have ratcheted down to the pre-entry 0.22149.
+    assert tracker.peak_px >= 0.22620 - 1e-9
+    assert tracker.peak_px > 0.22300, "peak ratcheted off a pre-entry candle"
 
 
 # ── daemon wiring (static: trading_loop.py is not importable) ────────────────

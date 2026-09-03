@@ -40,7 +40,8 @@ from hermes_trader.client.exchange import (
     place_hl_trigger_order,
     set_leverage,
 )
-from hermes_trader.client.hl_client import fetch_account_state, fetch_hl_candles, resolve_user_address
+from hermes_trader.client.hl_client import (_MS_PER_CANDLE, fetch_account_state,
+                                            fetch_hl_candles, resolve_user_address)
 
 logger = logging.getLogger(__name__)
 
@@ -1581,9 +1582,14 @@ def fast_exit_pass(
     highs: Dict[str, List[float]] = {t.coin: [] for t in trackers}
     lows: Dict[str, List[float]] = {t.coin: [] for t in trackers}
 
+    # ms per candle, so we can tell which fetched candles still contain
+    # post-entry price action (see the loop below).
+    interval_ms = _MS_PER_CANDLE.get(candle_interval, 60_000)
     for tr in trackers:
         try:
             # Fresh mid for the floor check + also a candidate peak extreme.
+            # The mid is the live current print — always post-entry — so it is
+            # unconditionally ratchetable.
             mid = get_hl_price(tr.coin)
             if mid > 0:
                 mids[tr.coin] = mid
@@ -1592,8 +1598,25 @@ def fast_exit_pass(
             # Fresh 1m candle extremes for the peak ratchet. fresh=True
             # bypasses the read-side TTL so the still-forming candle is seen
             # every tick (the point of the tighter cadence).
+            #
+            # CRITICAL: only ratchet from candles that still contain
+            # POST-ENTRY price action. fetch_hl_candles returns the last N
+            # candles, and the ones that fully closed before this position's
+            # entry carry a pre-entry spike in their high/low. Ratcheting the
+            # peak off them would arm the breakeven / phase-2 floor on the
+            # very first daemon tick (a few seconds after entry) and close the
+            # position at ~flat — fees only. That is exactly what killed JUP
+            # (2026-09-03 09:03: the 09:00 candle high was +2.2% pre-entry)
+            # and ARB (09:48: the 09:46 candle high was +1.1% pre-entry),
+            # both closed in <15s. Keep only candles whose window overlaps
+            # (entry, now]: open + interval > entry_ms.
             candles = fetch_hl_candles(tr.coin, candle_interval, candle_count, fresh=True)
+            entry_ms = tr.entry_time * 1000
             for c in candles:
+                if c.t + interval_ms <= entry_ms:
+                    # Closed before the position opened — pre-entry price
+                    # action the position can no longer give back.
+                    continue
                 highs[tr.coin].append(float(c.h))
                 lows[tr.coin].append(float(c.l))
         except Exception as e:
