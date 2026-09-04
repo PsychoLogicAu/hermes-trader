@@ -1008,6 +1008,10 @@ def parse_verdict(
                 verdict = "SHORT"
             elif raw == "CLOSE":
                 verdict = "CLOSE"
+            elif raw == "VETO":
+                # Active rejection (2026-09-03): "this setup is a bad idea",
+                # distinct from neutral PASS. Never executes, never upgrades.
+                verdict = "VETO"
 
             confidence = parsed.get("confidence", 0)
             side = parsed.get("side") if parsed.get("side") in ("long", "short") else None
@@ -1042,7 +1046,7 @@ def parse_verdict(
         side = "long"
     elif verdict == "SHORT":
         side = "short"
-    # CLOSE/PASS keep whatever side was parsed (unused downstream).
+    # CLOSE/PASS/VETO keep whatever side was parsed (unused downstream).
 
     return {
         "verdict": verdict,
