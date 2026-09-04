@@ -19,7 +19,13 @@ Corroboration signals at gate time (independent pipelines, not the LLM):
   timesfm_aligned — get_timesfm_signal_sync median sign vs side (300s cache);
       counted toward the bar only when `late_chase_timesfm_vote` is true —
       while off, an aligned read yields a [COUNTERFACTUAL] rescue log instead
-      (sample accrual; live bar byte-identical either way).
+      (sample accrual; live bar byte-identical either way). When counted, the
+      tf vote lowers the bar by its OWN `late_chase_timesfm_drop` (separate
+      knob, default 0.0 = inert; live 0.03), NOT the shared
+      `late_chase_dynamic_per_signal_drop` (chronos/squeeze stay at 0.10).
+      The weak separate lever is what makes the AND shape binding: tf alone
+      (0.90-0.03=0.87) can never release (LLM tops out ~0.82), while
+      chronos+tf reaches 0.90-0.10-0.03=0.77 and releases the 0.78 rung.
 
 Both must be exactly True; missing / None / error count as 0. The dynamic bar
 is clamped to >= min_confidence (never undercuts the hard floor). Feature
@@ -28,6 +34,7 @@ bar, byte-identical to the pre-feature gate, and NO signal fetches.
 
 Long side only: the late-trend-chase block only fires for side == "long".
 """
+import logging
 import types
 
 from hermes_trader.agents import executor
@@ -42,6 +49,8 @@ def _gate(**over):
         "bypass_late_trend_chase": True,
         "bypass_late_trend_chase_min_conf": 0.90,
         "late_chase_dynamic_per_signal_drop": 0.10,
+        "late_chase_timesfm_vote": False,
+        "late_chase_timesfm_drop": 0.0,
     }
     g.update(over)
     return {"runner_entry_gate": g}
@@ -225,14 +234,67 @@ def test_timesfm_vote_flag_off_bar_unchanged(monkeypatch):
     assert "bar 0.80" in reason
 
 
-def test_timesfm_vote_flag_on_releases(monkeypatch):
-    # Flag ON: same state → bar drops 0.10 to 0.70 and 0.78 releases.
+def test_timesfm_vote_on_releases(monkeypatch):
+    # Vote ON with its OWN (weaker) tf drop 0.03: chronos (0.10) + timesfm
+    # (0.03) → bar 0.90-0.13=0.77, so conf 0.78 (the live LLM ceiling)
+    # releases. This is the intended AND-rung, distinct from the shared-0.10
+    # over-release the separate knob exists to avoid.
     _chronos(monkeypatch, aligned=True)
     _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
-    g = _gate_tf(late_chase_timesfm_vote=True)
+    g = _gate_tf(late_chase_timesfm_vote=True, late_chase_timesfm_drop=0.03)
     assert executor._runner_entry_block_reason(
         _analysis(conf=0.78), g) == ""
+
+
+def test_timesfm_vote_on_tf_drop_defaults_zero_keeps_chronos_bar(monkeypatch):
+    # Vote ON but tf_drop at its 0.0 default (inert): the tf vote contributes
+    # nothing, so the bar is just chronos's shared 0.10 → 0.80. Conf 0.78 <
+    # 0.80 stays BLOCKED. Pins that the knob is separate and defaults off —
+    # flipping the vote alone never silently re-prices the tf vote at 0.10.
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    reason = executor._runner_entry_block_reason(
+        _analysis(conf=0.78), _gate_tf(late_chase_timesfm_vote=True))
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason
+
+
+def test_timesfm_alone_can_never_release(monkeypatch):
+    # Only timesfm aligned (chronos + squeeze both not). Vote ON, tf_drop
+    # 0.03 → bar 0.90-0.03=0.87. Even the LLM's top confidence (0.82) is
+    # below 0.87, so a timesfm-only vote can never unlock a trade: the value
+    # is the AND shape (tf corroborating chronos), not tf per se.
+    _chronos(monkeypatch, aligned=False)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    g = _gate_tf(late_chase_timesfm_vote=True, late_chase_timesfm_drop=0.03)
+    reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.87" in reason
+
+
+def test_timesfm_vote_off_tf_drop_is_ignored(monkeypatch, caplog):
+    # Vote OFF: even with a positive tf_drop present, the tf vote is not
+    # counted and its drop is not applied — chronos alone → bar 0.80, and the
+    # [COUNTERFACTUAL] rescue line uses tf_drop, not the shared drop.
+    _chronos(monkeypatch, aligned=True)
+    _squeeze(monkeypatch, aligned=False)
+    _timesfm(monkeypatch, aligned=True)
+    g = _gate_tf(late_chase_timesfm_vote=False, late_chase_timesfm_drop=0.03)
+    # conf 0.78 < 0.80 (tf vote not counted) → still blocked at the chronos bar,
+    # and the rescue candidate bar is the tf-drop (0.77), not shared-drop (0.70)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.78), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason
+    rescued = [r for r in caplog.records
+               if "RESCUED by timesfm additive vote" in r.getMessage()]
+    assert len(rescued) == 1
+    assert "candidate bar 0.77" in rescued[0].getMessage()
+    assert "candidate bar 0.70" not in rescued[0].getMessage()
 
 
 # ── Gate behavior ─────────────────────────────────────────────────────────────
