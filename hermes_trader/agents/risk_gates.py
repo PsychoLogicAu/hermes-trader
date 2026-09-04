@@ -318,6 +318,13 @@ _CRYPTO_COINS = frozenset([
 
 
 def correlation_cap(ctx: GateContext, max_crypto_correlated: int) -> GateResult:
+    """Cap how many MAJOR-crypto longs we hold concurrently (majors are one
+    macro trade). Scoped 2026-09-04: the cap constrains adding ANOTHER major —
+    a non-major candidate (ZEC, LIT, CASHCAT, ...) is not correlated with the
+    majors basket in _CRYPTO_COINS and must not be blocked by it. Previously a
+    full majors book rejected every new long regardless of the candidate's own
+    membership, which cost hours of trend entry on uncorrelated names (replay:
+    12 solo-cap blocks in one evening session, nearly all non-majors)."""
     # Only cap long correlation
     if ctx.trade_side != "long":
         return {"pass": True}
@@ -326,6 +333,9 @@ def correlation_cap(ctx: GateContext, max_crypto_correlated: int) -> GateResult:
         if p["coin"] in _CRYPTO_COINS and p["side"] == "long"
     )
     if existing_crypto_long < max_crypto_correlated:
+        return {"pass": True}
+    # Cap is reached; it only binds candidates that are themselves majors.
+    if ctx.coin not in _CRYPTO_COINS:
         return {"pass": True}
     return {"pass": False, "reason": f"crypto long correlation cap reached ({existing_crypto_long}/{max_crypto_correlated})"}
 
