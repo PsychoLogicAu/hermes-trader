@@ -15,17 +15,20 @@ bar for the existing bypass is a function of how many INDEPENDENT signals
 
 Corroboration signals at gate time (independent pipelines, not the LLM):
   chronos_aligned — get_chronos_signal_sync median sign vs side (300s cache)
-  squeeze_aligned — squeeze_signal Donchian breakout side vs side (300s cache)
   timesfm_aligned — get_timesfm_signal_sync median sign vs side (300s cache);
       counted toward the bar only when `late_chase_timesfm_vote` is true —
       while off, an aligned read yields a [COUNTERFACTUAL] rescue log instead
       (sample accrual; live bar byte-identical either way). When counted, the
       tf vote lowers the bar by its OWN `late_chase_timesfm_drop` (separate
       knob, default 0.0 = inert; live 0.03), NOT the shared
-      `late_chase_dynamic_per_signal_drop` (chronos/squeeze stay at 0.10).
+      `late_chase_dynamic_per_signal_drop` (chronos stays at 0.10).
       The weak separate lever is what makes the AND shape binding: tf alone
       (0.90-0.03=0.87) can never release (LLM tops out ~0.82), while
       chronos+tf reaches 0.90-0.10-0.03=0.77 and releases the 0.78 rung.
+
+(The squeeze_aligned Donchian breakout vote was removed with the
+squeeze_breakout cull 2026-09-04 — forward P/L sim −$102.55/210 entries,
+see .hermes/WATCHLIST.md §D.7. The bar now maxes at 2 signals.)
 
 Both must be exactly True; missing / None / error count as 0. The dynamic bar
 is clamped to >= min_confidence (never undercuts the hard floor). Feature
@@ -74,15 +77,6 @@ def _chronos(monkeypatch, aligned, error=None):
     return sig
 
 
-def _squeeze(monkeypatch, aligned=None, active=True, error=None):
-    from hermes_trader.agents import squeeze_signal
-    sig = types.SimpleNamespace(active=active, side="long" if aligned else "short",
-                                error=error)
-    monkeypatch.setattr(
-        squeeze_signal, "get_squeeze_signal_sync", lambda c, s: sig)
-    return sig
-
-
 def _patch_chronos_fail(monkeypatch):
     monkeypatch.setattr(
         executor, "get_chronos_signal_sync",
@@ -91,18 +85,10 @@ def _patch_chronos_fail(monkeypatch):
 
 # ── Corroboration helper ──────────────────────────────────────────────────────
 
-def test_corroboration_counts_two_when_both_aligned(monkeypatch):
+def test_corroboration_counts_one_when_chronos_only(monkeypatch):
+    # squeeze_aligned vote removed (squeeze_breakout cull 2026-09-04):
+    # chronos aligned alone is the max-count case.
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
-    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
-    assert n == 2
-    assert names == ("chronos_aligned", "squeeze_aligned")
-    assert shadow == ()
-
-
-def test_corroboration_counts_one_when_only_chronos(monkeypatch):
-    _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
     assert n == 1
     assert names == ("chronos_aligned",)
@@ -111,16 +97,14 @@ def test_corroboration_counts_one_when_only_chronos(monkeypatch):
 
 def test_corroboration_zero_when_chronos_error(monkeypatch):
     _chronos(monkeypatch, aligned=True, error="fetch failed")
-    _squeeze(monkeypatch, aligned=True)
     n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
-    assert n == 1  # chronos error → not a vote; squeeze still counts
-    assert names == ("squeeze_aligned",)
+    assert n == 0  # chronos error → not a vote; no other signals remain
+    assert names == ()
     assert shadow == ()
 
 
 def test_corroboration_zero_when_both_down(monkeypatch):
     _patch_chronos_fail(monkeypatch)
-    _squeeze(monkeypatch, aligned=None, active=False, error="no channel")
     n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
     assert n == 0
     assert names == ()
@@ -129,7 +113,6 @@ def test_corroboration_zero_when_both_down(monkeypatch):
 
 def test_corroboration_none_when_feature_disabled(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     n, names, shadow = executor._late_chase_corroboration(
         _analysis(), _gate(late_chase_dynamic_per_signal_drop=0.0), "long")
     assert n is None  # feature off → gate must behave exactly as before
@@ -145,7 +128,6 @@ def test_corroboration_none_when_key_absent(monkeypatch):
         executor, "get_chronos_signal_sync",
         lambda c, s: calls.append(1) or types.SimpleNamespace(
             median_pct=0.2, error=None))
-    _squeeze(monkeypatch, aligned=True)
     g = _gate()
     del g["runner_entry_gate"]["late_chase_dynamic_per_signal_drop"]
     n, names, shadow = executor._late_chase_corroboration(_analysis(), g, "long")
@@ -173,7 +155,6 @@ def test_timesfm_shadow_vote_off_does_not_count(monkeypatch):
     # timesfm enabled, flag OFF: aligned read lands in shadow_names only;
     # the counted n is unchanged (live bar byte-identical).
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     n, names, shadow = executor._late_chase_corroboration(
         _analysis(), _gate_tf(), "long")
@@ -184,7 +165,6 @@ def test_timesfm_shadow_vote_off_does_not_count(monkeypatch):
 
 def test_timesfm_vote_on_counts_third_signal(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     g = _gate_tf(late_chase_timesfm_vote=True)
     n, names, shadow = executor._late_chase_corroboration(
@@ -196,6 +176,8 @@ def test_timesfm_vote_on_counts_third_signal(monkeypatch):
 
 def test_timesfm_vote_skipped_when_signal_disabled(monkeypatch):
     # No timesfm_signal key at all → no fetch, no vote, no shadow name.
+    # (squeeze vote removed with the 2026-09-04 cull → chronos is the only
+    # shared-drop signal, so n == 1 here.)
     calls = []
     from hermes_trader.agents import timesfm_signal
     monkeypatch.setattr(
@@ -203,21 +185,21 @@ def test_timesfm_vote_skipped_when_signal_disabled(monkeypatch):
         lambda c, s: calls.append(1) or types.SimpleNamespace(
             median_pct=0.3, error=None))
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
-    assert n == 2
+    assert n == 1
+    assert names == ("chronos_aligned",)
     assert calls == []
     assert shadow == ()
 
 
 def test_timesfm_error_counts_zero(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     _timesfm(monkeypatch, aligned=True, error="model down")
     g = _gate_tf(late_chase_timesfm_vote=True)
     n, names, shadow = executor._late_chase_corroboration(
         _analysis(), g, "long")
-    assert n == 2  # error → no vote even with the flag on
+    assert n == 1  # error → no vote even with the flag on; chronos alone
+    assert names == ("chronos_aligned",)
     assert "timesfm_aligned" not in names
     assert shadow == ()
 
@@ -226,7 +208,6 @@ def test_timesfm_vote_flag_off_bar_unchanged(monkeypatch):
     # Gate-level: with the vote flag OFF, conf 0.78 with chronos+timesfm
     # aligned (squeeze not) stays BLOCKED at bar 0.80 — the live bar.
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     reason = executor._runner_entry_block_reason(
         _analysis(conf=0.78), _gate_tf())
@@ -240,7 +221,6 @@ def test_timesfm_vote_on_releases(monkeypatch):
     # releases. This is the intended AND-rung, distinct from the shared-0.10
     # over-release the separate knob exists to avoid.
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     g = _gate_tf(late_chase_timesfm_vote=True, late_chase_timesfm_drop=0.03)
     assert executor._runner_entry_block_reason(
@@ -253,7 +233,6 @@ def test_timesfm_vote_on_tf_drop_defaults_zero_keeps_chronos_bar(monkeypatch):
     # 0.80 stays BLOCKED. Pins that the knob is separate and defaults off —
     # flipping the vote alone never silently re-prices the tf vote at 0.10.
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     reason = executor._runner_entry_block_reason(
         _analysis(conf=0.78), _gate_tf(late_chase_timesfm_vote=True))
@@ -267,7 +246,6 @@ def test_timesfm_alone_can_never_release(monkeypatch):
     # below 0.87, so a timesfm-only vote can never unlock a trade: the value
     # is the AND shape (tf corroborating chronos), not tf per se.
     _chronos(monkeypatch, aligned=False)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     g = _gate_tf(late_chase_timesfm_vote=True, late_chase_timesfm_drop=0.03)
     reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
@@ -280,7 +258,6 @@ def test_timesfm_vote_off_tf_drop_is_ignored(monkeypatch, caplog):
     # counted and its drop is not applied — chronos alone → bar 0.80, and the
     # [COUNTERFACTUAL] rescue line uses tf_drop, not the shared drop.
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     _timesfm(monkeypatch, aligned=True)
     g = _gate_tf(late_chase_timesfm_vote=False, late_chase_timesfm_drop=0.03)
     # conf 0.78 < 0.80 (tf vote not counted) → still blocked at the chronos bar,
@@ -301,7 +278,6 @@ def test_timesfm_vote_off_tf_drop_is_ignored(monkeypatch, caplog):
 
 def test_no_corroboration_keeps_fixed_bar(monkeypatch):
     _chronos(monkeypatch, aligned=False)
-    _squeeze(monkeypatch, aligned=False)
     reason = executor._runner_entry_block_reason(
         _analysis(conf=0.86), _gate())
     assert reason.startswith("runner_gate_blocked (late trend-only chase")
@@ -313,7 +289,6 @@ def test_no_corroboration_keeps_fixed_bar(monkeypatch):
 
 def test_one_signal_lowers_bar_to_080(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=False)
     # 0.82 >= 0.80 (1-signal bar) but < 0.90 (old fixed bar) → allowed
     assert executor._runner_entry_block_reason(
         _analysis(conf=0.82), _gate()) == ""
@@ -324,14 +299,19 @@ def test_one_signal_lowers_bar_to_080(monkeypatch):
     assert "bar 0.80" in reason
 
 
-def test_two_signals_lower_bar_to_070(monkeypatch):
+def test_two_shared_signal_rung_gone_after_squeeze_cull(monkeypatch):
+    # The squeeze_breakout cull (2026-09-04) removed the squeeze_aligned
+    # vote, so the n=2 shared-drop rung (0.90 - 2*0.10 = 0.70) no longer
+    # exists: chronos is the only shared-drop signal, so the best dynamic
+    # bar is 0.80. Conf 0.78 (the live LLM ceiling) that the 0.70 rung used
+    # to release is now BLOCKED — the cull is strictly conservative. (The
+    # AND rung via the timesfm vote still reaches 0.77 —
+    # test_timesfm_vote_on_releases.)
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
-    # The current live LLM confidence (0.78) with full corroboration → in
-    assert executor._runner_entry_block_reason(
-        _analysis(conf=0.78), _gate()) == ""
-    # The floor still binds: 0.70 is the bar; anything below is caught by the
-    # min-confidence check first (different message).
+    reason = executor._runner_entry_block_reason(_analysis(conf=0.78), _gate())
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason
+    # The floor still binds below min_confidence (different message).
     reason = executor._runner_entry_block_reason(
         _analysis(conf=0.69), _gate())
     assert "confidence 0.69 < 0.70" in reason
@@ -339,7 +319,6 @@ def test_two_signals_lower_bar_to_070(monkeypatch):
 
 def test_dynamic_bar_never_undercuts_min_confidence(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     # min_confidence 0.82 sits above (0.90 - 2*0.10 = 0.70): the bar clamps
     # to 0.82, so conf == min_confidence enters (no crash, no false block at
     # the late-chase check), and below-min_conf is the min-conf check's job.
@@ -351,7 +330,6 @@ def test_dynamic_bar_never_undercuts_min_confidence(monkeypatch):
 
 def test_feature_off_matches_old_behavior(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     g = _gate(late_chase_dynamic_per_signal_drop=0.0)
     reason = executor._runner_entry_block_reason(_analysis(conf=0.78), g)
     assert reason.startswith("runner_gate_blocked (late trend-only chase")
@@ -365,7 +343,6 @@ def test_feature_off_makes_no_signal_calls(monkeypatch):
         executor, "get_chronos_signal_sync",
         lambda c, s: calls.append(1) or types.SimpleNamespace(
             median_pct=0.2, error=None))
-    _squeeze(monkeypatch, aligned=True)
     g = _gate(late_chase_dynamic_per_signal_drop=0.0)
     assert executor._runner_entry_block_reason(_analysis(conf=0.78), g).startswith(
         "runner_gate_blocked (late trend-only chase")
@@ -374,18 +351,16 @@ def test_feature_off_makes_no_signal_calls(monkeypatch):
 
 def test_bypass_flag_still_required_for_dynamic_bar(monkeypatch):
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     g = _gate(bypass_late_trend_chase=False)
     reason = executor._runner_entry_block_reason(_analysis(conf=0.78), g)
     assert reason.startswith("runner_gate_blocked (late trend-only chase")
-    assert "bar 0.70" in reason  # bar computed, but the flag gates the allow
+    assert "bar 0.80" in reason  # bar computed, but the flag gates the allow
 
 
 def test_short_path_untouched_by_corroboration(monkeypatch):
     # Shorts hit the structured_short block, not late-chase; the helper must
     # not be consulted and the message must not carry a dynamic bar.
     _chronos(monkeypatch, aligned=True)
-    _squeeze(monkeypatch, aligned=True)
     reason = executor._runner_entry_block_reason(_analysis(
         conf=0.80, side="short", downtrend_momentum_fired=False,
         composite_score=10, slow_burn_count=0),
@@ -403,7 +378,6 @@ def test_fresh_impulse_entry_never_takes_the_dynamic_path(monkeypatch):
         executor, "get_chronos_signal_sync",
         lambda c, s: calls.append(1) or types.SimpleNamespace(
             median_pct=None, error=None))
-    _squeeze(monkeypatch, aligned=True)
     a = _analysis(conf=0.75, composite_score=35, slow_burn_count=0,
                   volume_spike_fired=True, breakout_fired=True)
     assert executor._runner_entry_block_reason(a, _gate()) == ""

@@ -364,68 +364,6 @@ def _timesfm_block(coin: str) -> str:
         return ""
 
 
-def _squeeze_block(coin: str) -> str:
-    """Squeeze-breakout (1h Donchian) state for the AI prompt, when
-    `squeeze_signal` is enabled. Same determinism contract as _chronos_block:
-    sync, cache-first read (the executor's attach + gate-side read share the
-    300s per-coin cache, so this is normally a pure dict read); '' on disabled
-    / failed / absent data so the prompt shape is unchanged.
-
-    Rendered as CONTEXT to weigh, not a trigger: the breakout rule's OOS edge
-    came from FRESH, aligned breakouts, and the research's worst-loss bucket
-    was same-side re-entries AT THE EXTREME with no fresh breakout
-    ("chasing without confirmation"). The `extreme_no_breakout` flag is the
-    deterministic encoding of that bucket and is also the input the
-    squeeze_extreme shadow gate consumes — the prompt surfaces it so the LLM
-    sees the same shape the gate does.
-    """
-    try:
-        cfg = read_agent_config().get("squeeze_signal", {})
-        if not cfg.get("enabled", False):
-            return ""
-        from hermes_trader.agents.squeeze_signal import get_squeeze_signal_sync
-        sig = get_squeeze_signal_sync(coin, "long")
-        if sig is None:
-            return ""
-        lines = ["Squeeze / 48h channel state (1h Donchian — weigh, don't obey):"]
-        if sig.active:
-            side_word = "long" if sig.side == "long" else "short"
-            lines.append(
-                f"  - FRESH {side_word.upper()} breakout: the last confirmed 1h close "
-                f"broke the prior 48h {'high' if sig.side == 'long' else 'low'} by "
-                f"{sig.ext_pct:+.2f}% ({sig.fresh_age_min:.0f}m ago, decisive body). "
-                "This is the shape the breakout rule rewards — a fresh aligned "
-                "breakout CONFIRMS a same-side entry at the extreme."
-            )
-        else:
-            lines.append(f"  - No fresh 1h breakout (last check: {sig.error}).")
-        if sig.chan_pos is not None:
-            pos = sig.chan_pos
-            if pos > 1.0:
-                zone = "ABOVE the 48h channel high"
-            elif pos < 0.0:
-                zone = "BELOW the 48h channel low"
-            elif pos > 0.95:
-                zone = f"at the very top of the 48h range ({pos:.0%})"
-            elif pos < 0.05:
-                zone = f"at the very bottom of the 48h range ({pos:.0%})"
-            else:
-                zone = f"mid-range (48h position {pos:.0%})"
-            lines.append(f"  - Price now {zone}.")
-        if sig.extreme_no_breakout:
-            lines.append(
-                "  - CAUTION: the candidate side is at the channel extreme with NO "
-                "fresh breakout confirming it — the 'chasing without confirmation' "
-                "shape the 15-day ledger's worst losses came from. Down-weight "
-                "conviction on a same-side late entry; a fresh aligned breakout "
-                "(above) is what distinguishes continuation from the chase."
-            )
-        return "\n".join(lines)
-    except Exception as e:
-        logger.debug(f"[research] squeeze block failed for {coin}: {e}")
-        return ""
-
-
 def _build_user_message(
     coin: str,
     perception: Dict[str, Any],
@@ -742,7 +680,6 @@ def _build_user_message(
         _signals_block(coin),
         _chronos_block(coin),
         _timesfm_block(coin),
-        _squeeze_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
         f"Recent news: {news}",
