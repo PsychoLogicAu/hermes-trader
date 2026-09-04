@@ -1,15 +1,23 @@
-"""Tests for the duelist-veto conviction gate (the 5th shadow-gate member).
+"""Tests for the duelist-veto conviction gate (re-keyed 2026-09-03).
 
-The gate encodes the strict veto validated by the 2026-08-31 48h replay
-(Aug 29 09:07 → Aug 31 09:07 UTC, 41 executed trades): when the primary
-issues a DIRECTIONAL call (LONG/SHORT) and the A/B duelist abstains with
-PASS (or takes the opposite side), the entry is vetoed unless it clears
-the elevated-conviction bar (conf >= min_conf OR composite >= min_composite).
+The gate fires when the primary issues a DIRECTIONAL call (LONG/SHORT) and
+the A/B duelist EXPLICITLY rejects the setup — verdict VETO — or takes the
+opposite side, unless the entry clears the elevated-conviction bar
+(conf >= min_conf OR composite >= min_composite).
+
+The re-key: the gate used to fire on the duelist's PASS (treating every
+abstention as an objection). With VETO now a first-class verdict ("this setup
+is a trap — avoid like the plague") and PASS redefined in the prompt as
+neutral abstention, PASS no longer vetoes. Motivation: the 2026-09-03 headroom
+replay found the PASS-keyed veto blocking 27/32 executed entries (the duelist
+PASSes ~84% of everything) with a blocked cohort net +$0.57 — bare abstention
+carries no quality signal.
 
 Shadow-mode semantics (the live default) are tested here too: the gate
 MUST structurally pass and carry `shadow_would_block` until shadow_mode
 is flipped off. Fail-safes: disabled / no duelist verdict / duelist agrees
-with the primary all yield a plain pass — a data gap can never block.
+with the primary / duelist PASS all yield a plain pass — a data gap can
+never block.
 """
 from __future__ import annotations
 
@@ -25,7 +33,7 @@ from hermes_trader.agents.risk_gates import (  # noqa: E402
 
 
 def _ctx(
-    verdict: str | None = "PASS",
+    verdict: str | None = "VETO",
     confidence: float = 0.75,
     composite: float = 40.0,
     trade_side: str = "long",
@@ -53,12 +61,12 @@ CFG_LIVE = {"enabled": True, "shadow_mode": False}
 # ── Fail-safes (no-opinion pass) ────────────────────────────────────────────
 
 def test_disabled_passes():
-    r = duelist_veto_gate(_ctx(verdict="PASS"), {"enabled": False})
+    r = duelist_veto_gate(_ctx(verdict="VETO"), {"enabled": False})
     assert r == {"pass": True}
 
 
 def test_missing_config_passes():
-    r = duelist_veto_gate(_ctx(verdict="PASS"), {})
+    r = duelist_veto_gate(_ctx(verdict="VETO"), {})
     assert r == {"pass": True}
 
 
@@ -80,28 +88,39 @@ def test_duelist_agrees_short_passes():
     assert r == {"pass": True}
 
 
-def test_duelist_pass_on_directional_side_vetoes():
-    # The veto shape: the primary is directional (long/short) and the duelist
-    # abstained with PASS. (A PASS *primary* routes to "none" and never
-    # reaches this gate unless a force-execute hint upgrades the side, in
-    # which case a duelist PASS is a genuine disagreement and vetoes there.)
+def test_unrecognised_verdict_passes():
+    r = duelist_veto_gate(_ctx(verdict="MAYBE"), CFG_SHADOW)
+    assert r == {"pass": True}
+
+
+# ── THE re-key: PASS is neutral abstention, NOT a veto ──────────────────────
+
+def test_duelist_pass_no_longer_vetoes():
+    # The old rule vetoed here. Under the VETO key a bare PASS carries no
+    # objection — "not excited" != "avoid like the plague".
     r = duelist_veto_gate(_ctx(verdict="PASS", trade_side="long"), CFG_SHADOW)
-    assert r["pass"] is True
-    assert r["shadow_would_block"] is True
+    assert r == {"pass": True}
 
 
-# ── Shadow mode: structurally pass + would-block marker ─────────────────────
+def test_duelist_pass_no_longer_vetoes_lowered_bars():
+    # Not even with the escape bars set unreachable — PASS simply never fires.
+    cfg = {"enabled": True, "shadow_mode": True, "min_conf": 1.0, "min_composite": 999.0}
+    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.5, composite=10.0), cfg)
+    assert r == {"pass": True}
 
-def test_shadow_pass_veto_would_block():
-    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.75, composite=40.0),
+
+# ── The veto shapes: explicit VETO / opposite side ──────────────────────────
+
+def test_shadow_explicit_veto_would_block():
+    r = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.75, composite=40.0),
                           CFG_SHADOW)
     assert r["pass"] is True
     assert r["shadow_would_block"] is True
-    assert "PASS" in r["reason"]
+    assert "VETO" in r["reason"]
 
 
 def test_shadow_lowercased_verdict():
-    r = duelist_veto_gate(_ctx(verdict="pass"), CFG_SHADOW)
+    r = duelist_veto_gate(_ctx(verdict="veto"), CFG_SHADOW)
     assert r["pass"] is True
     assert r["shadow_would_block"] is True
 
@@ -118,19 +137,19 @@ def test_shadow_opposite_side_veto():
 
 def test_shadow_high_confidence_escape():
     # The elevated-conviction bar: conf >= min_conf (0.90 default) escapes.
-    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.92), CFG_SHADOW)
+    r = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.92), CFG_SHADOW)
     assert r == {"pass": True}
 
 
 def test_shadow_high_composite_escape():
     # OR composite >= min_composite (60.0 default) escapes.
-    r = duelist_veto_gate(_ctx(verdict="PASS", composite=65.0), CFG_SHADOW)
+    r = duelist_veto_gate(_ctx(verdict="VETO", composite=65.0), CFG_SHADOW)
     assert r == {"pass": True}
 
 
 def test_shadow_bar_just_below():
     # Both just under the bars → the veto stands.
-    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.89, composite=59.0),
+    r = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.89, composite=59.0),
                           CFG_SHADOW)
     assert r["pass"] is True
     assert r["shadow_would_block"] is True
@@ -139,15 +158,22 @@ def test_shadow_bar_just_below():
 # ── Live mode (shadow_mode off): the veto actually blocks ───────────────────
 
 def test_live_mode_blocks():
-    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.75, composite=40.0),
+    r = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.75, composite=40.0),
                           CFG_LIVE)
     assert r["pass"] is False
     assert "shadow_would_block" not in r
-    assert "PASS" in r["reason"]
+    assert "VETO" in r["reason"]
+
+
+def test_live_mode_pass_still_passes():
+    # The re-key holds in live mode too: PASS never blocks.
+    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.5, composite=10.0),
+                          CFG_LIVE)
+    assert r == {"pass": True}
 
 
 def test_live_mode_escape_still_applies():
-    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.95), CFG_LIVE)
+    r = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.95), CFG_LIVE)
     assert r == {"pass": True}
 
 
@@ -157,11 +183,11 @@ def test_custom_bars():
     cfg = {"enabled": True, "shadow_mode": True,
            "min_conf": 0.80, "min_composite": 30.0}
     # conf 0.75 < 0.80 but composite 40 >= 30 → escape via composite.
-    r = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.75, composite=40.0),
+    r = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.75, composite=40.0),
                           cfg)
     assert r == {"pass": True}
     # Both under the custom bars → would-block.
-    r2 = duelist_veto_gate(_ctx(verdict="PASS", confidence=0.70, composite=25.0),
+    r2 = duelist_veto_gate(_ctx(verdict="VETO", confidence=0.70, composite=25.0),
                            cfg)
     assert r2["pass"] is True
     assert r2["shadow_would_block"] is True
@@ -171,7 +197,7 @@ def test_custom_bars():
 
 def test_eval_all_gates_carries_duelist_veto():
     from hermes_trader.agents.risk_gates import eval_all_gates
-    ctx = _ctx(verdict="PASS", confidence=0.75, composite=40.0,
+    ctx = _ctx(verdict="VETO", confidence=0.75, composite=40.0,
                trade_side="long")
     config = {
         # High bars so the duelist veto can fire in shadow (not block).

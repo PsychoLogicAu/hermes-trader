@@ -366,6 +366,21 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
     shadow_mode = mode == "SHADOW"
 
+    # AI active rejection (2026-09-03): a VETO verdict means "this setup is a
+    # trap — avoid like the plague", categorically stronger than PASS. Refuse
+    # it here BEFORE the structural-override section: unlike a hedged PASS, a
+    # VETO must never be upgraded to LONG by whale/composite/breakout force
+    # paths. This guard also closes the direct-call hole (server.py /execute
+    # and the MCP server call maybe_execute with any remembered analysis):
+    # every downstream PASS guard is an equality check, so an unhandled VETO
+    # would fall through to `trade_side = side or "long"` and blind-LONG.
+    if str(analysis.get("verdict") or "").upper() == "VETO":
+        return {
+            "executed": False, "mode": mode,
+            "analysis_id": analysis["id"],
+            "reason": f"ai_veto (active rejection: {str(analysis.get('reasoning') or '')[:160]})",
+        }
+
     # Asset-class gate. Mirrors the perception-time filter so a stale
     # perception (e.g. one re-evaluated from memory after the operator
     # flips the flag) can't sneak through to a real trade. Crypto =
@@ -1050,10 +1065,10 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         logger.debug(f"[executor] squeeze sync read failed for {analysis['coin']}: {_se}")
         _squeeze_extreme = None
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
-    # LONG / SHORT / PASS, or None when the duelist is disabled / failed. Fed
-    # to duelist_veto_gate — the abstention (PASS) / opposite-side veto shape.
-    # A data gap (None) can never block a trade: the gate passes with no
-    # opinion.
+    # LONG / SHORT / PASS / VETO, or None when the duelist is disabled /
+    # failed. Fed to duelist_veto_gate — the explicit-VETO / opposite-side
+    # veto shape (re-keyed 2026-09-03: a neutral PASS no longer vetoes). A
+    # data gap (None) can never block a trade: the gate passes with no opinion.
     _duelist_at = analysis.get("duelist_at_entry") or {}
     _duelist_verdict = _duelist_at.get("verdict") or None
     ctx = GateContext(
@@ -1154,8 +1169,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_sx.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
-    # Duelist veto shadow: the A/B duelist abstained (PASS) or took the
-    # opposite side on this directional entry. The gate structurally passes;
+    # Duelist veto shadow: the A/B duelist EXPLICITLY vetoed (or took the
+    # opposite side on) this directional entry. The gate structurally passes;
     # this is the would-block marker (the marker also rides along in
     # gate_results → the Trade result line → ledger joinable).
     _dv = gate_output["results"].get("duelist_veto") or {}
@@ -1659,7 +1674,8 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     Returns {"action": <str>, "verdict": <str>, "result": <dict|None>}:
       - LONG / SHORT  → action="execute", result = execute_fn(analysis)
       - CLOSE         → action="close",   result = close_fn(coin)
-      - PASS          → action="none"
+      - PASS          → action="none" (structural-override hints may still route it)
+      - VETO          → action="none" (active rejection — override hints NEVER apply)
       - anything else → action="unknown" (logged loudly; never silently dropped)
     """
     execute_fn = execute_fn or maybe_execute
@@ -1672,7 +1688,13 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     if verdict == "CLOSE":
         _reason = f"ai_close: {str(analysis.get('reasoning') or '')[:200]}"
         return {"action": "close", "verdict": verdict, "result": close_fn(coin, _reason)}
-    if verdict == "PASS":
+    if verdict in ("PASS", "VETO"):
+        # PASS = neutral abstention; VETO (2026-09-03) = ACTIVE rejection,
+        # categorically stronger. Both are no-action here, but the
+        # structural-override HINT routing below applies to PASS ONLY — a
+        # whale/composite/breakout force-execute can never upgrade a VETO.
+        # maybe_execute carries its own guard for direct callers (server
+        # /execute, MCP).
         # A hedging AI PASS can still carry a structural-override HINT: a whale
         # accumulation signal, or a strong slow-burn composite. maybe_execute
         # owns the real override decision and all gates, but it's only ever
@@ -1716,17 +1738,19 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
                 int(_rv_cfg.get("ta_sidestep_min_slow_burn_count", 1) or 1)
             )
         )
-        if has_whale or slow_burn_hint or breakout_hint or composite_hint or sidestep_hint:
+        if verdict == "PASS" and (has_whale or slow_burn_hint or breakout_hint
+                                  or composite_hint or sidestep_hint):
             return {"action": "execute", "verdict": "PASS",
                     "result": execute_fn(analysis)}
-        # PASS has no implied direction; show median forecast with alignment for both sides.
+        # PASS/VETO have no implied direction; show median forecast with
+        # alignment for both sides.
         try:
             from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
             c = coin or "unknown"
             sig = get_chronos_signal_sync(c, "long")
             m = sig.median_pct if sig.median_pct is not None else None
             _res = {
-                "action": "none", "verdict": "PASS", "result": None,
+                "action": "none", "verdict": verdict, "result": None,
                 "chronos_median_pct": round(m * 10) / 10 if m is not None else None,
                 "chronos_aligned_if_long": bool(m is not None and m > 0),
                 "chronos_aligned_if_short": bool(m is not None and m < 0),
@@ -1735,7 +1759,7 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
                 _res["chronos_error"] = sig.error
         except Exception as e:
             _res = {
-                "action": "none", "verdict": "PASS", "result": None,
+                "action": "none", "verdict": verdict, "result": None,
                 "chronos_median_pct": None,
                 "chronos_aligned_if_long": None,
                 "chronos_aligned_if_short": None,
