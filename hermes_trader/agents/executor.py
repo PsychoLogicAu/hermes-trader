@@ -1808,12 +1808,20 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
       timesfm_aligned — get_timesfm_signal_sync median sign agrees with side
                         (300s cache). COUNTED only when
                         `late_chase_timesfm_vote` is true; while the flag is
-                        off (default) an aligned read instead logs a
+                        off an aligned read instead logs a
                         [COUNTERFACTUAL] line so the additive vote accrues a
                         sample before it can move the live bar (the
                         2026-09-02 two-model sweep backed the additive vote,
                         but the marginal release cohort was +10.24 with a
-                        weak second split-half — shadow first).
+                        weak second split-half — shadow first). When counted,
+                        it lowers the bar by its OWN knob
+                        `late_chase_timesfm_drop` (a separate, weaker value —
+                        default 0.0 = inert), NOT the shared
+                        `late_chase_dynamic_per_signal_drop`. The 2026-09-04
+                        grid replay found tf 0.03 releases only the
+                        both-aligned conf-0.78 rung (+$3.18) while the shared
+                        0.10 over-releases (falls to +$1.68); the weaker
+                        separate knob is what makes the AND shape binding.
 
     A signal only votes when it is exactly True; missing/None/error/
     counter-direction counts as 0. Failures never raise (fail-closed: fewer
@@ -1967,11 +1975,23 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # key absent) → the fixed bar, byte-identical to before.
         fixed_bar = float(gate.get("bypass_late_trend_chase_min_conf", 0))
         drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
+        tf_vote = bool(gate.get("late_chase_timesfm_vote", False))
+        tf_drop = float(gate.get("late_chase_timesfm_drop", 0.0))
         corr, corr_names, corr_shadow = _late_chase_corroboration(analysis, config, side)
         if corr is None:
             bar, bar_note = fixed_bar, ""
         else:
-            bar = max(fixed_bar - corr * drop, min_conf)
+            # Per-vote drop: the timesfm vote (only present in corr_names when
+            # tf_vote is on) lowers the bar by its OWN `late_chase_timesfm_drop`;
+            # every other corroborating vote keeps the shared `drop`. This keeps
+            # the tf vote a separate, weaker lever (0.03) so it releases only the
+            # both-aligned rung instead of the shared 0.10's over-release, while
+            # chronos/squeeze behaviour is byte-identical to before.
+            weighted_drop = (
+                sum(tf_drop if nm == "timesfm_aligned" else drop for nm in corr_names)
+                if tf_vote else corr * drop
+            )
+            bar = max(fixed_bar - weighted_drop, min_conf)
             bar_note = (f" (dynamic bar {bar:.2f} from {fixed_bar:.2f}, "
                         f"{corr} signal{'s' if corr != 1 else ''} aligned: "
                         f"{'+'.join(corr_names) if corr_names else 'none'})")
@@ -1983,18 +2003,22 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             # Log-only counterfactual (never changes pass/fail): timesfm
             # aligned this late-chase entry but its vote is not counted
             # (late_chase_timesfm_vote off) — had it counted, the bar would
-            # have been one `drop` lower and this block may have released.
-            # Strictly rescue-side: the candidate bar is always ≤ the live
-            # bar, so the marker can only name an over-block, never add one.
+            # have been `tf_drop` lower (its own knob, NOT the shared drop)
+            # and this block may have released. Strictly rescue-side: the
+            # candidate bar is the live bar minus the tf contribution and is
+            # always <= the live bar (tf_drop is a positive, smaller lever;
+            # if the tf vote were ever sized above the shared drop, the
+            # guard below keeps the marker off rather than ever ADD a block).
             # Accrue these against P/L before flipping the vote on
             # (2026-09-02 two-model sweep).
-            if corr is not None and corr_shadow \
-                    and conf >= max(bar - drop, min_conf):
+            if (corr is not None and corr_shadow and tf_drop > 0
+                    and tf_drop <= drop
+                    and conf >= max(bar - tf_drop, min_conf)):
                 logger.warning(
                     f"[gate][COUNTERFACTUAL] late_chase block RESCUED by "
                     f"timesfm additive vote for {coin} {side.upper()}: conf "
                     f"{conf:.2f} < live bar {bar:.2f} but >= candidate bar "
-                    f"{max(bar - drop, min_conf):.2f} "
+                    f"{max(bar - tf_drop, min_conf):.2f} "
                     f"({'+'.join(corr_shadow)}) — live rule stands, vote-on "
                     f"rule would have passed")
             return (f"runner_gate_blocked (late trend-only chase; no fresh "
