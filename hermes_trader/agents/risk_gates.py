@@ -101,7 +101,7 @@ class GateContext:
         # tail veto from the 2026-09-02 two-model sweep.
         self.timesfm_q10_path_pct = timesfm_q10_path_pct
         self.timesfm_q90_path_pct = timesfm_q90_path_pct
-        # The A/B duelist's verdict at entry (LONG / SHORT / PASS / None),
+        # The A/B duelist's verdict at entry (LONG / SHORT / PASS / VETO / None),
         # carried from research.py's `duelist_at_entry` snapshot via
         # maybe_execute. None = the duelist is disabled or failed — the
         # veto has no opinion and passes.
