@@ -104,7 +104,7 @@ def test_live_research_loop():
     assert analysis["coin"] == "BTC"
     assert isinstance(analysis["id"], str) and analysis["id"], "empty analysis id"
     assert analysis["perception_id"] == perception["id"]
-    assert analysis["verdict"] in ("PASS", "LONG", "SHORT", "CLOSE")
+    assert analysis["verdict"] in ("PASS", "LONG", "SHORT", "CLOSE", "VETO")
     assert isinstance(analysis["confidence"], (int, float)), \
         f"confidence not numeric: {analysis['confidence']!r}"
     assert 0 <= analysis["confidence"] <= 1

@@ -751,7 +751,7 @@ def _build_user_message(
         f"Mode: {mode} — {'your verdict will execute against real funds' if mode == 'LIVE' else 'analysis only, no execution'}",
         "",
         'Respond with 3-5 bullet points of reasoning, then output your decision as VALID JSON on the very last line:',
-        '{"verdict":"PASS"|"LONG"|"SHORT"|"CLOSE","confidence":0.0-1.0,"side":"long"|"short"|"null","entryPx":number,"stopPx":number,"tpPx":number,"reasoning":"brief"}',
+        '{"verdict":"PASS"|"LONG"|"SHORT"|"CLOSE"|"VETO","confidence":0.0-1.0,"side":"long"|"short"|"null","entryPx":number,"stopPx":number,"tpPx":number,"reasoning":"brief"}',
         "Nothing after the JSON.",
     ])
 
