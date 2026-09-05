@@ -348,3 +348,79 @@ def test_route_verdict_pass_renders_enabled_timesfm():
     assert routed["timesfm_aligned_if_long"] is True
     assert routed["timesfm_aligned_if_short"] is False
     assert routed["chronos_median_pct"] == 0.5  # chronos block intact
+
+
+# ── LLM context on every Trade result path ───────────────────────────────────
+def test_executor_llm_context_wired_on_all_paths():
+    """The `Trade result:` line must carry the LLM's own context on every
+    path: LONG/SHORT execute, PASS force-execute override, and the no-action
+    PASS/VETO line — pinned like the timesfm attach so a new path can't drop
+    the field silently."""
+    import hermes_trader.agents.executor as ex_mod
+    src = open(ex_mod.__file__).read()
+    tree = ast.parse(src)
+    defs = [n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "_attach_llm_context_to_result"]
+    assert len(defs) == 1, "expected exactly one _attach_llm_context_to_result def"
+    calls = sum(1 for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_attach_llm_context_to_result")
+    # 3 route_verdict return sites: LONG/SHORT, PASS force-execute, no-action.
+    assert calls == 3, f"expected 3 call sites, found {calls}"
+
+
+def test_route_verdict_long_result_carries_llm_context():
+    """The blocked/execute trade-result dict shows the model's own conviction
+    (the 2026-09-05 runner_gate_blocked forensics: conf 0.8x vs a 0.80 bar)
+    plus the TA inputs behind the fresh_impulse logic."""
+    from hermes_trader.agents.executor import route_verdict
+    r = route_verdict({"verdict": "LONG", "coin": "BTC", "side": "long",
+                       "id": "a1", "confidence": 0.82,
+                       "composite_score": 42.7, "volume_spike_fired": True,
+                       "breakout_fired": False, "slow_burn_count": 1},
+                      execute_fn=lambda a: {"executed": False, "mode": "LIVE",
+                                            "analysis_id": "a1",
+                                            "reason": "runner_gate_blocked (test)"})
+    assert r["action"] == "execute"
+    res = r["result"]
+    assert res["llm_confidence"] == 0.82
+    assert isinstance(res["llm_model"], str) and res["llm_model"]
+    assert res["ai_down"] is False
+    assert res["composite_score"] == 42.7
+    assert res["volume_spike_fired"] is True
+    assert res["breakout_fired"] is False
+    assert res["slow_burn_count"] == 1
+    assert res["whale_fired"] is False
+
+
+def test_route_verdict_failure_pass_is_null_not_zero():
+    """A failure-PASS (no real LLM verdict) must log null confidence with
+    ai_down=True — not fake a 0.0 opinion."""
+    from hermes_trader.agents import executor as ex
+    import hermes_trader.agents.chronos_signal as cs
+    real_cs = cs.get_chronos_signal_sync
+    cs.get_chronos_signal_sync = lambda c, s: (_ for _ in ()).throw(RuntimeError("down"))
+    try:
+        routed = ex.route_verdict({"verdict": "PASS", "coin": "X",
+                                   "confidence": 0.0, "ai_down": True})
+    finally:
+        cs.get_chronos_signal_sync = real_cs
+    assert routed["llm_confidence"] is None
+    assert routed["ai_down"] is True
+
+
+def test_route_verdict_pass_carries_llm_confidence():
+    """No-action PASS/VETO line: the model's belief, not just the abstention."""
+    from hermes_trader.agents import executor as ex
+    import hermes_trader.agents.chronos_signal as cs
+    real_cs = cs.get_chronos_signal_sync
+    cs.get_chronos_signal_sync = lambda c, s: (_ for _ in ()).throw(RuntimeError("down"))
+    try:
+        routed = ex.route_verdict({"verdict": "PASS", "coin": "X",
+                                   "confidence": 0.61, "composite_score": 12})
+    finally:
+        cs.get_chronos_signal_sync = real_cs
+    assert routed["action"] == "none"
+    assert routed["llm_confidence"] == 0.61
+    assert routed["composite_score"] == 12.0

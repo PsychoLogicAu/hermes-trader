@@ -278,6 +278,63 @@ def _attach_timesfm_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["timesfm_error"] = str(e)
 
 
+def _attach_llm_context_to_result(result: Dict[str, Any], analysis: Dict[str, Any]) -> None:
+    """Attach the LLM's own context to a trade result dict.
+
+    The `Trade result:` line is the one that answers "why did the executor
+    block/execute this?", but the blocked results were flat: reason +
+    forecast attachments only. Everything below is already computed on
+    `analysis` earlier in the cycle — carrying it onto the result means
+    blocked-trade forensics (counterfactual P/L sweeps) don't parse English
+    out of `reason` or join to the `Verdict:` / `Researching` lines by
+    timestamp. Applied at every trade-result path (execute blocked,
+    executed, no-action PASS/VETO). Output shape:
+      llm_confidence: float | null — model conviction (null = no real verdict,
+                                     e.g. a failure-PASS)
+      llm_model: str | null        — the LLM that produced it (model-switch
+                                     forensics without triangulating logs)
+      ai_down: bool                — research call failed (402/timeout): the
+                                     verdict is an error code, not an opinion
+      composite_score: float | null— the number the runner/whale/duelist gates
+                                     key off (null = not computed this cycle)
+      volume_spike_fired / breakout_fired / momentum_burst_fired /
+      daily_mover_fired / slow_burn_count / whale_fired — the raw TA inputs
+                                     behind the fresh_impulse/structured logic
+                                     encoded in `reason`
+    """
+    try:
+        # A failure-PASS arrives as confidence 0.0 + ai_down=True — the model
+        # never spoke, so record null conviction (not a fake 0.0 "maximally
+        # uncertain" verdict): null + ai_down is unambiguous.
+        _c = None if analysis.get("ai_down") else analysis.get("confidence")
+        result["llm_confidence"] = round(float(_c), 2) if _c is not None else None
+        # Mirrors the trading_loop's resolution + default for the `Verdict:`
+        # line, so the two agree on which model produced the verdict.
+        result["llm_model"] = os.environ.get(
+            "LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        result["ai_down"] = bool(analysis.get("ai_down"))
+        _cs = analysis.get("composite_score")
+        result["composite_score"] = round(float(_cs), 1) if _cs is not None else None
+        result["volume_spike_fired"] = bool(analysis.get("volume_spike_fired"))
+        result["breakout_fired"] = bool(analysis.get("breakout_fired"))
+        result["momentum_burst_fired"] = bool(analysis.get("momentum_burst_fired"))
+        result["daily_mover_fired"] = bool(analysis.get("daily_mover_fired"))
+        result["slow_burn_count"] = int(analysis.get("slow_burn_count", 0) or 0)
+        result["whale_fired"] = bool(analysis.get("whale_signal"))
+    except Exception:
+        # Fail closed: never raise into the trade path, never fake a value.
+        result["llm_confidence"] = None
+        result["llm_model"] = None
+        result["ai_down"] = False
+        result["composite_score"] = None
+        result["volume_spike_fired"] = False
+        result["breakout_fired"] = False
+        result["momentum_burst_fired"] = False
+        result["daily_mover_fired"] = False
+        result["slow_burn_count"] = 0
+        result["whale_fired"] = False
+
+
 def build_open_config_snapshot(regime: str, exit_policy_label: str,
                                sl_atr_mult: float, tp_atr_mult: float) -> Dict[str, Any]:
     """Build the OPEN-row config snapshot for the append-only ledger.
@@ -1599,7 +1656,10 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     coin = analysis.get("coin")
 
     if verdict in ("LONG", "SHORT"):
-        return {"action": "execute", "verdict": verdict, "result": execute_fn(analysis)}
+        _res = execute_fn(analysis)
+        if isinstance(_res, dict):
+            _attach_llm_context_to_result(_res, analysis)
+        return {"action": "execute", "verdict": verdict, "result": _res}
     if verdict == "CLOSE":
         _reason = f"ai_close: {str(analysis.get('reasoning') or '')[:200]}"
         return {"action": "close", "verdict": verdict, "result": close_fn(coin, _reason)}
@@ -1655,8 +1715,10 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
         )
         if verdict == "PASS" and (has_whale or slow_burn_hint or breakout_hint
                                   or composite_hint or sidestep_hint):
-            return {"action": "execute", "verdict": "PASS",
-                    "result": execute_fn(analysis)}
+            _res = execute_fn(analysis)
+            if isinstance(_res, dict):
+                _attach_llm_context_to_result(_res, analysis)
+            return {"action": "execute", "verdict": "PASS", "result": _res}
         # PASS/VETO have no implied direction; show median forecast with
         # alignment for both sides.
         try:
@@ -1698,6 +1760,10 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             _res["timesfm_aligned_if_long"] = None
             _res["timesfm_aligned_if_short"] = None
             _res["timesfm_error"] = str(e)
+        # The LLM's own conviction next to the forecast, so a no-action
+        # PASS/VETO line shows what the model believed (not just why the
+        # router abstained). Same field as the execute paths attach.
+        _attach_llm_context_to_result(_res, analysis)
         return _res
     # Should be unreachable (parse_verdict normalizes to one of the above),
     # but never silently drop — surface it so a new verdict can't go unhandled.
