@@ -635,8 +635,17 @@ def _build_user_message(
     # double-trade a coin or can CLOSE one. Deliberately NO dollar sizes:
     # account notional/leverage must not influence the verdict (sizing and
     # every risk cap live in the execution gates, not here).
+    #
+    # Scoping matters (2026-09-04, HOOD): the block was researched FOR
+    # xyz:HOOD while listing "ADA long, PURR long", and the duelist (Qwen2.5-
+    # Coder-7B) read "CLOSE only if structure flipped" GLOBALLY — its
+    # reasoning was about ADA/PURR and it returned {"verdict":"CLOSE"} for
+    # the coin it holds nothing in. State the scope on the instruction line
+    # itself so a small model doesn't generalize it to the listed positions.
     position_block = (
-        "Open positions (do not re-enter these; CLOSE only if structure flipped): "
+        f"Open positions (do not re-enter these; a CLOSE verdict applies ONLY to "
+        f"{coin} itself, never to any other listed position; CLOSE only if "
+        f"{coin}'s own structure flipped): "
         + ", ".join(f"{p['coin']} {p['side']}" for p in open_positions)
         if open_positions
         else "Open positions: none"
@@ -761,6 +770,7 @@ def _duelist_verdict(
     primary_verdict: str,
     primary_confidence: float,
     primary_ms: int = 0,
+    held_coins: set | None = None,
 ) -> Dict[str, Any] | None:
     """Run the A/B duelist: the SAME prompt to the second model, recorded but
     never used. Returns the parsed verdict dict (for the session-log event +
@@ -769,6 +779,13 @@ def _duelist_verdict(
     Best-effort end to end: a duelist outage logs a warning and returns None —
     the primary path above has already produced the verdict that executes, so
     nothing downstream depends on this.
+
+    `held_coins` (the open book) arms the same CLOSE guard as the primary
+    parse: the duelist is the small model most prone to reading the open-book
+    list globally (2026-09-04, it CLOSEd xyz:HOOD while reasoning about ADA/
+    PURR). Passing it keeps the duelist's recorded A/B verdict honest — a
+    misread CLOSE is logged as PASS, not as a spurious CLOSE the book can't
+    act on.
     """
     try:
         if not duelist_enabled():
@@ -789,7 +806,7 @@ def _duelist_verdict(
                 f"[duel] {coin}: duelist {cfg['model']} returned no text — not recorded"
             )
             return None
-        dl_parsed = parse_verdict(dl_text, coin, perception)
+        dl_parsed = parse_verdict(dl_text, coin, perception, held_coins=held_coins)
         row = {
             "coin": coin,
             "perception_id": perception.get("id", "unknown"),
@@ -900,8 +917,15 @@ def parse_verdict(
     ai_text: str,
     coin: str,
     perception: Dict[str, Any],
+    held_coins: set | None = None,
 ) -> Dict[str, Any]:
-    """Parse the AI response: JSON on the last line, with a regex fallback."""
+    """Parse the AI response: JSON on the last line, with a regex fallback.
+
+    `held_coins` (optional set of coin names the account currently holds)
+    arms a deterministic CLOSE guard: a CLOSE verdict for a coin NOT in the
+    book is a misread and is coerced to PASS. `None` disables the guard —
+    backtest and legacy callers pass no book and keep the raw token.
+    """
     if not ai_text:
         ai_text = ""
 
@@ -967,6 +991,26 @@ def parse_verdict(
             elif re.search(r"CLOSE", first_line, re.IGNORECASE):
                 verdict = "CLOSE"
 
+    # Deterministic CLOSE guard (2026-09-04, xyz:HOOD): the research prompt
+    # lists the WHOLE open book, and a small model (the Qwen2.5-Coder-7B
+    # duelist) read "CLOSE only if structure flipped" globally — its
+    # reasoning was about ADA/PURR and it emitted {"verdict":"CLOSE"} for
+    # HOOD, a coin the account doesn't hold. A CLOSE for a coin we don't
+    # hold is by definition a misread of ANOTHER position's book state; it
+    # can only route to a close_fn(coin) that no-ops `already_flat`, so it
+    # has no legitimate meaning here. Coerce it to PASS with a trace flag.
+    # `held_coins is None` = guard off (backtest / legacy callers): the raw
+    # token is preserved so historical replay semantics don't shift.
+    close_guard_downgraded = False
+    if held_coins is not None and verdict == "CLOSE" and coin not in held_coins:
+        logger.warning(
+            f"[parse_verdict] {coin}: CLOSE verdict but {coin} is not an open "
+            f"position (book={sorted(held_coins)}) — model misread another "
+            f"position's book state; downgrading CLOSE -> PASS"
+        )
+        verdict = "PASS"
+        close_guard_downgraded = True
+
     # Coerce confidence to a clamped float — the LLM occasionally returns it
     # as a string ("0.8") or out of range; a string would TypeError at the
     # gate comparison (`ctx.confidence >= 0.85`) on a live trade.
@@ -1001,6 +1045,11 @@ def parse_verdict(
         # minute, filling the book with unvetted longs that then blocked real
         # AI SHORT signals on the movers.
         "ai_down": not ai_text.strip(),
+        # True when this PASS is a DOWNGRADED CLOSE (the coin wasn't held when
+        # the model said CLOSE) — the raw token was CLOSE, the guard coerced it.
+        # Kept for forensics so a downgraded CLOSE is distinguishable from a
+        # genuine PASS in the analysis dict / session log.
+        "close_guard_downgraded": close_guard_downgraded,
     }
 
 
@@ -1082,7 +1131,11 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     ai_t0 = time.monotonic()
     ai_text = _call_ai(system_prompt, user_message)
     primary_ms = int((time.monotonic() - ai_t0) * 1000)
-    parsed = parse_verdict(ai_text, coin, perception)
+    # `held_coins` = the live open book (same `open_positions` fed to the
+    # prompt), so a CLOSE on a coin we don't hold is deterministically
+    # downgraded to PASS at parse time — the xyz:HOOD 2026-09-04 misread.
+    held_coins = {p["coin"] for p in open_positions}
+    parsed = parse_verdict(ai_text, coin, perception, held_coins=held_coins)
 
     # A/B duelist: the SAME prompt to the second model, recorded but never
     # used. Runs AFTER the primary verdict so a duelist outage (slow 9B server
@@ -1094,6 +1147,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         system_prompt, user_message, coin, perception,
         parsed["verdict"], parsed["confidence"],
         primary_ms=primary_ms,
+        held_coins=held_coins,
     )
     if duelist_row is not None:
         try:
@@ -1129,6 +1183,11 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         # Failure-PASS marker — must survive this whitelist or the executor's
         # override guard never sees it (it didn't, on first deploy).
         "ai_down": bool(parsed.get("ai_down")),
+        # Downgraded-CLOSE marker (2026-09-04, xyz:HOOD) — a CLOSE on a coin
+        # we don't hold was coerced to PASS at parse time. Carried for
+        # forensics so the session log / memory distinguish a downgraded
+        # CLOSE from a genuine PASS.
+        "close_guard_downgraded": bool(parsed.get("close_guard_downgraded")),
         # A/B duelist verdict (None when the duelist is disabled/failed). Must
         # survive this whitelist: the executor snapshots it into the entry
         # context so the close row can attribute the same trade to the second
