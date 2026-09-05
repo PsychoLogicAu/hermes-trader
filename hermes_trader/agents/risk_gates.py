@@ -38,7 +38,6 @@ class GateContext:
         chronos_spread_pct: Optional[float] = None,
         chronos_q10_path_pct: Optional[List[float]] = None,
         chronos_q90_path_pct: Optional[List[float]] = None,
-        squeeze_extreme_no_breakout: Optional[bool] = None,
         timesfm_q10_path_pct: Optional[List[float]] = None,
         timesfm_q90_path_pct: Optional[List[float]] = None,
         duelist_verdict: Optional[str] = None,
@@ -88,13 +87,6 @@ class GateContext:
         # tail > path-mean > endpoint for loss avoidance).
         self.chronos_q10_path_pct = chronos_q10_path_pct
         self.chronos_q90_path_pct = chronos_q90_path_pct
-        # The squeeze-signal composite gate flag (1h Donchian extreme with no
-        # fresh aligned breakout — the "chasing without confirmation" bucket),
-        # recomputed per candidate side by squeeze_signal._set_gate. None = no
-        # squeeze data (disabled / fetch failed) -> squeeze_extreme_gate has no
-        # opinion and passes. True/False = the flag's actual value; the gate
-        # only ever has an opinion on True.
-        self.squeeze_extreme_no_breakout = squeeze_extreme_no_breakout
         # TimesFM-3 per-step quantile paths, % vs last close (gate-side warm
         # sync read, same pattern as the chronos paths above; None on error
         # signals). Fed to forecast_agreement_veto_gate — the AND-agreement
@@ -874,58 +866,6 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     return {"pass": False, "reason": reason}
 
 
-def squeeze_extreme_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
-    """Squeeze extreme-without-breakout conviction gate (SHADOW by default).
-
-    The third member of the shadow-gate house pattern, encoding the
-    "chasing without confirmation" bucket from the 2026-08-27 15-day
-    ledger replay (scratch/research/counterfactual_gate.py): entries on the
-    candidate's side while price sits at the extreme of the prior 48h 1h
-    Donchian range (top `extreme_pct`% for longs, bottom for shorts) with
-    NO fresh aligned breakout confirming the move. The replay: extreme
-    WITH fresh breakout confirmation = +$1.96 / 79% win; extreme WITHOUT =
-    −$10.73 / 71% win — the flag alone removed ~$10.7 of the window's
-    losses. The research verdict was "right shape, overfit threshold":
-    the 5% extreme zone was chosen after seeing the data, so this gate
-    ships SHADOW and the prospective flag count is the validation.
-
-    The flag itself is computed by squeeze_signal._set_gate (one sync read,
-    per-candidate-side, on every _evaluate return point) and fed here via
-    GateContext.squeeze_extreme_no_breakout — the gate itself is a pure ctx
-    function, no candle fetch, no config read beyond its own block.
-
-    SHADOW MODE: with `shadow_mode` true (default) the gate STRUCTURALLY
-    returns pass=True and only carries a `shadow_would_block` marker, which
-    the executor logs loudly — same pattern as chronos_mismatch /
-    band_counter_breach. It cannot alter live execution until the operator
-    flips shadow_mode to false in .agent-config.json.
-
-    Conviction bar: conf >= `min_conf` (0.90) OR composite >=
-    `min_composite` (60) — same elevated bar as the chronos conviction
-    gates; a genuinely high-conviction late entry still gets through.
-
-    Fail-safes (no-opinion pass): disabled; flag is None (squeeze disabled /
-    fetch failed / no data) or False (not at the extreme, or a fresh aligned
-    breakout confirms the move); conviction bar met.
-    """
-    cfg = gate_cfg or {}
-    if not bool(cfg.get("enabled", False)):
-        return {"pass": True}
-    if ctx.squeeze_extreme_no_breakout is not True:
-        return {"pass": True}
-    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
-    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
-    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
-        return {"pass": True}
-    reason = (f"squeeze_extreme ({ctx.trade_side} entry at the 48h 1h-channel "
-              f"extreme with no fresh aligned breakout; conf "
-              f"{ctx.confidence:.2f} < {min_conf:.2f}, composite "
-              f"{ctx.composite_score:.1f} < {min_composite:.0f})")
-    if bool(cfg.get("shadow_mode", True)):
-        return {"pass": True, "reason": reason, "shadow_would_block": True}
-    return {"pass": False, "reason": reason}
-
-
 def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Duelist-veto conviction gate (SHADOW by default).
 
@@ -1099,13 +1039,6 @@ def eval_all_gates(
     # (would-block marker) until the operator promotes it.
     results["band_counter_breach"] = band_counter_breach_gate(
         ctx, effective_config.get("band_counter_breach_gate") or {})
-    # Squeeze extreme-without-breakout (chasing the channel extreme without a
-    # fresh aligned breakout — the replay's worst-loss bucket). Pure ctx read:
-    # the flag is computed by squeeze_signal on the gate-side sync read in
-    # maybe_execute. Shadow until shadow_mode is flipped. Passes when the
-    # flag is absent/False (data gap can never block a trade).
-    results["squeeze_extreme"] = squeeze_extreme_gate(
-        ctx, effective_config.get("squeeze_extreme_gate") or {})
     # Duelist veto: the A/B duelist's EXPLICIT VETO or opposite-side call on
     # the primary's directional entry (re-keyed 2026-09-03: a neutral PASS is
     # no longer an objection). Strict veto (no escape by default); shadow
