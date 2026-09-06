@@ -561,16 +561,46 @@ def _forced_held_reeval(perceptions, cfg_cd, held_coins):
             quiet_min = max(0, (now_ms - last) // 60_000)
             if quiet_min < min_age_min:
                 continue  # researched recently (triggered or forced) — not quiet yet
+            # Age + peak from the live DSL tracker (same process, same registry
+            # the fast-exit daemon ratchets): the whole point of a dead-bag
+            # check is "has this gone anywhere?", and without age/peak the LLM
+            # literally cannot answer it — 2026-09-05 review: all six
+            # stale-flat bags' forced checks saw only "Open positions: X long"
+            # with no entry, age, or peak, and every one returned PASS.
+            _age_min = None
+            _peak_pct = None
+            try:
+                from hermes_trader.agents import dsl_exit as _dslx
+                _side = held_coins.get(coin) if isinstance(held_coins, dict) else None
+                _trk = (_dslx._active_positions.get(f"{coin}_{_side}")
+                        if _side else
+                        (_dslx._active_positions.get(f"{coin}_long")
+                         or _dslx._active_positions.get(f"{coin}_short")))
+                if _trk is not None:
+                    _age_min = max(0, int((now_ms / 1000 - _trk.entry_time) // 60))
+                    _e = float(_trk.entry_px or 0)
+                    if _e > 0 and _trk.peak_px:
+                        _pk = float(_trk.peak_px)
+                        _peak_pct = (((_pk - _e) / _e * 100) if _trk.is_long()
+                                     else ((_e - _pk) / _e * 100))
+            except Exception:
+                pass  # tracker gone/odd — perception still valid, just less context
+            _reason = (f"no market trigger this scan — scheduled "
+                       f"re-evaluation of the position we already "
+                       f"hold ({quiet_min}min since last check")
+            if _age_min is not None:
+                _reason += f"; position age {_age_min}min"
+            if _peak_pct is not None:
+                _reason += (f", best move since entry was only {_peak_pct:.1f}% "
+                            f"(a dead bag that never ran should be CLOSED)")
+            _reason += "; CLOSE it if it is going nowhere)"
             forced.append({
                 "id": "forced-reval-" + coin.lower(),
                 "coin": coin,
                 "type": "perp",
                 "composite_score": 0,
                 "triggers": [{"name": "heldReeval", "fired": True,
-                              "reason": (f"no market trigger this scan — scheduled "
-                                         f"re-evaluation of the position we already "
-                                         f"hold ({quiet_min}min since last check); "
-                                         f"CLOSE it if it is going nowhere")}],
+                              "reason": _reason}],
                 "whale_signal": None,
                 "mid": float(mid),
             })

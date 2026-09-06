@@ -2894,6 +2894,33 @@ def test_build_user_message_omits_account_equity_and_notional():
     assert "ETH long" in msg
 
 
+def test_build_user_message_annotates_held_age_and_peak():
+    """Dead-bag review 2026-09-05: held coins carry age + best-move from the
+    live DSL tracker so a forced close-check can answer 'is this going
+    anywhere?'. No dollar sizes (rule above still holds)."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents.research import _build_user_message
+    trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
+                              entry_time=_t.time() - 125 * 60)
+    trk.peak_px = 6520.0  # +0.3% best move
+    dsl_exit._active_positions["CHIP_long"] = trk
+    try:
+        perception = {"type": "perp", "mid": 6400, "composite_score": 0,
+                      "triggers": [{"name": "heldReeval", "fired": True,
+                                    "reason": "scheduled re-evaluation"}]}
+        snap = {"last_close": 6400}
+        msg = _build_user_message(
+            "CHIP", perception, snap, snap, snap, "N/A", "no news",
+            300.0, [{"coin": "CHIP", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop("CHIP_long", None)
+    assert "CHIP long (held 125min, best move since entry +0.3%)" in msg
+    # dollar sizes must still never leak into the prompt
+    assert "$364" not in msg and "364.0" not in msg
+
+
 def test_parse_verdict_regex_fallback_midtext():
     """JSON not on the last line is recovered by the regex fallback."""
     from hermes_trader.agents.research import parse_verdict

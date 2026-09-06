@@ -249,6 +249,40 @@ def test_forced_reval_quiet_held_coin_forced():
     assert g["type"] == "perp"
 
 
+def test_forced_reval_reason_carries_tracker_age_and_peak():
+    """Dead-bag context (2026-09-05 review): the reason line must carry the
+    position age + best-move excursion from the live DSL tracker so the LLM
+    can actually answer 'is this going anywhere?'."""
+    NOW = int(time.time() * 1000)
+    trk = dsl_exit.DSLTracker(coin="DEADB", side="long", entry_px=100.0,
+                              entry_time=time.time() - 150 * 60)
+    trk.peak_px = 100.4  # +0.4% best move - a never-ran bag
+    dsl_exit._active_positions["DEADB_long"] = trk
+    try:
+        got = _forced([{"coin": "OTHER"}], {}, {"DEADB"},
+                      last_research={"DEADB": NOW - 150 * 60_000},
+                      mids={"DEADB": 99.2})
+    finally:
+        dsl_exit._active_positions.pop("DEADB_long", None)
+    assert len(got) == 1, f"got={got}"
+    reason = got[0]["triggers"][0]["reason"]
+    assert "position age 150min" in reason, reason
+    assert "0.4%" in reason, reason
+    assert "CLOSE" in reason, reason
+
+
+def test_forced_reval_without_tracker_still_queues():
+    """No DSL tracker (edge case) must not break the queue - no annotation."""
+    NOW = int(time.time() * 1000)
+    got = _forced([], {}, {"NOTRAK"},
+                  last_research={"NOTRAK": NOW - 150 * 60_000},
+                  mids={"NOTRAK": 1.0})
+    assert len(got) == 1
+    reason = got[0]["triggers"][0]["reason"]
+    assert "position age" not in reason
+    assert "CLOSE it if it is going nowhere" in reason
+
+
 def test_forced_reval_recently_researched_not_forced():
     NOW = int(time.time() * 1000)
     assert _forced([], {}, {"ZEC"},
