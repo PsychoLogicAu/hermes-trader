@@ -213,6 +213,9 @@ def test_timesfm_vote_flag_off_bar_unchanged(monkeypatch):
         _analysis(conf=0.78), _gate_tf())
     assert reason.startswith("runner_gate_blocked (late trend-only chase")
     assert "bar 0.80" in reason
+    # release-side forensics: the block line carries the gate's OWN conf so a
+    # floor-raise replay never has to join conf from another log line (2026-09-06).
+    assert "conf 0.78" in reason
 
 
 def test_timesfm_vote_on_releases(monkeypatch):

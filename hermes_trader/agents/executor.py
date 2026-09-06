@@ -1990,7 +1990,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                     f"({'+'.join(corr_shadow)}) — live rule stands, vote-on "
                     f"rule would have passed")
             return (f"runner_gate_blocked (late trend-only chase; no fresh "
-                    f"breakout/burst, bar {bar:.2f}){bar_note}")
+                    f"breakout/burst, conf {conf:.2f}, bar {bar:.2f}){bar_note}")
     else:
         bypassed = False
 

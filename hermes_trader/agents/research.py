@@ -642,11 +642,35 @@ def _build_user_message(
     # reasoning was about ADA/PURR and it returned {"verdict":"CLOSE"} for
     # the coin it holds nothing in. State the scope on the instruction line
     # itself so a small model doesn't generalize it to the listed positions.
+    #
+    # Age + best-move context (2026-09-05 dead-bag review): the six
+    # stale_flat_timeout losers each got exactly one forced close-check and
+    # every one PASSed — the prompt said only "Open positions: X long", so
+    # "is this going anywhere?" was unanswerable. Annotate each held coin
+    # with its age and peak excursion from the live DSL tracker (NO dollar
+    # sizes — that rule stands; test_build_user_message_omits_account_equity_and_notional).
+    def _held_annotation(h_coin: str, h_side: str) -> str:
+        try:
+            from hermes_trader.agents import dsl_exit as _dslx
+            trk = _dslx._active_positions.get(f"{h_coin}_{h_side}")
+            if trk is None or not trk.entry_px:
+                return ""
+            age_min = int((time.time() - trk.entry_time) // 60)
+            e = float(trk.entry_px)
+            pk = float(trk.peak_px or e)
+            peak_pct = ((pk - e) / e * 100) if h_side == "long" else ((e - pk) / e * 100)
+            return f" (held {age_min}min, best move since entry {peak_pct:+.1f}%)"
+        except Exception:
+            return ""
+
     position_block = (
         f"Open positions (do not re-enter these; a CLOSE verdict applies ONLY to "
         f"{coin} itself, never to any other listed position; CLOSE only if "
-        f"{coin}'s own structure flipped): "
-        + ", ".join(f"{p['coin']} {p['side']}" for p in open_positions)
+        f"{coin}'s own structure flipped — for THIS coin also weigh the age and "
+        f"best-move annotation: a young bag that has barely moved from entry is "
+        f"going nowhere and should be CLOSED rather than nursed): "
+        + ", ".join(f"{p['coin']} {p['side']}{_held_annotation(p['coin'], p['side'])}"
+                    for p in open_positions)
         if open_positions
         else "Open positions: none"
     )
