@@ -1963,11 +1963,34 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             bar_note = (f" (dynamic bar {bar:.2f} from {fixed_bar:.2f}, "
                         f"{corr} signal{'s' if corr != 1 else ''} aligned: "
                         f"{'+'.join(corr_names) if corr_names else 'none'})")
-        bypassed = bool(gate.get("bypass_late_trend_chase", False)) and conf >= bar
-        if bypassed:
-            logger.info(f"[executor] late-trend chase bypassed on {coin} "
-                        f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
+        # Tri-state bypass (2026-09-06): `bypass_late_trend_chase` true = live
+        # bypass (existing behavior); false + `bypass_late_trend_chase_shadow_mode`
+        # true = SHADOW — the trade is still blocked (byte-identical reason, so
+        # external log parsers keep working) but a loud [gate][SHADOW] line
+        # accrues the would-bypass decision for the promote/die call; both
+        # false/absent = off (fail-safe default, pre-feature behavior). The
+        # bool is authoritative: shadow only matters when the bool is false.
+        # Rationale: the 2026-09-05 24h day review attributed n=20 chase-bypass
+        # entries at −$67.64 (incl. both max_loss stops, both conf 0.78 vs the
+        # dynamic 0.77 bar) vs normal entries at +$37.15 — the relaxation
+        # admits exactly the late-top class it should guard; shadow accrues the
+        # conf-vs-bar + coin distribution for replay before re-enabling.
+        _bt = gate.get("bypass_late_trend_chase", False)
+        _bs = bool(gate.get("bypass_late_trend_chase_shadow_mode", False))
+        if conf >= bar:
+            bypassed = bool(_bt)
+            if bypassed:
+                logger.info(f"[executor] late-trend chase bypassed on {coin} "
+                            f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
+            elif _bs:
+                logger.warning(
+                    f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
+                    f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
+                    f"{bar:.2f}{bar_note} — NOT bypassing (shadow mode), "
+                    f"live rule stands")
         else:
+            bypassed = False
+        if not bypassed:
             # Log-only counterfactual (never changes pass/fail): timesfm
             # aligned this late-chase entry but its vote is not counted
             # (late_chase_timesfm_vote off) — had it counted, the bar would

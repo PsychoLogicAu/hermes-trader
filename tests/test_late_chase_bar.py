@@ -385,3 +385,108 @@ def test_fresh_impulse_entry_never_takes_the_dynamic_path(monkeypatch):
                   volume_spike_fired=True, breakout_fired=True)
     assert executor._runner_entry_block_reason(a, _gate()) == ""
     assert calls == []
+
+
+# ── Tri-state bypass (2026-09-06): off / on / shadow ─────────────────────────
+# `bypass_late_trend_chase` true = live bypass (existing behavior); false +
+# `bypass_late_trend_chase_shadow_mode` true = SHADOW: the trade is still
+# blocked with the BYTE-IDENTICAL reason (external log parsers keep working)
+# and a [gate][SHADOW] line accrues the would-bypass decision; both absent
+# = off. The bool is authoritative — shadow only matters when the bool is
+# false (fail-safe default: absent keys → off).
+
+def test_shadow_mode_blocks_but_accrues(monkeypatch, caplog):
+    # conf 0.82 >= 1-signal bar 0.80: in shadow mode the entry is NOT
+    # bypassed (block reason, byte-identical prefix + bar to off-mode) and a
+    # loud WOULD HAVE BYPASSED line accrues.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=False,
+              bypass_late_trend_chase_shadow_mode=True)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason  # identical to off-mode reason
+    accruals = [r for r in caplog.records
+                if "WOULD HAVE BYPASSED" in r.getMessage()]
+    assert len(accruals) == 1
+    assert "SKR LONG" in accruals[0].getMessage()
+    assert "shadow mode" in accruals[0].getMessage()
+
+
+def test_shadow_mode_conf_below_bar_logs_nothing(monkeypatch, caplog):
+    # conf 0.78 < bar 0.80 (chronos aligned): even in shadow mode there is no
+    # would-bypass to accrue — the block reason is byte-identical and no
+    # [gate][SHADOW] late_chase_bypass line is emitted.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=False,
+              bypass_late_trend_chase_shadow_mode=True)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.78), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason
+    accruals = [r for r in caplog.records
+                if "WOULD HAVE BYPASSED" in r.getMessage()]
+    assert accruals == []
+
+
+def test_shadow_flag_ignored_when_bypass_bool_true(monkeypatch, caplog):
+    # Precedence: bool True is authoritative — the entry bypasses (live) and
+    # the shadow accrual line does NOT double-log on top of the bypass.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=True,
+              bypass_late_trend_chase_shadow_mode=True)
+    with caplog.at_level(logging.INFO,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason == ""
+    shadow = [r for r in caplog.records
+              if "WOULD HAVE BYPASSED" in r.getMessage()]
+    assert shadow == []
+    bypassed = [r for r in caplog.records
+                if "late-trend chase bypassed on SKR" in r.getMessage()]
+    assert len(bypassed) == 1
+
+
+def test_off_mode_default_byte_identical(monkeypatch, caplog):
+    # Absent shadow key (fail-safe default) and bool false: blocked with the
+    # exact off-mode reason and NO shadow accrual — byte-compat pin for the
+    # external 06:00 UTC cron parsers that match this reason text.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=False)  # no shadow key at all
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason == ("runner_gate_blocked (late trend-only chase; no fresh "
+                      "breakout/burst, conf 0.82, bar 0.80) "
+                      "(dynamic bar 0.80 from 0.90, 1 signal aligned: "
+                      "chronos_aligned)")
+    accruals = [r for r in caplog.records
+                if "WOULD HAVE BYPASSED" in r.getMessage()]
+    assert accruals == []
+
+
+def test_shadow_mode_shadow_block_counterfactual_coexists(monkeypatch, caplog):
+    # Shadow mode + timesfm rescue counterfactual: both accrue on the same
+    # blocked entry (shadow says "the live bypass would have let this through
+    # at the live bar"; the tf-rescue line is about the tf vote) — the shadow
+    # branch must not swallow the existing rescue-side counterfactual.
+    _chronos(monkeypatch, aligned=True)
+    _timesfm(monkeypatch, aligned=True)
+    g = _gate_tf(late_chase_timesfm_vote=False, late_chase_timesfm_drop=0.03,
+                 bypass_late_trend_chase=False,
+                 bypass_late_trend_chase_shadow_mode=True)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.78), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    accruals = [r for r in caplog.records
+                if "WOULD HAVE BYPASSED" in r.getMessage()]
+    rescued = [r for r in caplog.records
+               if "RESCUED by timesfm additive vote" in r.getMessage()]
+    # conf 0.78 >= candidate bar 0.77 (0.80 - 0.03) → rescue accrues; and 0.78
+    # >= live bar 0.80? No — 0.78 < 0.80 → shadow would-bypass does NOT accrue.
+    # (Shadow accrues only when conf >= the LIVE bar.)
+    assert len(rescued) == 1
+    assert accruals == []
