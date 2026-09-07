@@ -728,6 +728,48 @@ def forecast_agreement_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> 
     return {"pass": False, "reason": reason}
 
 
+def _fresh_5m_extreme(
+    coin: str, side: str, lookback: int, px: float
+) -> Optional[bool]:
+    """Does the current price sit AT a fresh 5m extreme? The pop guard.
+
+    True  = the still-forming 5m bar's open (the live price at the scan
+            tick) is beyond the high/low of the last `lookback` CLOSED 5m
+            bars -> a short-term pop is in flight.
+    False = no fresh extreme -> the price is EXTENDING an existing range,
+            not starting a new one.
+    None  = no opinion (fetch failed / empty / not enough history) — the
+            caller must fail closed.
+
+    Deliberately measured on CLOSED bars with the forming bar's OPEN as the
+    candidate price: the band_state verdict uses the forming bar's CLOSE
+    (= live mid), but a Donchian extreme computed on the forming bar itself
+    would compare the decision price against a range that includes it —
+    self-referential. Closed prior bars + forming open is the honest read
+    of "did the price just break out, or is it grinding an established
+    range?" (the 5m guard of the 2026-09-06 band-release validation).
+    """
+    from hermes_trader.client.hl_client import fetch_hl_candles
+    from hermes_trader.indicators.math import candle_val
+
+    try:
+        cs = fetch_hl_candles(coin, interval="5m", count=lookback + 2)
+    except Exception:
+        return None
+    if not cs:
+        return None
+    closed = cs[:-1]
+    if len(closed) < lookback:
+        return None
+    prior = closed[-lookback:]
+    try:
+        if side == "long":
+            return px >= max(candle_val(c, "h") for c in prior)
+        return px <= min(candle_val(c, "l") for c in prior)
+    except Exception:
+        return None
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -788,6 +830,7 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
         return {"pass": True}
     from hermes_trader.agents.config_store import read_agent_config
     from hermes_trader.client.hl_client import fetch_hl_candles
+    from hermes_trader.indicators.math import candle_val
     from hermes_trader.indicators.triggers import band_state
 
     try:
@@ -846,6 +889,50 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
         return {"pass": True}  # WITH the drift (or no breach) — not this shape
     if breach < min_breach:
         return {"pass": True}
+
+    # ── Drift-confirmed release (2026-09-06, 28-block cohort counterfactual) ──
+    # A shape the gate got WRONG: a genuine trend leg where the band is
+    # confirming the drift (drift >= `min_drift_pct`) AND the price is NOT
+    # popping — it's extending an established range (no fresh 5m extreme).
+    # The 28-block replay: the conf>=0.90 escape never fired (max conf 0.85),
+    # the block re-timed every entry deeper into the rip (ARB 09-05: all 7
+    # band blocks lost to re-timing; the same shape with drift>=2.5 + no
+    # fresh 5m extreme = +$25.90 executable, 7/8W), while the fresh-5m-
+    # extreme rows were the pops the gate exists to kill (LIT max-loss,
+    # DOGE stale-flat — net -$10.15 if released). So: only the drift-
+    # CONFIRMED, non-pop quadrant escapes. Config-gated; fail-closed on
+    # missing 5m data (the release NEVER fires on a guard the gate cannot
+    # compute — the pop side is the gate's whole reason to exist).
+    rel = cfg.get("drift_confirmed_release") or {}
+    # Shadow-mode contract: while shadow_mode is ON the gate MUST log the
+    # would-block and structurally pass — the release is a LIVE-execution
+    # escape and must not fire (and must not suppress the would-block log)
+    # in shadow.
+    if bool(rel.get("enabled", False)) and not bool(cfg.get("shadow_mode", True)):
+        try:
+            min_drift = float(rel.get("min_drift_pct", 2.5))
+        except (TypeError, ValueError):
+            min_drift = 2.5
+        if st["drift_pct"] >= min_drift:
+            try:
+                pop_lookback = int(rel.get("pop_lookback_5m", 48))
+            except (TypeError, ValueError):
+                pop_lookback = 48
+            px = candle_val(candles[-1], "c") if candles else 0.0
+            pop = _fresh_5m_extreme(ctx.coin, ctx.trade_side, pop_lookback, px)
+            if pop is False:  # None (no opinion) / True (pop) -> keep blocking
+                return {
+                    "pass": True,
+                    "via": "drift_confirmed",
+                    "reason": (
+                        f"[gate:band_counter_breach] {ctx.coin} {ctx.trade_side} "
+                        f"RELEASING (drift-confirmed): {shape} but band drift "
+                        f"{st['drift_pct']:.1f}% >= {min_drift:.1f}% AND no fresh "
+                        f"5m extreme (pop_lookback {pop_lookback}) — a confirmed "
+                        f"trend leg, not the counter-trend pop. conf "
+                        f"{ctx.confidence:.2f}."
+                    ),
+                }
 
     min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
     if ctx.confidence >= min_conf:
