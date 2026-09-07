@@ -382,3 +382,215 @@ def test_gate_drift_ref_span_scales_fetch_and_keeps_escape(monkeypatch):
     r = band_counter_breach_gate(_ctx("long", 0.90), cfg)
     assert r["pass"] is True and r.get("via") == "confidence"
     assert calls and calls[0][2] == 16 + 32 + 4
+
+
+# ---------------------------------------------------------------------------
+# drift_confirmed_release (2026-09-06) — the trend-leg escape
+# ---------------------------------------------------------------------------
+# The 28-block cohort counterfactual: the conf>=0.90 escape never fired
+# (max observed conf 0.85), so the gate re-timed every confirmed-trend
+# entry deeper into the rip. The release quadrant: band drift >= 2.5% AND
+# NO fresh 5m extreme (the price is extending a 4h range, not popping).
+# The fresh-5m-extreme rows were the pops the gate exists to kill (LIT
+# max-loss, DOGE stale-flat) — they must keep blocking.
+
+RELEASE = {"enabled": True, "min_drift_pct": 2.5, "pop_lookback_5m": 48}
+
+
+def _m5m(px: float, pop: bool, side: str = "long", n_closed: int = 49) -> list:
+    """Synthetic 5m candles: `n_closed` closed bars + 1 still-forming bar
+    whose OPEN is the live price `px`. `pop=True` -> every prior closed
+    bar's extreme sits BEYOND px (a fresh extreme is in flight);
+    `pop=False` -> at least one prior extreme is beyond px (the price is
+    grinding under an established 4h range)."""
+    out = []
+    for i in range(n_closed):
+        if side == "long":
+            h, l = (px * 0.99, px * 0.985) if pop else (px * 1.01, px * 0.99)
+        else:
+            # short pop: prior lows ALL above px (price fresh below them);
+            # short grind: a prior LOW sits below px (established range)
+            h, l = (px * 1.01, px * 1.015) if pop else (px * 1.01, px * 0.99)
+        out.append(Candle(t=1_700_000_000_000 + i * 300_000,
+                          o=px, h=h, l=l, c=px, v=100.0))
+    # forming bar: open == the live mid at the scan tick
+    out.append(Candle(t=1_700_000_000_000 + n_closed * 300_000,
+                      o=px, h=px, l=px, c=px, v=100.0))
+    return out
+
+
+def _wire5m(monkeypatch, band_candles: list[Candle], candles5m,
+            band_cfg: dict | None = None):
+    """_wire plus a routed 5m fetch (the release guard's second I/O)."""
+    agent_cfg = {"band_snapback": band_cfg if band_cfg is not None else BAND_CFG}
+    monkeypatch.setattr(
+        "hermes_trader.agents.config_store.read_agent_config",
+        lambda: agent_cfg,
+    )
+
+    def _fetch(coin, interval="1h", count=200, **kw):
+        if interval == "5m":
+            return candles5m
+        return band_candles
+
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles", _fetch
+    )
+
+
+def _gate_cfg_release(**over) -> dict:
+    cfg = _gate_cfg(drift_ref_span=32)  # live value — the drift the release checks
+    cfg["drift_confirmed_release"] = dict(RELEASE)
+    cfg.update(over)
+    return cfg
+
+
+def test_release_trend_leg_no_pop_passes_at_low_conf(monkeypatch):
+    """The ARB shape: band drift-confirmed (ref 32 reads 6.94% >= 2.5),
+    price grinding under the 4h high (no fresh 5m extreme) -> the 0.82
+    long passes WITHOUT the unreachable conf>=0.90."""
+    _wire5m(monkeypatch, _grass_shape(), _m5m(px=0.85, pop=False))
+    r = band_counter_breach_gate(_ctx("long", 0.82), _gate_cfg_release())
+    assert r["pass"] is True, r
+    assert r.get("via") == "drift_confirmed"
+    assert "RELEASING (drift-confirmed)" in r["reason"]
+    assert "6.9" in r["reason"] or "drift" in r["reason"]
+
+
+def test_release_fresh_pop_still_blocks(monkeypatch):
+    """The GRASS/LIT/DOGE shape: same band, but the price IS at a fresh 5m
+    extreme (the pop the gate exists to kill) -> the release must NOT
+    fire; the original conf block stands."""
+    _wire5m(monkeypatch, _grass_shape(), _m5m(px=0.85, pop=True))
+    r = band_counter_breach_gate(_ctx("long", 0.82), _gate_cfg_release())
+    assert r["pass"] is False
+    assert "RELEASING" not in r["reason"]
+    assert "conf 0.82 < 0.90" in r["reason"]
+
+
+def test_release_drift_below_threshold_still_blocks(monkeypatch):
+    """Band not drift-confirmed (gentle swing reads 1.72% < 2.5 at ref 32)
+    even with no pop -> unconfirmed bounce = the gate's original job."""
+    _wire5m(monkeypatch, _gentle_downswing_shape(), _m5m(px=0.85, pop=False))
+    r = band_counter_breach_gate(_ctx("long", 0.82), _gate_cfg_release())
+    assert r["pass"] is False
+    assert "RELEASING" not in r["reason"]
+
+
+def test_release_fail_closed_on_5m_fetch_error(monkeypatch):
+    """Guard fetch failure = NO OPINION, never a release — the pop side is
+    the gate's whole reason to exist. Must block exactly as before."""
+    _wire(monkeypatch, _grass_shape())
+    import hermes_trader.client.hl_client as hlc
+
+    def _fetch(coin, interval="1h", count=200, **kw):
+        if interval == "5m":
+            raise RuntimeError("api down")
+        return _grass_shape()
+
+    monkeypatch.setattr(hlc, "fetch_hl_candles", _fetch)
+    r = band_counter_breach_gate(_ctx("long", 0.82), _gate_cfg_release())
+    assert r["pass"] is False
+    assert "RELEASING" not in r["reason"]
+
+
+def test_release_fail_closed_on_insufficient_5m_history(monkeypatch):
+    """< lookback+1 5m bars (fresh listing) -> None -> block, not release."""
+    _wire5m(monkeypatch, _grass_shape(), _m5m(px=0.85, pop=False, n_closed=10))
+    r = band_counter_breach_gate(_ctx("long", 0.82), _gate_cfg_release())
+    assert r["pass"] is False
+    assert "RELEASING" not in r["reason"]
+
+
+def test_release_mirror_short_side(monkeypatch):
+    """Dip below the lower edge of an UP-drifting band (mirror shape):
+    drift 5.59% >= 2.5 + no fresh 5m LOW (a prior low sits below the live
+    price = grinding under the range, not popping down) -> short passes."""
+    prices = [1.0 + 0.0025 * i for i in range(94)]
+    prices += [prices[-1] - 0.008 * (k + 1) for k in range(6)]
+    _wire5m(monkeypatch, _candles(prices), _m5m(px=0.95, pop=False, side="short"))
+    r = band_counter_breach_gate(_ctx("short", 0.8), _gate_cfg_release())
+    assert r["pass"] is True, r
+    assert r.get("via") == "drift_confirmed"
+
+
+def test_release_shadow_mode_never_releases(monkeypatch, caplog):
+    """Shadow-mode contract: with shadow_mode ON the release must not fire
+    AND the would-block must still log (the release is a live-execution
+    escape — it cannot suppress the shadow accrual)."""
+    _wire5m(monkeypatch, _grass_shape(), _m5m(px=0.85, pop=False))
+    cfg = _gate_cfg_release(shadow_mode=True)
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.risk_gates"):
+        r = band_counter_breach_gate(_ctx("long", 0.82), cfg)
+    assert r["pass"] is True
+    assert r.get("shadow_would_block") is True
+    assert "via" not in r
+    logged = [rec for rec in caplog.records if "would-block" in rec.getMessage()]
+    assert logged, "shadow mode must log the would-block even when a live release would apply"
+
+
+def test_release_disabled_key_keeps_legacy_block(monkeypatch):
+    """drift_confirmed_release.enabled=False == the pre-change behaviour,
+    even with a drift-confirmed no-pop shape."""
+    cfg = _gate_cfg(drift_ref_span=32)
+    cfg["drift_confirmed_release"] = dict(RELEASE, enabled=False)
+    _wire5m(monkeypatch, _grass_shape(), _m5m(px=0.85, pop=False))
+    r = band_counter_breach_gate(_ctx("long", 0.82), cfg)
+    assert r["pass"] is False
+
+
+def test_fresh_5m_extreme_long_pop_and_grind(monkeypatch):
+    """Unit test of the guard: forming open beyond every prior 5m high =
+    pop (True); a prior high above the live price = grind (False)."""
+    from hermes_trader.agents.risk_gates import _fresh_5m_extreme
+    px = 1.03
+    pop = _m5m(px=px, pop=True)
+    grind = _m5m(px=px, pop=False)
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles",
+        lambda coin, interval="5m", count=50, **kw: pop,
+    )
+    assert _fresh_5m_extreme("X", "long", 48, px) is True
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles",
+        lambda coin, interval="5m", count=50, **kw: grind,
+    )
+    assert _fresh_5m_extreme("X", "long", 48, px) is False
+
+
+def test_fresh_5m_extreme_short_side(monkeypatch):
+    from hermes_trader.agents.risk_gates import _fresh_5m_extreme
+    px = 0.97
+    pop = _m5m(px=px, pop=True, side="short")
+    grind = _m5m(px=px, pop=False, side="short")
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles",
+        lambda coin, interval="5m", count=50, **kw: pop,
+    )
+    assert _fresh_5m_extreme("X", "short", 48, px) is True
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles",
+        lambda coin, interval="5m", count=50, **kw: grind,
+    )
+    assert _fresh_5m_extreme("X", "short", 48, px) is False
+
+
+def test_fresh_5m_extreme_fail_closed(monkeypatch):
+    """Fetch error / empty / short history -> None (no opinion), never
+    a True/False the gate could misread as 'no pop'."""
+    from hermes_trader.agents.risk_gates import _fresh_5m_extreme
+
+    def _boom(*a, **k):
+        raise RuntimeError("down")
+    monkeypatch.setattr("hermes_trader.client.hl_client.fetch_hl_candles", _boom)
+    assert _fresh_5m_extreme("X", "long", 48, 1.0) is None
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles",
+        lambda coin, interval="5m", count=50, **kw: [],
+    )
+    assert _fresh_5m_extreme("X", "long", 48, 1.0) is None
+    monkeypatch.setattr(
+        "hermes_trader.client.hl_client.fetch_hl_candles",
+        lambda coin, interval="5m", count=50, **kw: _m5m(px=1.0, pop=False, n_closed=10),
+    )
+    assert _fresh_5m_extreme("X", "long", 48, 1.0) is None
