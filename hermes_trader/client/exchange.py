@@ -133,17 +133,23 @@ _META_CACHE: Dict[str, Tuple[float, list]] = {}
 _META_TTL_S = float(os.environ.get("HERMES_META_TTL_S", "3600"))
 
 
-def _cached_universe(dex: Optional[str] = None) -> list:
+def _cached_universe(dex: Optional[str] = None,
+                     force_refresh: bool = False) -> list:
     """Return the meta `universe` for a dex (None = main), cached for _META_TTL_S.
 
     On a fetch failure we serve a stale cached copy if we have one, rather than
     raising — a transient API blip must not break coin resolution mid-execute.
+
+    `force_refresh` bypasses a live cache entry. It exists for the case where the
+    cached copy is present but INCOMPLETE — a partial warm after a restart, where
+    an entry is missing `maxLeverage`. Serving that quietly is how a 3x book
+    opened at 1x on 2026-09-08; see get_max_leverage.
     """
     import time as _time
     key = dex or ""
     hit = _META_CACHE.get(key)
     now = _time.time()
-    if hit and (now - hit[0]) < _META_TTL_S:
+    if hit and not force_refresh and (now - hit[0]) < _META_TTL_S:
         return hit[1]
     info = _get_info()
     try:
@@ -216,21 +222,63 @@ def get_max_leverage(coin: str) -> int:
     that tries to exceed it is rejected, so callers cap their leverage here.
     HIP-3 namespaced coins (e.g. `xyz:NVDA`) are looked up in the parent dex's
     metadata when not found in the main perp universe.
+
+    A missing/zero/unparseable `maxLeverage` is treated as MISSING, never as 1:
+    callers do `min(requested, get_max_leverage(coin))`, so a 1 here silently
+    opens a 1x position where the book asked for 3x (2026-09-08 incident: two
+    xyz positions went on at 1x isolated while the config said 3x). On a partial
+    cache entry we force one dex refresh and re-read; if the value is still
+    unusable after the refresh we RAISE so the caller refuses rather than
+    defaulting to a plausible-but-wrong number.
     """
-    # Main perp dex
-    for u in _cached_universe():
-        if u["name"] == coin:
-            return int(u.get("maxLeverage", 1))
+    def _lev(entry: dict) -> Optional[int]:
+        try:
+            v = int(entry.get("maxLeverage") or 0)
+        except (TypeError, ValueError):
+            return None
+        return v if v >= 1 else None
+
+    def _lookup(dex: Optional[str]) -> Optional[int]:
+        """Return the coin's maxLeverage from `dex`'s meta (None = main dex).
+
+        On a present-but-incomplete cached entry (a partial warm after a
+        restart) force one refresh and re-read before giving up.
+        """
+        for refresh in (False, True):
+            try:
+                universe = _cached_universe(dex=dex, force_refresh=refresh)
+            except Exception as e:
+                logger.warning(f"[get_max_leverage] meta lookup failed for dex={dex!r} "
+                               f"(refresh={refresh}): {e}")
+                continue
+            entry = next((u for u in universe if u["name"] == coin), None)
+            if entry is None:
+                return None  # not in this dex — a refresh can't help
+            v = _lev(entry)
+            if v is not None:
+                return v
+            if not refresh:
+                # found but unusable: the cache is warm-but-partial, so force
+                # one refresh before giving up
+                logger.warning(
+                    f"[get_max_leverage] {coin} has no usable maxLeverage in "
+                    f"cached meta (dex={dex!r}) — forcing a refresh")
+            else:
+                return None  # still unusable after the forced refresh
+        return None
+
+    v = _lookup(None)
+    if v is not None:
+        return v
     # HIP-3: derive dex name from the namespace prefix and consult that dex's meta
     if ":" in coin:
         dex = coin.split(":", 1)[0]
-        try:
-            for u in _cached_universe(dex=dex):
-                if u["name"] == coin:
-                    return int(u.get("maxLeverage", 1))
-        except Exception as e:
-            logger.warning(f"[get_max_leverage] HIP-3 meta lookup failed for dex={dex}: {e}")
-    raise ValueError(f"Unknown coin: {coin}")
+        v = _lookup(dex)
+        if v is not None:
+            return v
+    raise ValueError(
+        f"Unknown or unusable maxLeverage for {coin} — refusing rather than "
+        f"defaulting to 1x, which would silently mis-size the position")
 
 
 # ── Market data ────────────────────────────────────────────────────────────────

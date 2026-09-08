@@ -830,8 +830,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     tp_px = analysis.get("tp_px")
     stop_px = analysis.get("stop_px")
 
-    leverage = min(int(config.get("leverage", HL_LEVERAGE)),
-                   get_max_leverage(analysis["coin"]))
+    try:
+        _max_lev = get_max_leverage(analysis["coin"])
+    except Exception as _mle:
+        # Refuse rather than guess. get_max_leverage raises when the meta is
+        # unusable (e.g. a partial cache entry missing maxLeverage); defaulting
+        # to 1x here would open a position at a third of the intended leverage,
+        # silently, with no error anywhere.
+        return {
+            "executed": False, "mode": mode, "analysis_id": analysis["id"],
+            "reason": f"leverage_unresolved ({analysis['coin']}: {_mle})",
+        }
+    leverage = min(int(config.get("leverage", HL_LEVERAGE)), _max_lev)
     _notional_cap = float(config.get("max_trade_notional_usd", 0) or 0)
     _atr_sizing = config.get("atr_risk_sizing", {}) or {}
     _atr_sizing_enabled = bool(_atr_sizing.get("enabled", False))
