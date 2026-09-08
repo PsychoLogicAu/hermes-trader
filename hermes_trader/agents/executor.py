@@ -1064,13 +1064,25 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     try:
         min_notional = min_entry_notional_usd(coin, mid_price)
         if min_notional > 0 and trade_notional < min_notional:
-            return {
-                "executed": False, "mode": mode,
-                "analysis_id": analysis["id"],
-                "reason": (f"below_min_order_notional ({coin}: sized "
-                           f"${trade_notional:.2f}, HL minimum after precision "
-                           f"${min_notional:.2f})"),
-            }
+            # Entries dropped at this floor are forfeited EV, not saved risk —
+            # when the intent merely falls SHORT of the floor, round UP to it;
+            # added risk is bounded by the floor itself. Below the bump ceiling
+            # the intent is genuinely too small to express and still skips.
+            bump_max = float(config.get("min_order_bump_max_mult", 2.0) or 0.0)
+            if bump_max > 0 and trade_notional * bump_max >= min_notional:
+                logger.info(
+                    f"[executor] {coin}: sized ${trade_notional:.2f} < HL floor "
+                    f"${min_notional:.2f} — rounding UP to the floor "
+                    f"(within {bump_max:g}x bump ceiling)")
+                trade_notional = min_notional
+            else:
+                return {
+                    "executed": False, "mode": mode,
+                    "analysis_id": analysis["id"],
+                    "reason": (f"below_min_order_notional ({coin}: sized "
+                               f"${trade_notional:.2f}, HL minimum after precision "
+                               f"${min_notional:.2f})"),
+                }
         size_in_coin = entry_size_for_notional(coin, trade_notional, mid_price)
     except Exception as e:
         return {
