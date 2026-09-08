@@ -111,7 +111,10 @@ from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.memory import memory
 from hermes_trader.client.exchange import get_all_hl_mids, prewarm_meta_cache
 from hermes_trader.client.universe import get_universe
-from hermes_trader.client.hl_client import fetch_account_state, fetch_aggregate_contributions_since, resolve_user_address
+from hermes_trader.client.hl_client import (fetch_account_state,
+                                            fetch_aggregate_contributions_since,
+                                            fetch_hl_candles,
+                                            resolve_user_address)
 from hermes_trader.positions_snapshot import write_snapshot
 from hermes_trader.session_log import append as log_event
 
@@ -752,6 +755,24 @@ def _process_coin_run(perception, ctx):
                 logger.info(f"{coin}: pre-research loss-cooldown ({_lc_remaining:.0f}min remaining) — skip")
                 log_event({"event": "ta_skip", "coin": coin,
                            "signal": "LOSS_COOLDOWN",
+                           "score": round(float(score), 1),
+                           "trigger_score": round(float(score), 1)})
+                return
+        # T4.2 port (upstream cd6eaeec677f): min_history_bars preflight.
+        # History-age floor: a high-volume NEW listing passes the volume floors
+        # with ~6 daily bars; gate it on minimum completed DAILY bars. One
+        # daily-candle fetch, short-TTL cached; only fresh candidates that already
+        # cleared the held/blocklist/cooldown/loss-cooldown cheap checks reach this.
+        # Fail-open on fetch error. Code default 0 = disabled.
+        _min_hist = int(_cfg_cd.get("min_history_bars", 0) or 0)
+        if _min_hist > 0:
+            from hermes_trader.agents.risk_gates import history_floor_reason
+            _hist_reason = history_floor_reason(coin, _min_hist,
+                                                lambda _c, _n: fetch_hl_candles(_c, "1d", _n))
+            if _hist_reason:
+                logger.info(f"{coin}: pre-research {_hist_reason} — skip")
+                log_event({"event": "ta_skip", "coin": coin,
+                           "signal": "HISTORY_FLOOR",
                            "score": round(float(score), 1),
                            "trigger_score": round(float(score), 1)})
                 return

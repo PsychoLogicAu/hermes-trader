@@ -268,6 +268,36 @@ def short_liquidity_floor(ctx: GateContext, min_short_volume: float) -> GateResu
                        f"< short floor ${min_short_volume/1e6:.0f}M (squeeze risk)")}
 
 
+def history_floor_reason(coin: str, min_history_bars: int, fetch_daily) -> str:
+    """Preflight gate: block coins younger than `min_history_bars` completed DAILY bars.
+
+    Separate from the volume floors because a brand-new but high-volume listing sails
+    through `min_market_volume_usd`/`min_hip3_volume_usd` with only a handful of daily
+    bars. The perception scan's <50 check is on 5m bars (~4h), so it misses a coin that
+    has barely EXISTED. Trading a coin with no track record is manipulation-prone and
+    impossible to assess — gate on history AGE. (Upstream cd6eaeec677f.)
+
+    `fetch_daily(coin, n)` returns daily candles (or None/[]). Returns a reason string
+    to block, or "" to pass. Fail-OPEN on a transient fetch failure or empty read (don't
+    punish a 429); only block on a short-but-NON-EMPTY history = a clear young coin.
+    Disabled when min_history_bars <= 0. Pre-research preflight (needs a fetch), not a
+    GateContext execute-stage gate.
+    """
+    try:
+        min_hist = int(min_history_bars or 0)
+    except (TypeError, ValueError):
+        min_hist = 0
+    if min_hist <= 0:
+        return ""
+    try:
+        daily = fetch_daily(coin, min_hist + 5)
+    except Exception:
+        return ""  # transient fetch failure -> don't block
+    if daily is not None and 0 < len(daily) < min_hist:
+        return f"history_floor_preflight ({len(daily)}d < {min_hist}d history)"
+    return ""
+
+
 def coin_allowlist_gate(ctx: GateContext, allowlist: List[str], blocklist: List[str]) -> GateResult:
     if blocklist and ctx.coin in blocklist:
         return {"pass": False, "reason": f"{ctx.coin} is on the coin blocklist"}
