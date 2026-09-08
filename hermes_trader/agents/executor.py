@@ -75,6 +75,15 @@ def _serialized(fn):
 # but tight enough to cap the gap-throughs that were the asymmetry killer). Config-tunable.
 _DEFAULT_SL_ATR_MULT = 1.5
 TP_ATR_MULT = 1.0
+# Headroom on the maintenance-aware liquidation distance for the server-side
+# backup SL. A stop placed OUTSIDE liq can never fire — the position liquidates
+# first — so the SL must clear `liq_safety_frac * (1/lev - maint)`. 0.85 keeps
+# the SL reachable while holding live books at their running leverage (a 1.5x
+# ATR SL is well inside liq on normal names; only high-ATR / low-maxLeverage
+# coins ever trip the bound). CODE default, hot-read, reversible: set
+# liq_safety_frac=0 to disable the bound. T2.1/T2.2 port (maintenance-aware liq
+# bound + cap leverage to honor the stop, don't shrink it).
+_DEFAULT_LIQ_SAFETY_FRAC = 0.85
 
 # Static fallback 24h volumes, used ONLY when the live universe lookup fails.
 # WIRING FIX 2026-06-11: these constants used to be the ONLY volume source for
@@ -117,6 +126,49 @@ def kelly_size(
     half_kelly = f_star / 2
     notional = half_kelly * equity
     return min(notional, max_trade_notional)
+
+
+def liq_safe_leverage(leverage: int, stop_frac: float, coin_max_leverage: int,
+                      liq_safety_frac: float = _DEFAULT_LIQ_SAFETY_FRAC) -> int:
+    """Highest leverage <= `leverage` whose maintenance-aware liquidation
+    distance still clears a server-side stop of width `stop_frac` (fraction of
+    entry price, e.g. the 1.5x-ATR backup SL).
+
+    `1/lev` OVERSTATES the isolated liq distance: maintenance margin eats into
+    it, so the real liq move is `1/lev - maint`, `maint = 1/(2 * coin_max_lev)`.
+    On a high-maxLeverage coin maint is negligible (a maxLev-20 coin at 5x
+    liquidates at 17.5% vs the naive 20%); on a low-maxLeverage coin it
+    dominates (a maxLev-3 coin at 3x liquidates at 16.7%, not the naive 33%).
+    A stop placed BEYOND that distance can never fire — the position is
+    liquidated first — so on a violent gap the backup SL would be useless in
+    the exact regime it exists to catch.
+
+    We therefore CAP LEVERAGE to keep the stop reachable rather than shrink the
+    stop to fit leverage: the stop width (sl_atr_mult x ATR) is the validated
+    parameter. The narrower DSL floor (max_loss spot) is the binding NORMAL exit
+    and is inside liq by construction (worst live class: maxLev-5 → liq 10%,
+    floor 5%), so only the wider backup SL needs this bound.
+
+    `liq_safety_frac` (0.85) is the headroom on the liq bound; 0 disables it.
+    Returns `leverage` unchanged when no stop / headroom is requested or it
+    already fits; never returns below 1.
+    """
+    stop = float(stop_frac or 0.0)
+    lev = int(leverage)
+    safety = float(liq_safety_frac or 0.0)
+    if stop <= 0 or safety <= 0 or lev <= 1:
+        return max(1, lev)
+    max_lev = int(coin_max_leverage or 0)
+    maint = (1.0 / (2.0 * max_lev)) if max_lev > 0 else 0.0
+    # Both liq distance and the bound are monotonic decreasing in leverage
+    # (higher lev → tighter liq), so walk down from the request until the stop
+    # fits. +1e-9 absorbs binary-float dust on exact fits.
+    while lev > 1:
+        liq = 1.0 / lev - maint
+        if liq > 0 and stop <= safety * liq + 1e-9:
+            return lev
+        lev -= 1
+    return 1
 
 
 # Conviction sizing: scale the per-trade equity fraction by AI confidence so
@@ -866,6 +918,40 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     atr = 0.0
     size_in_coin = 0.0
 
+    # Maintenance-aware liquidation bound on the server-side backup SL (T2.1/T2.2
+    # port). The backup SL (sl_atr_mult x ATR) is the WIDEST exchange-side stop and
+    # is placed later with no liq clamp. On a high-ATR / low-maxLeverage coin it can
+    # sit OUTSIDE the maintenance-aware liq distance (1/lev - maint), so on a
+    # violent gap the position liquidates BEFORE the SL fires — useless in the exact
+    # regime it exists to catch. We cap leverage to keep the SL reachable (don't
+    # shrink the SL, the validated param). The narrower DSL floor (max_loss spot) is
+    # the binding normal exit and is inside liq by construction, so only the wider
+    # backup SL needs this bound. Runs BEFORE sizing so notional/margin are computed
+    # at the (possibly capped) leverage; a lower lev is strictly safer for liq.
+    # Gated: liq_safety_frac=0 disables. A lookup hiccup never kills a trade — the
+    # DSL floor still protects normal exits.
+    _liq_safety = float(config.get("liq_safety_frac", _DEFAULT_LIQ_SAFETY_FRAC) or 0)
+    if _liq_safety > 0:
+        try:
+            _sl_mult = float(config.get("sl_atr_mult", _DEFAULT_SL_ATR_MULT))
+            if mid_price <= 0:
+                mid_price = get_hl_price(analysis["coin"])
+            if atr <= 0:
+                atr = get_hl_atr("4h", 14, analysis["coin"])
+            if mid_price > 0 and atr > 0:
+                _sl_frac = _sl_mult * atr / mid_price
+                _lev_liq = liq_safe_leverage(leverage, _sl_frac, _max_lev, _liq_safety)
+                if _lev_liq < leverage:
+                    logger.warning(
+                        f"[executor] {analysis['coin']}: backup SL {_sl_mult}x ATR "
+                        f"({_sl_frac*100:.1f}% spot) sits outside liq at {leverage}x "
+                        f"(maxLev {_max_lev}) — capping leverage to {_lev_liq}x so the "
+                        f"server-side stop stays inside liquidation "
+                        f"(book={analysis.get('strategy_book') or 'main'})")
+                    leverage = _lev_liq
+        except Exception as _liq_e:
+            logger.debug(f"[executor] liq-bound lookup failed for {analysis['coin']}: {_liq_e}")
+
     if _atr_sizing_enabled:
         coin = analysis["coin"]
         mid_price = get_hl_price(coin)
@@ -901,7 +987,10 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                     "reason": f"primary_stop_sizing_zero ({coin}: invalid inputs)",
                 }
             trade_notional = (_risk_pct * agg_equity) / _stop_frac
-            _lev_cap = min(get_max_leverage(coin), int(config.get("leverage", HL_LEVERAGE)))
+            # `leverage` here is the FINAL value: min(config, exchange max) THEN
+            # the liq-bound cap above. Clamp notional to it so a liq-capped lev
+            # can't be out-sized (notional > lev*equity → margin shortfall on HL).
+            _lev_cap = leverage
             _max_by_lev = max(1, _lev_cap) * agg_equity
             _clamped = []
             if trade_notional > _max_by_lev:
@@ -923,7 +1012,9 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 sl_atr_mult=float(config.get("sl_atr_mult", _DEFAULT_SL_ATR_MULT)),
                 max_trade_notional_usd=_cap,
                 coin_max_leverage=get_max_leverage(coin),
-                config_max_leverage=int(config.get("leverage", HL_LEVERAGE)),
+                # FINAL leverage (config ∩ exchange max ∩ liq-bound cap) so the
+                # sized notional can't exceed the leverage actually set on HL.
+                config_max_leverage=leverage,
             )
             if _sz.notional_usd <= 0:
                 return {
