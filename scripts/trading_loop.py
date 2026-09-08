@@ -75,6 +75,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# T3.5 port (upstream 72e4ccce43bb): refuse to start on an unsafe credential
+# setup. Runs before the first credential use (resolve_user_address) and
+# before any network I/O. Fails CLOSED: a broken preflight module must block
+# startup, not silently become a no-op.
+try:
+    import preflight_secrets
+except Exception as _e:
+    logger.critical(f"[preflight] preflight_secrets import FAILED — failing closed: {_e}")
+    sys.exit(1)
+
+_preflight_findings = preflight_secrets.run_preflight(os.environ)
+_preflight_blocking = [f for f in _preflight_findings if preflight_secrets.is_blocking(f)]
+for _f in _preflight_findings:
+    _line = preflight_secrets._redact(_f, os.environ)
+    if preflight_secrets.is_blocking(_f):
+        logger.critical(f"[preflight] {_line}")
+    else:
+        logger.warning(f"[preflight] {_line}")
+if _preflight_blocking:
+    logger.critical(
+        f"[preflight] refusing to start: {len(_preflight_blocking)} "
+        f"credential/secret problem(s)")
+    sys.exit(1)
+logger.info(
+    f"[preflight] credential setup OK ({len(_preflight_findings) - len(_preflight_blocking)} warning(s))")
+
 from hermes_trader.agents.perception import scan_once
 from hermes_trader.agents.ta_filter import analyze_perception
 from hermes_trader.agents.research import research
