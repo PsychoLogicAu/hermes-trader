@@ -1106,6 +1106,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 t.get("name") == "dailyMover" and t.get("fired")
                 for t in (perception.get("triggers") or [])
             ),
+            "daily_move_pct": perception.get("daily_move_pct"),
             "whale_signal": perception.get("whale_signal"),
         }
         memory.record_analysis(analysis)
@@ -1267,6 +1268,9 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             t.get("name") == "dailyMover" and t.get("fired")
             for t in (perception.get("triggers") or [])
         ),
+        # Signed 24h move — feeds the executor's falling-knife guard for the long
+        # sidestep (upstream 51bc23b); None when perception couldn't compute it.
+        "daily_move_pct": perception.get("daily_move_pct"),
         # OI+funding accumulation signal (oi_funding_anomaly). When present,
         # the coin shows whale-loading patterns (high OI, negative funding,
         # flat price). Used as a counter-regime bypass for LONGs.

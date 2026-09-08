@@ -281,6 +281,18 @@ def _scan_single_market(
             "fired": daily_mover_fired,
         })
 
+        # Signed 24h move (cur vs prevDayPx) — attached to the perception dict
+        # whenever the universe row carries both prices, INDEPENDENT of the
+        # mover-surfacing gate above. The executor's falling-knife guard for the
+        # long sidestep (upstream 51bc23b) reads it to block a PASS->LONG upgrade
+        # on a violently negative 24h move; a missing value degrades that clause
+        # to a no-op, leaving the downtrend clause as the guaranteed protection.
+        daily_move_pct: Optional[float] = None
+        _prev = float(market.get("prevDayPx") or 0)
+        _cur = float(mid or market.get("midPx") or market.get("markPx") or 0)
+        if _prev > 0 and _cur > 0:
+            daily_move_pct = (_cur - _prev) / _prev * 100
+
         # At least one trigger must fire.
         fired_count = sum(1 for h in hits if h.get("fired"))
         if fired_count < 1:
@@ -342,6 +354,7 @@ def _scan_single_market(
             "mid": mid,
             "triggers": hits,
             "composite_score": score,
+            "daily_move_pct": daily_move_pct,
             "whale_signal": whale,  # None unless coin is in oi_funding_anomaly hits
         })
     except Exception as e:

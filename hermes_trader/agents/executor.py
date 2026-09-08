@@ -549,6 +549,23 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 "reason": f"signal_veto ({_enf.veto_reason})",
             }
 
+    # Falling-knife guard (port of upstream 51bc23b): the composite triggers
+    # the sidestep qualifies on (pctMoveSpike/volumeSpike/shockDay/momentumBurst)
+    # are MAGNITUDE-based, so a violent SELLOFF fires them like a breakout and
+    # the PASS->LONG upgrade would buy the open of a red breakdown bar (the
+    # xyz:SMSN case). Skip the upgrade when the direction is bearish (downtrend
+    # momentum or a clearly-negative 24h move, no uptrend). Sidestep path ONLY —
+    # the whale/breakout/composite override branches keep their own gates.
+    if analysis.get("verdict") == "PASS" and ta_sidestep_strong:
+        _bear_block = _sidestep_bearish_block_reason(analysis, config)
+        if _bear_block:
+            logger.info(f"[executor] TA sidestep SKIPPED on {analysis['coin']}: {_bear_block}")
+            return {
+                "executed": False, "mode": mode,
+                "analysis_id": analysis["id"],
+                "reason": _bear_block,
+            }
+
     if analysis.get("verdict") == "PASS" and override_strong:
         trigger = ("whale-accumulation" if whale_fired
                    else f"composite={analysis.get('composite_score'):.0f}+{analysis.get('slow_burn_count')} slow-burn"
@@ -1866,6 +1883,51 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
             logger.debug(f"[executor] late-chase corroboration: timesfm read failed "
                          f"(non-fatal): {e}")
     return (len(names), tuple(names), tuple(shadow_names))
+
+
+def _sidestep_bearish_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
+    """Block a PASS->LONG sidestep that is actually a BEARISH impulse.
+
+    The sidestep upgrades an AI PASS to LONG when the composite/burst setup
+    clears, but the composite triggers (pctMoveSpike, volumeSpike, shockDay,
+    momentumBurst) are MAGNITUDE-based (`abs(move)`), so a violent SELLOFF — a
+    big red candle on huge volume — fires them just as hard as a breakout and
+    produces a high composite. With no direction check the sidestep buys the
+    falling knife (upstream 51bc23b, xyz:SMSN 2026-06-29: bought the open of a
+    big red breakdown bar, -9.3% ROE). The short runner gate already requires
+    `downtrend`; this restores the symmetric requirement for the long sidestep.
+
+    Bearish impulse = downtrend momentum fired AND uptrend did not, OR the 24h
+    move is clearly negative (<= sidestep_bearish_move_pct) with no uptrend.
+    Explicit uptrend momentum always wins (a real upside setup). Reads
+    `daily_move_pct` off the analysis dict (perception attaches it); a missing
+    value degrades the 24h-move clause to a no-op, leaving the downtrend clause
+    as the guaranteed protection. Flag-gated (sidestep_require_bullish,
+    default true), hot-read, reversible. Returns a reason to block, or "" to
+    allow. Analysis-only — no network in the execute hot path.
+    """
+    gate = config.get("runner_entry_gate") or {}
+    if not bool(gate.get("sidestep_require_bullish", True)):
+        return ""
+    if bool(analysis.get("uptrend_momentum_fired")):
+        return ""  # explicit bullish momentum — a real upside setup, allow
+    downtrend = bool(analysis.get("downtrend_momentum_fired"))
+    move_pct = analysis.get("daily_move_pct")
+    try:
+        move_pct = None if move_pct is None else float(move_pct)
+    except (TypeError, ValueError):
+        move_pct = None
+    try:
+        min_neg = float(gate.get("sidestep_bearish_move_pct", -3.0))
+    except (TypeError, ValueError):
+        min_neg = -3.0
+    bearish_move = move_pct is not None and move_pct <= min_neg
+    if downtrend or bearish_move:
+        why = ("downtrend momentum fired" if downtrend
+               else f"24h move {move_pct:+.1f}% <= {min_neg:.1f}%")
+        return (f"sidestep_bearish_blocked ({analysis.get('coin')}: {why}, "
+                f"no uptrend — would buy a selloff, not a breakout)")
+    return ""
 
 
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
