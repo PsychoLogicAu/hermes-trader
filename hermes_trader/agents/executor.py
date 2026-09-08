@@ -815,6 +815,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         state, equity, available = _read_state()
     agg_equity = float(state.get("equity") or equity)                # aggregated → exposure gate
     total_open_notional = float(state.get("total_ntl") or 0)         # aggregated → notional gate
+    # Per-account sizing equity: a trade is FUNDED by one account (main for crypto,
+    # the specific HIP-3 dex for colon coins), so the per-trade RISK budget must be
+    # based on THAT account's equity, not the aggregate. Sizing on aggregate over-sizes
+    # vs the balance that actually funds the trade -> the funding account saturates and
+    # every other mover is margin-blocked. `equity` above is already the per-`_target_dex`
+    # resolution; fall back to aggregate only on a degraded/missing breakdown (equity<=0).
+    # (Upstream 729be391cac3.) `agg_equity` stays for the aggregate exposure/gross caps.
+    size_equity = float(equity) if (equity or 0) > 0 else agg_equity
     if equity <= 0:
         # Persisted across retries — refuse rather than send an unsized order.
         return {
@@ -981,17 +989,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _max_roe = float(_dsl.get("max_loss_roe_pct", 40.0) or 40.0)
             _lev = max(1, leverage)
             _stop_frac = min(_max_loss, _max_roe / _lev) / 100.0
-            if agg_equity <= 0 or _risk_pct <= 0 or _stop_frac <= 0:
+            if size_equity <= 0 or _risk_pct <= 0 or _stop_frac <= 0:
                 return {
                     "executed": False, "mode": mode, "analysis_id": analysis["id"],
                     "reason": f"primary_stop_sizing_zero ({coin}: invalid inputs)",
                 }
-            trade_notional = (_risk_pct * agg_equity) / _stop_frac
+            trade_notional = (_risk_pct * size_equity) / _stop_frac
             # `leverage` here is the FINAL value: min(config, exchange max) THEN
             # the liq-bound cap above. Clamp notional to it so a liq-capped lev
             # can't be out-sized (notional > lev*equity → margin shortfall on HL).
             _lev_cap = leverage
-            _max_by_lev = max(1, _lev_cap) * agg_equity
+            _max_by_lev = max(1, _lev_cap) * size_equity
             _clamped = []
             if trade_notional > _max_by_lev:
                 trade_notional = _max_by_lev
@@ -1005,7 +1013,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 f"{', clamped:'+','.join(_clamped) if _clamped else ''})")
         else:
             _sz = atr_equal_risk_notional(
-                equity=agg_equity,
+                equity=size_equity,
                 risk_per_trade_pct=_risk_pct,
                 atr_abs=atr,
                 entry_px=mid_price,
