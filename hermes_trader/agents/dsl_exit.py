@@ -146,6 +146,23 @@ class ExitPolicy:
     # DSL retrace floor above ~+13.6% peaks, and short-side trails were always
     # rejected by adjust_tp_order's longs-only parameter guard. Runner
     # protection = scale-out TP + DSL retrace floor (0.25/0.35/0.40 tiers).
+    # ── Floor-exit grace window (2026-09-08, SOPH hair-trigger fix) ────────
+    # For the first `floor_exit_grace_sec` seconds after entry, FLOOR-based
+    # exits (breakeven ratchet / phase-1 / phase-2 retrace breach) cannot
+    # fire — the position keeps re-ratcheting peak/floor state, but the
+    # breach check is suppressed. The catastrophic stops are UNAFFECTED:
+    # max_loss (checked earlier, returns before this gate) and the
+    # exchange-side 1.5x-ATR backup SL remain fully armed during the grace.
+    # Motivation: the first daemon tick after entry ratchets the peak to the
+    # ENTRY CANDLE'S high, which includes the pre-fill spike the order was
+    # chasing; the breakeven lock then arms on a wick the position never
+    # owned and a pull back to entry kills the trade in <60s (SOPH 09-07
+    # 18:08 UTC held 12s / 09-08 03:51 UTC held 24s, both floor_breach at
+    # ~entry while price ran +3.7–11.5% spot afterward). The peak-seed fix
+    # (fast_exit_pass first-tick mid-seed) addresses the root cause; this
+    # grace is the belt-and-suspenders net for any other sub-first-tier
+    # noise exit in the first seconds. 0 = off.
+    floor_exit_grace_sec: float = 0.0
 
 
 class DSLTracker:
@@ -370,6 +387,26 @@ class DSLTracker:
 
         # ── Floor breach check ────────────────────────────────────────
         breached = (is_long and mark_px < floor) or (not is_long and mark_px > floor)
+        # Grace window (2026-09-08 SOPH hair-trigger fix): for the first
+        # `floor_exit_grace_sec` seconds after entry, a floor breach is
+        # suppressed — the peak/floor state keeps ratcheting (so the net is
+        # armed the moment the grace expires) but the exit cannot fire. This
+        # is the belt-and-suspenders net behind the peak-seed fix in
+        # fast_exit_pass. The catastrophic stops are UNAFFECTED: max_loss
+        # returned earlier in this method, and the exchange-side 1.5x-ATR
+        # backup SL sits independently of the DSL floor. Peak/floor state is
+        # already persisted above this point, so a daemon restart mid-grace
+        # resumes with the armed floor intact once the grace elapses.
+        if breached and pol.floor_exit_grace_sec > 0 \
+                and elapsed_min * 60 < pol.floor_exit_grace_sec:
+            self.consecutive_breaches = 0
+            self._last_floor = floor
+            return self._verdict(
+                exit=False,
+                reason=f"floor_exit_grace ({int(elapsed_min * 60)}s < {int(pol.floor_exit_grace_sec)}s)",
+                floor_price=floor, peak_price=self.peak_px,
+                phase="phase1", unrealized_pct=upct,
+            )
         # Patch A — noise-band suppression (sub-first-tier only). The hard
         # max_loss stop already returned above; this only governs the trailing
         # give-back of a barely-green position. If peak profit hasn't yet cleared
@@ -488,6 +525,7 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
         atr_stop_ceiling_pct=pol_raw.get("atr_stop_ceiling_pct", ExitPolicy.atr_stop_ceiling_pct),
         noise_band_enabled=pol_raw.get("noise_band_enabled", ExitPolicy.noise_band_enabled),
         noise_band_atr_mult=pol_raw.get("noise_band_atr_mult", ExitPolicy.noise_band_atr_mult),
+        floor_exit_grace_sec=float(pol_raw.get("floor_exit_grace_sec", 0.0) or 0.0),
     )
     t = DSLTracker(d["coin"], d["side"], float(d["entry_px"]),
                    float(d.get("entry_time") or time.time()), policy,
@@ -626,6 +664,7 @@ def _policy_from_config() -> ExitPolicy:
             consecutive_breaches_required=int(dsl.get("consecutive_breaches_required", 1) or 1),
             noise_band_enabled=bool(noise_cfg.get("enabled", False)),
             noise_band_atr_mult=float(noise_cfg.get("atr_mult", ExitPolicy.noise_band_atr_mult)),
+            floor_exit_grace_sec=float(dsl.get("floor_exit_grace_sec", 0.0) or 0.0),
             phase2_tiers=tiers if tiers else ExitPolicy().phase2_tiers,
         )
     except Exception:

@@ -40,7 +40,7 @@ from hermes_trader.client.exchange import (
     place_hl_trigger_order,
     set_leverage,
 )
-from hermes_trader.client.hl_client import (_MS_PER_CANDLE, fetch_account_state,
+from hermes_trader.client.hl_client import (fetch_account_state,
                                             fetch_hl_candles, resolve_user_address)
 
 logger = logging.getLogger(__name__)
@@ -1365,6 +1365,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         consecutive_breaches_required=int(dsl_config.get("consecutive_breaches_required", 1) or 1),
         noise_band_enabled=bool(_noise_cfg.get("enabled", False)),
         noise_band_atr_mult=float(_noise_cfg.get("atr_mult", 1.0)),
+        floor_exit_grace_sec=float(dsl_config.get("floor_exit_grace_sec", 0.0) or 0.0),
         phase2_tiers=_tiers if _tiers else ExitPolicy().phase2_tiers,
     )
     # ATR as % of entry — captured once here so the DSL stop width is stable
@@ -1569,9 +1570,6 @@ def fast_exit_pass(
     highs: Dict[str, List[float]] = {t.coin: [] for t in trackers}
     lows: Dict[str, List[float]] = {t.coin: [] for t in trackers}
 
-    # ms per candle, so we can tell which fetched candles still contain
-    # post-entry price action (see the loop below).
-    interval_ms = _MS_PER_CANDLE.get(candle_interval, 60_000)
     for tr in trackers:
         try:
             # Fresh mid for the floor check + also a candidate peak extreme.
@@ -1586,23 +1584,39 @@ def fast_exit_pass(
             # bypasses the read-side TTL so the still-forming candle is seen
             # every tick (the point of the tighter cadence).
             #
-            # CRITICAL: only ratchet from candles that still contain
-            # POST-ENTRY price action. fetch_hl_candles returns the last N
-            # candles, and the ones that fully closed before this position's
-            # entry carry a pre-entry spike in their high/low. Ratcheting the
-            # peak off them would arm the breakeven / phase-2 floor on the
-            # very first daemon tick (a few seconds after entry) and close the
-            # position at ~flat — fees only. That is exactly what killed JUP
-            # (2026-09-03 09:03: the 09:00 candle high was +2.2% pre-entry)
-            # and ARB (09:48: the 09:46 candle high was +1.1% pre-entry),
-            # both closed in <15s. Keep only candles whose window overlaps
-            # (entry, now]: open + interval > entry_ms.
+            # CRITICAL (two-part): only ratchet from a candle if it opened AT
+            # OR AFTER the fill. A candle that opened *before* the fill —
+            # including the entry candle still forming around the fill — has a
+            # high/low that mixes the PRE-FILL spike (the very move the order
+            # was chasing) with post-fill action. Ratcheting the peak off it
+            # arms the breakeven / phase-2 floor on a wick the position never
+            # owned, and a pull back to entry closes the trade in <60s.
+            #
+            #   * 2026-09-03 JUP/ARB fix: dropped candles that CLOSED before
+            #     entry (`c.t + interval_ms <= entry_ms`). Correct, but the
+            #     ENTRY CANDLE itself (opened a few seconds pre-fill, still
+            #     forming) survived that filter — its high was the pre-fill
+            #     spike. SOPH 09-07 18:08 (held 12s) and 09-08 03:51 (held
+            #     24s) both died to exactly that: the first daemon tick
+            #     ratcheted peak to the entry candle's high, the 0.7% breakeven
+            #     lock armed, mark < floor -> floor_breach at ~entry while price
+            #     then ran +3.7–11.5% spot.
+            #   * 2026-09-08 peak-seed fix: exclude ANY candle whose OPEN is
+            #     pre-fill (`c.t < entry_ms`). On the entry candle the only
+            #     clean post-entry peak candidate is the live MID (appended
+            #     above); the candle's own high/low is withheld until a
+            #     post-entry candle (opened >= entry) exists to ratchet from.
+            #     `c.t < entry_ms` is strictly stricter than the old
+            #     `c.t + interval_ms <= entry_ms`, so it subsumes the JUP/ARB
+            #     pre-entry filter and additionally drops the contaminated
+            #     entry candle.
             candles = fetch_hl_candles(tr.coin, candle_interval, candle_count, fresh=True)
             entry_ms = tr.entry_time * 1000
             for c in candles:
-                if c.t + interval_ms <= entry_ms:
-                    # Closed before the position opened — pre-entry price
-                    # action the position can no longer give back.
+                if c.t < entry_ms:
+                    # Opened before the fill — pre-fill price action (the
+                    # chased spike) the position can't give back. The live mid
+                    # is the clean seed for the peak on this candle.
                     continue
                 highs[tr.coin].append(float(c.h))
                 lows[tr.coin].append(float(c.l))
