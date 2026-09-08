@@ -45,6 +45,9 @@ class AgentMemory:
         self._daily_pnl: float = 0
         self._peak_daily_pnl: float = 0  # high-water mark of daily_pnl (intraday, resets at UTC roll)
         self._start_of_day_equity: float = 0
+        # Contribution level at the instant SOD equity was stamped —
+        # track_daily_pnl subtracts only contributions since then.
+        self._sod_contrib_baseline: float = 0.0
         self._day_start_ts: int = 0
         self._daily_halt_until: int = 0  # epoch ms; daily-halt timer (see arm_daily_halt)
         self._daily_halt_day: str = ""   # UTC day the active halt was armed on
@@ -91,6 +94,7 @@ class AgentMemory:
             self._daily_pnl = data.get("dailyPnl", 0)
             self._start_of_day_equity = data.get("startOfDayEquity", 0)
             self._day_start_ts = data.get("dayStartTs", 0)
+            self._sod_contrib_baseline = data.get("sodContribBaseline", 0.0)
             _dh = int(data.get("dailyHaltUntil", 0) or 0)
             self._daily_halt_until = _dh if _dh > now else 0
             self._daily_halt_day = str(data.get("dailyHaltDay", "") or "") if self._daily_halt_until else ""
@@ -132,6 +136,7 @@ class AgentMemory:
                     "dailyPnl": self._daily_pnl,
                     "startOfDayEquity": self._start_of_day_equity,
                     "dayStartTs": self._day_start_ts,
+                    "sodContribBaseline": self._sod_contrib_baseline,
                     "dailyHaltUntil": self._daily_halt_until,
                     "dailyHaltDay": self._daily_halt_day,
                     "openPositions": self._open_positions,
@@ -239,6 +244,18 @@ class AgentMemory:
         if self._day_start_ts < today_utc or self._start_of_day_equity == 0:
             self._start_of_day_equity = current_equity
             self._day_start_ts = today_utc
+            # Stamp the contribution level at the SAME instant as the equity.
+            # A mid-day restart would otherwise double-count every transfer
+            # already sitting in the balance: SOD equity is stamped at the
+            # CURRENT balance (which contains them) while net_contributions is
+            # measured from the UTC boundary (which also contains them), so the
+            # deposit is subtracted from an equity figure that already includes
+            # it and reads as a phantom loss — jamming the kill switch.
+            # Re-baselining SOD equity is NOT the fix: it launders a real
+            # drawdown out of the kill switch (the 2026-07-09 restart incident).
+            # Keeping the equity baseline and offsetting only post-baseline
+            # contributions handles both.
+            self._sod_contrib_baseline = float(net_contributions or 0.0)
             self._daily_pnl = 0
             self._peak_daily_pnl = 0  # reset high-water mark at the UTC day roll
             # NOTE: the daily-halt timer deliberately SURVIVES the UTC roll —
@@ -247,7 +264,16 @@ class AgentMemory:
             # its own timer expiry; early-release only applies on the armed day
             # (see daily_halt_armed_day).
         else:
-            self._daily_pnl = current_equity - self._start_of_day_equity - net_contributions
+            # Subtract only contributions SINCE the SOD baseline was stamped,
+            # not the full day-boundary delta — a pre-baseline transfer is
+            # already in the SOD equity figure (counting it again reads as a
+            # phantom loss). getattr so a pre-fix state file or a __new__-built
+            # object degrades to the old behaviour instead of raising inside
+            # the kill-switch path.
+            contrib_since_baseline = (float(net_contributions or 0.0)
+                                      - getattr(self, "_sod_contrib_baseline", 0.0))
+            self._daily_pnl = (current_equity - self._start_of_day_equity
+                               - contrib_since_baseline)
         # Track the day's peak PnL so a give-back breaker can lock in green days.
         self._peak_daily_pnl = max(self._peak_daily_pnl, self._daily_pnl)
         self._equity = current_equity
