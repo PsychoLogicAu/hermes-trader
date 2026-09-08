@@ -776,6 +776,29 @@ def _process_coin_run(perception, ctx):
                            "score": round(float(score), 1),
                            "trigger_score": round(float(score), 1)})
                 return
+        # T4.3 port (upstream 6181322895ab): per-coin re-entry cap preflight.
+        # The book is fee-dominated by over-churned re-entries; block the
+        # (cap+1)-th entry on a coin within the rolling window. Counts real
+        # fills only (memory.record_trade fires on successful entries). Code
+        # default: DISABLED (reentry_cap.enabled absent/false) — owner enables
+        # in .agent-config.json (hot-read). Risk-REDUCING.
+        _rc = _cfg_cd.get("reentry_cap") or {}
+        if bool(_rc.get("enabled", False)):
+            try:
+                _cap = int(_rc.get("max_per_coin", 0) or 0)
+                _win_ms = float(_rc.get("window_hours", 24.0) or 24.0) * 3_600_000
+                _n_recent = memory.count_entries_since(coin, now_ms - _win_ms)
+            except Exception:
+                _cap, _n_recent = 0, 0
+            from hermes_trader.agents.risk_gates import reentry_cap_reason
+            _cap_reason = reentry_cap_reason(coin, _n_recent, _cap)
+            if _cap_reason:
+                logger.info(f"{coin}: pre-research {_cap_reason} — skip")
+                log_event({"event": "ta_skip", "coin": coin,
+                           "signal": "REENTRY_CAP",
+                           "score": round(float(score), 1),
+                           "trigger_score": round(float(score), 1)})
+                return
     # TA filter — cheap statistical gate before the paid AI call.
     ta = analyze_perception(perception)
     if ta['signal'] != 'CONFIRMED' and not _burst_fired(perception):

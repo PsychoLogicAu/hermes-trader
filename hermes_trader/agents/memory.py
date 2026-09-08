@@ -382,6 +382,20 @@ class AgentMemory:
                 out[t["coin"]] = t["executed_at"]
         return out
 
+    def count_entries_since(self, coin: str, since_ms: int, limit: int = 100) -> int:
+        """Count this coin's executed ENTRIES with executed_at >= since_ms.
+
+        Backs the per-coin re-entry cap preflight (upstream 6181322895ab). Trade
+        records are written only on successful entries (executor.record_trade),
+        so this counts real fills, not blocked candidates. `limit` is the recent
+        trade window to scan (MAX_TRADES=100 covers the default 24h window at
+        this book's churn)."""
+        n = 0
+        for t in self.get_recent_trades(limit):
+            if t.get("coin") == coin and (t.get("executed_at") or 0) >= since_ms:
+                n += 1
+        return n
+
     def latest_close_ts_by_coin(self, limit: int = 200) -> Dict[str, int]:
         """Map each coin to its NEWEST realized close (closed_at ms)."""
         out: Dict[str, int] = {}
