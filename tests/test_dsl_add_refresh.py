@@ -33,9 +33,9 @@ def _isolated_state(tmp_path, monkeypatch):
     dsl_exit._loaded_from_disk = False
 
 
-def _pos(coin, szi, entry):
+def _pos(coin, szi, entry, lev=5):
     return {"position": {"coin": coin, "szi": str(szi), "entryPx": str(entry),
-                         "leverage": {"value": 5}}}
+                         "leverage": {"value": lev}}}
 
 
 def _track(coin, side, entry, size, peak=None, lev=5):
@@ -136,3 +136,66 @@ def test_legacy_state_file_loads_and_adopts_live_size(tmp_path):
     dsl_exit.rehydrate_from_exchange([_pos("SOL", 10, 50.0)])
     assert t.size == 10.0                   # adopted
     assert t.entry_px == 50.0               # basis untouched (no add proven)
+
+
+# --- Port of upstream c2335d11d64a (manual re-open reconciliation) ---------
+#
+# Operator closed xyz:BE and reopened it at 3x by hand. The tracker kept
+# saying leverage 1 and entry 268.15 while the live position was 3x at
+# 267.87. The tracker's leverage is the divisor for every ROE-based stop,
+# so max_loss_roe_pct 15 held against a stale 1x fires at a 15% PRICE move
+# — 45% of margin on a position actually running 3x. The exit was three
+# times looser than the policy said, on a live position, silently.
+
+
+def test_reopen_adopted_live_leverage():
+    # Tracker born at 1x; operator re-opened the same position at 3x by
+    # hand. The rehydrate must adopt the live leverage — every ROE stop
+    # divides by it.
+    t = _track("xyz:BE", "short", 268.15, 40.0, peak=268.15, lev=1)
+    dsl_exit.rehydrate_from_exchange([_pos("xyz:BE", -40, 268.15, lev=3)])
+    assert t.leverage == 3, "stale leverage — every ROE stop is off by 3x"
+
+
+def test_reopen_same_size_entry_drift_refreshes_basis():
+    # Close-and-reopen at the SAME size: size reconciliation sees no change,
+    # but the entry basis moved (268.15 -> 267.87, 0.104% > the 0.1%
+    # tolerance). refresh_entry_basis must refresh it, clamping the peak
+    # side-correctly — for a short the peak clamps DOWN to the new basis.
+    t = _track("xyz:BE", "short", 268.15, 40.0, peak=268.15, lev=5)
+    dsl_exit.rehydrate_from_exchange([_pos("xyz:BE", -40, 267.87, lev=5)])
+    assert t.entry_px == 267.87, "stale entry basis — floors are wrong"
+    assert t.size == 40.0
+    assert t.peak_px == 267.87              # short peak clamped to new basis
+
+
+def test_unchanged_reopen_keeps_peak():
+    # A position that did NOT change must not be disturbed: refreshing the
+    # basis every tick would reset peak tracking and never let a trail arm.
+    # Same lev, same size, entry within the 0.1% tolerance.
+    t = _track("xyz:BE", "short", 268.15, 40.0, peak=250.0, lev=5)
+    dsl_exit.rehydrate_from_exchange([_pos("xyz:BE", -40, 268.15, lev=5)])
+    assert t.entry_px == 268.15 and t.size == 40.0
+    assert t.peak_px == 250.0, "peak tracking must survive an unchanged tick"
+
+
+def test_legacy_size_zero_reopen_does_not_refresh_basis():
+    # The guard upstream's first version broke: a state file written before
+    # size tracking carries size 0, so a basis difference there cannot be
+    # told apart from a legacy record that never stored one — refreshing on
+    # that guess would move a live stop on no evidence. Legacy adopts the
+    # size silently and leaves the basis alone.
+    t = _track("DOGE", "long", 0.1, 0.0, peak=0.1, lev=5)   # size 0 = legacy
+    dsl_exit.rehydrate_from_exchange([_pos("DOGE", 1000, 0.099, lev=5)])
+    assert t.size == 1000.0               # adopted silently
+    assert t.entry_px == 0.1              # basis untouched (no size evidence)
+    assert t.peak_px == 0.1
+
+
+def test_entry_wobble_within_tolerance_is_noop():
+    # 0.05% is float/rounding noise, not a re-entry: within the 0.1%
+    # tolerance nothing may move.
+    t = _track("ETH", "long", 100.0, 10.0, peak=101.5, lev=5)
+    dsl_exit.rehydrate_from_exchange([_pos("ETH", 10, 100.05, lev=5)])
+    assert t.entry_px == 100.0 and t.size == 10.0
+    assert t.peak_px == 101.5
