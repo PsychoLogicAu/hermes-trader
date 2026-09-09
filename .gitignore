@@ -122,6 +122,10 @@ log.txt
 # Hermes trader logs (datestamped, rotated, unlimited)
 trader-logs/
 
+# Archived pre-cutoff logs + config/env backups (counterfactuals use the
+# current state from 2026-09-09 11:30 UTC onwards; nothing bridges the gap)
+archive/
+
 # Duel A/B log (bind-mounted, runtime JSONL)
 duel-logs/
 
