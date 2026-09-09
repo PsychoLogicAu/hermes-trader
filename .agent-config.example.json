@@ -1,8 +1,12 @@
 {
   "_comment": [
-    "Template for .agent-config.json \u2014 copy, edit, keep out of git:",
+    "Template for .agent-config.json - copy, edit, keep OUT of git:",
     "  cp .agent-config.example.json .agent-config.json",
     "mode OFF = analyse-only (exits still managed). Flip to LIVE deliberately.",
+    "Values below are conservative baselines, NOT live tuning: the bot ratchets",
+    "caps (max_trade_notional_usd, daily_kill_cap_usd, daily_giveback_min_peak_usd)",
+    "and mode over time, so the live file drifts from this template - that is expected.",
+    "Gates/signals default to shadow_mode=true (log-only); set false to arm.",
     "See docs/CONFIG.md for every key and docs/OPERATIONS.md for hot-reload rules."
   ],
   "mode": "OFF",
@@ -13,20 +17,14 @@
   "max_trade_notional_usd": 35,
   "tp_scale_fraction": 0.5,
   "max_concurrent": 5,
-  "research_max_workers": 4,
+  "slot_revert_baseline": 5,
   "max_total_notional_pct": 2.0,
-  "daily_kill_pct_of_equity": 0.2,
-  "daily_kill_cap_usd": 100,
-  "daily_kill_flatten_mult": 1.25,
-  "daily_kill_min_usd": 8,
-  "daily_loss_halt": { "halt_min": 360, "release_band_pct": 0.5 },
   "daily_giveback_halt_pct": 0.5,
   "daily_giveback_min_peak_usd": 25.0,
   "crowded_with_min_conf": 0.8,
   "min_available_margin_pct": 0.2,
   "cooldown_min": 30,
   "held_research_interval_min": 3,
-  "research_cooldown_min": 3,
   "min_ai_confidence": 0.7,
   "counter_regime_min_conf": 0.8,
   "max_crypto_long_correlated": 2,
@@ -72,6 +70,7 @@
       }
     ],
     "stale_flat_timeout_minutes": 480,
+    "fast_exit_interval_sec": 15,
     "floor_exit_grace_sec": 0.0,
     "regime_aware": {
       "enabled": false,
@@ -112,16 +111,19 @@
     "bypass_sidestep_overrides": false,
     "min_confidence": 0.7,
     "min_composite": 30.0,
-    "bypass_late_trend_chase": true,
+    "bypass_late_trend_chase": false,
     "bypass_late_trend_chase_min_conf": 0.9,
+    "bypass_late_trend_chase_shadow_mode": true,
+    "late_chase_dynamic_per_signal_drop": 0.1,
+    "late_chase_timesfm_vote": false,
+    "late_chase_timesfm_drop": 0.03,
     "min_hip3_composite": 50.0,
     "min_short_confidence": 0.72,
     "min_short_composite": 25.0,
     "mover_min_confidence": 0.72,
     "mover_min_composite": 20.0,
     "bypass_low_volume": true,
-    "bypass_low_volume_min_conf": 0.85,
-    "liquidity_min_volume_usd": 1000000
+    "bypass_low_volume_min_conf": 0.85
   },
   "momentum_continuation": {
     "enabled": false,
@@ -135,6 +137,17 @@
     "wick_body_ratio": 2.0,
     "context_lookback": 6,
     "context_pct": 1.5
+  },
+  "band_snapback": {
+    "enabled": true,
+    "shadow_mode": true,
+    "interval": "1h",
+    "ma_type": "ema",
+    "band_span": 16,
+    "max_drift_pct": 1.5,
+    "min_poke_atr": 0.75,
+    "max_project_atr": 0.25,
+    "overrides": {}
   },
   "override_requires_ai": true,
   "whale_scan_bypass": false,
@@ -181,7 +194,8 @@
   "momentum_reentry": {
     "enabled": true,
     "reclaim_pct": 2.0,
-    "min_composite": 30
+    "min_composite": 30,
+    "shadow_mode": true
   },
   "runner_mover_surface": {
     "enabled": true,
@@ -197,13 +211,92 @@
     "device": "cpu",
     "context_length": 100,
     "forecast_horizon": 12,
+    "min_conf_ratio": 0.25,
     "cache_ttl_seconds": 300,
-    "timeout_seconds": 30,
-    "quantile_levels": [
-      0.1,
-      0.5,
-      0.9
-    ],
-    "num_samples": 50
+    "timeout_seconds": 30
+  },
+  "timesfm_signal": {
+    "enabled": true,
+    "debug": false,
+    "in_prompt": false,
+    "model_id": "google/timesfm-3.0-pytorch",
+    "device": "cpu",
+    "context_length": 100,
+    "forecast_horizon": 12,
+    "min_conf_ratio": 0.25,
+    "cache_ttl_seconds": 300,
+    "timeout_seconds": 60
+  },
+  "research_max_workers": 4,
+  "chronos_mismatch_gate": {
+    "enabled": true,
+    "shadow_mode": true,
+    "min_conf": 0.9,
+    "min_composite": 60,
+    "min_abs_median_pct": 0.5,
+    "min_conf_ratio": 0.25
+  },
+  "chronos_tail_trigger_gate": {
+    "enabled": true,
+    "shadow_mode": false,
+    "window_steps": 6,
+    "min_adv_path_pct": 2.5,
+    "min_conf": 0.9,
+    "min_composite": 60
+  },
+  "forecast_agreement_veto_gate": {
+    "enabled": true,
+    "shadow_mode": true,
+    "chronos": {
+      "window_steps": 6,
+      "min_adv_path_pct": 2.5
+    },
+    "timesfm": {
+      "window_steps": 12,
+      "min_adv_path_pct": 2.0
+    },
+    "min_conf": 0.9,
+    "min_composite": 60
+  },
+  "held_reval_min_age_min": 60,
+  "band_counter_breach_gate": {
+    "enabled": true,
+    "shadow_mode": true,
+    "min_conf": 0.9,
+    "min_breach_pct": 1.0,
+    "drift_ref_span": 32,
+    "drift_confirmed_release": {
+      "enabled": true,
+      "min_drift_pct": 2.5,
+      "pop_lookback_5m": 48
+    }
+  },
+  "duelist_veto_gate": {
+    "enabled": true,
+    "shadow_mode": true,
+    "min_conf": 0.9,
+    "min_composite": 60
+  },
+  "daily_kill_pct_of_equity": 0.2,
+  "daily_kill_cap_usd": 100,
+  "daily_kill_min_usd": 8,
+  "daily_kill_flatten_mult": 1.25,
+  "daily_loss_halt": {
+    "halt_min": 360,
+    "release_band_pct": 0.5
+  },
+  "llm": {
+    "model": "Spark-X2.5-4B-GGUF-Q4_K_M",
+    "duelist_model": "Qwen2.5-Coder-7B-Instruct-GGUF-Q5_0",
+    "sampling": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "top_k": -1
+    },
+    "duelist_sampling": {
+      "temperature": 0.7,
+      "top_p": 0.8,
+      "repetition_penalty": 1.05
+    }
   }
 }
