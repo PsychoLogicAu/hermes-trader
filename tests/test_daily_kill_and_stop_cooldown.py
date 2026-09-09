@@ -226,3 +226,75 @@ def test_utc_roll_no_longer_clears_halt_until():
     m.track_daily_pnl(91.0)        # new UTC day begins
     assert m._daily_halt_until > int(time.time() * 1000)  # halt SURVIVED
     assert m._daily_pnl == 0.0                            # day pnl did reset
+
+
+# ── contribution baseline: deposits must not read as losses ───────────────
+
+def test_mid_day_restart_after_deposit_does_not_invent_a_loss(monkeypatch):
+    """Observed 2026-09-06 on the live account. $21.77 was moved onto the
+    xyz dex while the loop was down; on restart track_daily_pnl stamped
+    start-of-day equity at the CURRENT balance (which already contained the
+    transfer) while net_contributions were still measured from the UTC
+    boundary (which also contained it). The deposit was subtracted from an
+    equity figure that already included it: daily PnL read -$21.77 on an
+    account with zero fills, the kill switch read 100% to floor, and every
+    entry was refused — correct behaviour on a wrong input.
+    """
+    from hermes_trader.agents.memory import AgentMemory
+    m = AgentMemory()
+    monkeypatch.setattr(m, "flush", lambda: None)
+
+    # Day rolled with the loop DOWN; the first tick after restart already
+    # contains the transfer in BOTH equity and the contribution ledger.
+    m.track_daily_pnl(34.70, net_contributions=21.77)
+    assert m.get_daily_pnl() == 0.0  # first tick of a new day is always flat
+
+    # (1) A transfer BEFORE the baseline must NOT read as a loss — nothing
+    # has traded since the restart (old code: 34.71-34.70-21.77 = -21.76).
+    m.track_daily_pnl(34.71, net_contributions=21.77)
+    assert abs(m.get_daily_pnl() - 0.01) < 0.02, (
+        f"a transfer was counted as a trading loss: {m.get_daily_pnl()}")
+
+    # (2) A REAL drawdown after the baseline still registers — the guard
+    # must not launder a loss out of the kill switch (2026-07-09 failure
+    # in the other direction: five restarts, kill never saw a -$75 night).
+    m.track_daily_pnl(30.00, net_contributions=21.77)
+    assert m.get_daily_pnl() < -4.0, "a genuine drawdown stopped being visible"
+
+    # (3) Money arriving AFTER the baseline stamp is contribution-neutral:
+    # a +$20 deposit moves equity, not PnL (old code: 50-34.70-41.77 = -26.47).
+    m._last_eq_reading_ts -= 200  # the jump must look sustained, not a degraded read
+    m.track_daily_pnl(50.00, net_contributions=41.77)
+    assert abs(m.get_daily_pnl() - (50.00 - 34.70 - 20.0)) < 0.01
+
+
+def test_restart_preserves_sod_baseline_and_contrib_level(tmp_path, monkeypatch):
+    """(4) A mid-day restart must NOT re-baseline SOD equity to the current
+    balance — that would launder a real drawdown out of the kill switch.
+    The equity baseline AND the contribution baseline persist across the
+    restart, so a pre-restart deposit stays neutral and the day's loss
+    stays visible."""
+    from hermes_trader.agents import memory as mem_mod
+    from hermes_trader.agents.memory import AgentMemory
+    monkeypatch.setattr(mem_mod, "MEMORY_FILE", str(tmp_path / "mem.json"))
+
+    # Before the restart: baseline the day ($5 transfer already in the
+    # balance), then take a real -$8 drawdown.
+    m1 = AgentMemory()
+    m1._initialized = True
+    m1.track_daily_pnl(100.0, net_contributions=5.0)
+    m1.track_daily_pnl(92.0, net_contributions=5.0)
+    assert abs(m1.get_daily_pnl() - (-8.0)) < 1e-6
+    m1.flush()
+
+    # Restart: a fresh instance loads the persisted state.
+    m2 = AgentMemory()
+    m2.load()
+    assert m2._start_of_day_equity == 100.0   # NOT re-stamped to 92
+    assert m2._sod_contrib_baseline == 5.0    # contribution level persisted
+    assert abs(m2.get_daily_pnl() - (-8.0)) < 1e-6
+
+    # Post-restart tick: the drawdown is still visible to the kill switch
+    # AND the pre-restart deposit is not subtracted a second time.
+    m2.track_daily_pnl(91.5, net_contributions=5.0)
+    assert m2.get_daily_pnl() < -8.0, "a restart laundered a real drawdown"

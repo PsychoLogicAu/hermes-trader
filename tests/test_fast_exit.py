@@ -153,12 +153,22 @@ def test_fast_exit_pass_catches_unsampled_spike_and_closes(monkeypatch):
     100.94 — the close still fires, but a LOWER/looser floor; the ratchet is
     what arms it off the TRUE extreme.
     """
+    # The position was entered 60s ago (realistic: the still-forming 1m candle
+    # below OPENED well after the fill). An explicit past entry_time also sidesteps
+    # the millisecond boundary: with entry==now, the fake candles built at t=now
+    # truncate below the float entry_ms and get filtered as if pre-entry.
+    now_ms = int(time.time() * 1000)
     dsl_exit.register_position(
         coin="GRASS", side="long", entry_px=100.0, leverage=3,
         entry_atr_pct=1.0, policy=_policy(),
+        entry_time=(now_ms - 60_000) / 1000.0,
     )
+    # The spiking candle OPENED after entry (post-entry), so its high is a
+    # legitimate peak source — the whole point of the pass.
     monkeypatch.setattr(executor, "fetch_hl_candles", lambda *a, **k: [
-        _candle(100.2, 99.8), _candle(101.5, 100.0), _candle(101.3, 100.9),
+        _candle(100.2, 99.8, t=now_ms - 30_000),
+        _candle(101.5, 100.0, t=now_ms - 20_000),
+        _candle(101.3, 100.9, t=now_ms),
     ])
 
     # Tick 1: mid inside the spike, above protect.

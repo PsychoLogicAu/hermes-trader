@@ -3231,6 +3231,86 @@ def test_chronos_block_in_prompt_sync_render():
             cs.get_chronos_signal_sync = real_sync
 
 
+def test_timesfm_block_in_prompt_sync_render():
+    """Mirror of the chronos in_prompt pin (P2): with
+    timesfm_signal.in_prompt true the block renders via the sync wrapper;
+    with in_prompt false it is omitted even when a valid signal would
+    render. Config is written to the temp config file the test suite is
+    isolated on and the gate reads it per call via the real
+    read_agent_config — no patching, so the live .agent-config.json can
+    never leak in.
+
+    The path is taken from config_store.CONFIG_PATH, NOT
+    HERMES_AGENT_CONFIG_FILE: a few test modules re-point the env var at
+    import time (their own isolation dirs), which is too late for
+    config_store's module-level path freeze — so the env var can lag the
+    file read_agent_config actually opens mid-suite.
+    """
+    import json
+    import os
+    import hermes_trader.agents.config_store as cs
+    import hermes_trader.agents.timesfm_signal as ts
+    from hermes_trader.agents import research
+
+    cfg_path = cs.CONFIG_PATH
+
+    # Negative median (decay warning) above the min_conf_ratio floor (0.25):
+    # |median_pct| / spread_pct = 2.778 / 5.555 = 0.50, so the FADE note
+    # renders. Same signal shape as the chronos pin; horizon 12 steps of
+    # 5m = ~1h.
+    sig = ts.TimesfmSignal(
+        coin="BTC", side="long", context_last=9.0,
+        median=8.75, q_low=8.5, q_high=9.3,
+        median_pct=-2.778, spread_pct=5.555,
+        horizon=12, model_id="google/timesfm-3.0-pytorch",
+        inference_ms=10.0, error=None,
+        q10_path_pct=[-1.5, -2.8, -3.9, -4.8, -5.6, -6.0, -4.1, -3.2],
+        q90_path_pct=[0.4, 0.9, 1.2, 1.4, 1.5, 1.5, 1.3, 1.1],
+    )
+    perception = {"type": "perp", "mid": 9.0, "composite_score": 40, "triggers": []}
+    snap = {"ema8": None, "ema21": None, "last_close": 9.0}
+
+    had_cfg = os.path.exists(cfg_path)
+    cfg_backup = ""
+    if had_cfg:
+        with open(cfg_path) as f:
+            cfg_backup = f.read()
+    real_sync = ts.get_timesfm_signal_sync
+    ts.get_timesfm_signal_sync = lambda coin, side: sig
+    try:
+        def _build():
+            return research._build_user_message(
+                "BTC", perception, snap, snap, snap, "0.01%/hr", "no news",
+                250.0, [], "LIVE",
+            )
+
+        # in_prompt true + enabled true -> block renders.
+        with open(cfg_path, "w") as f:
+            json.dump({"timesfm_signal": {"enabled": True, "in_prompt": True}}, f)
+        msg = _build()
+        assert "TimesFM-3 forecast (shadow signal" in msg
+        assert "-2.78%" in msg
+        assert "FADE within ~1h" in msg
+        assert "p10 avg -5.6%" in msg
+        assert "p90 avg +3.3%" in msg
+        assert "early tail, first 30m" in msg
+        assert "p10 min -6.0%" in msg
+        assert "p90 max +1.5%" in msg
+
+        # in_prompt false -> block omitted even with a valid signal.
+        with open(cfg_path, "w") as f:
+            json.dump({"timesfm_signal": {"enabled": True, "in_prompt": False}}, f)
+        msg_off = _build()
+        assert "TimesFM" not in msg_off
+    finally:
+        ts.get_timesfm_signal_sync = real_sync
+        if had_cfg:
+            with open(cfg_path, "w") as f:
+                f.write(cfg_backup)
+        elif os.path.exists(cfg_path):
+            os.remove(cfg_path)
+
+
 def test_peek_chronos_never_computes():
     """peek_chronos returns the fresh cache entry or None; it never runs a
     forecast (so the prompt path stays non-blocking)."""

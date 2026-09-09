@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
@@ -40,7 +41,7 @@ from hermes_trader.client.exchange import (
     place_hl_trigger_order,
     set_leverage,
 )
-from hermes_trader.client.hl_client import (_MS_PER_CANDLE, fetch_account_state,
+from hermes_trader.client.hl_client import (fetch_account_state,
                                             fetch_hl_candles, resolve_user_address)
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,15 @@ def _serialized(fn):
 # but tight enough to cap the gap-throughs that were the asymmetry killer). Config-tunable.
 _DEFAULT_SL_ATR_MULT = 1.5
 TP_ATR_MULT = 1.0
+# Headroom on the maintenance-aware liquidation distance for the server-side
+# backup SL. A stop placed OUTSIDE liq can never fire — the position liquidates
+# first — so the SL must clear `liq_safety_frac * (1/lev - maint)`. 0.85 keeps
+# the SL reachable while holding live books at their running leverage (a 1.5x
+# ATR SL is well inside liq on normal names; only high-ATR / low-maxLeverage
+# coins ever trip the bound). CODE default, hot-read, reversible: set
+# liq_safety_frac=0 to disable the bound. T2.1/T2.2 port (maintenance-aware liq
+# bound + cap leverage to honor the stop, don't shrink it).
+_DEFAULT_LIQ_SAFETY_FRAC = 0.85
 
 # Static fallback 24h volumes, used ONLY when the live universe lookup fails.
 # WIRING FIX 2026-06-11: these constants used to be the ONLY volume source for
@@ -117,6 +127,49 @@ def kelly_size(
     half_kelly = f_star / 2
     notional = half_kelly * equity
     return min(notional, max_trade_notional)
+
+
+def liq_safe_leverage(leverage: int, stop_frac: float, coin_max_leverage: int,
+                      liq_safety_frac: float = _DEFAULT_LIQ_SAFETY_FRAC) -> int:
+    """Highest leverage <= `leverage` whose maintenance-aware liquidation
+    distance still clears a server-side stop of width `stop_frac` (fraction of
+    entry price, e.g. the 1.5x-ATR backup SL).
+
+    `1/lev` OVERSTATES the isolated liq distance: maintenance margin eats into
+    it, so the real liq move is `1/lev - maint`, `maint = 1/(2 * coin_max_lev)`.
+    On a high-maxLeverage coin maint is negligible (a maxLev-20 coin at 5x
+    liquidates at 17.5% vs the naive 20%); on a low-maxLeverage coin it
+    dominates (a maxLev-3 coin at 3x liquidates at 16.7%, not the naive 33%).
+    A stop placed BEYOND that distance can never fire — the position is
+    liquidated first — so on a violent gap the backup SL would be useless in
+    the exact regime it exists to catch.
+
+    We therefore CAP LEVERAGE to keep the stop reachable rather than shrink the
+    stop to fit leverage: the stop width (sl_atr_mult x ATR) is the validated
+    parameter. The narrower DSL floor (max_loss spot) is the binding NORMAL exit
+    and is inside liq by construction (worst live class: maxLev-5 → liq 10%,
+    floor 5%), so only the wider backup SL needs this bound.
+
+    `liq_safety_frac` (0.85) is the headroom on the liq bound; 0 disables it.
+    Returns `leverage` unchanged when no stop / headroom is requested or it
+    already fits; never returns below 1.
+    """
+    stop = float(stop_frac or 0.0)
+    lev = int(leverage)
+    safety = float(liq_safety_frac or 0.0)
+    if stop <= 0 or safety <= 0 or lev <= 1:
+        return max(1, lev)
+    max_lev = int(coin_max_leverage or 0)
+    maint = (1.0 / (2.0 * max_lev)) if max_lev > 0 else 0.0
+    # Both liq distance and the bound are monotonic decreasing in leverage
+    # (higher lev → tighter liq), so walk down from the request until the stop
+    # fits. +1e-9 absorbs binary-float dust on exact fits.
+    while lev > 1:
+        liq = 1.0 / lev - maint
+        if liq > 0 and stop <= safety * liq + 1e-9:
+            return lev
+        lev -= 1
+    return 1
 
 
 # Conviction sizing: scale the per-trade equity fraction by AI confidence so
@@ -173,35 +226,79 @@ def select_exit_params(dsl_config: Dict[str, Any], regime: str) -> tuple:
     return (base_protect, base_retrace, base_tiers, "scalp")
 
 
+@dataclass(frozen=True)
+class MomentumReentryDecision:
+    """Outcome of the momentum-continuation re-entry decision.
+
+    Carries the decision AND its three-state meaning:
+    ``allowed=True`` (bypass), ``suppressed=True`` (the condition FIRED but
+    ``momentum_reentry.shadow_mode`` kept it log-only — the cooldown still
+    binds), or neither (no opinion). The decision is pure — no logging — so
+    the call sites (which hold the coin name) emit the accrual line via
+    :meth:`shadow_accrual_line`, giving that format exactly one owner while
+    keeping I/O out of the decision. (The coin must not enter the decision
+    API: it is a logging need, not a decision input — the earlier
+    ``coin: str = ""`` kwarg was that smuggling, corrected 2026-09-09.)"""
+    allowed: bool
+    reason: str
+    suppressed: bool
+
+    def is_allowed(self) -> bool:
+        return self.allowed
+
+    def shadow_accrual_line(self, coin: str) -> str:
+        """The counterfactual accrual record for a shadow-suppressed bypass.
+        THE single owner of this line's format — both call sites log exactly
+        this string, nothing else."""
+        return (f"[gate][SHADOW] momentum_reentry WOULD BYPASS cooldown for "
+                f"{coin} ({self.reason}) — shadow_mode ON, NOT applying "
+                f"(cooldown still binds)")
+
+
 def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
-                             cfg: Dict[str, Any]) -> tuple:
+                             cfg: Dict[str, Any]) -> MomentumReentryDecision:
     """Should we BYPASS the loss-cooldown because a stopped name has RESUMED its
     uptrend? (The autopsy leak: SPCX was force-entered, noise-stopped, then the
-    180m loss-cooldown locked us out of its +29% run.) The cooldown is anti-revenge
-    — correct for a FALLING name; but a name that breaks back ABOVE where it stopped
-    us, with strong composite, is a momentum-continuation re-entry, not revenge.
+    180m loss-cooldown locked us out of its +29% run.) The cooldown is
+    anti-revenge — correct for a FALLING name; but a name that breaks back
+    ABOVE where it stopped us, with strong composite, is a momentum-continuation
+    re-entry, not revenge.
 
-    Conservative + whipsaw-guarded: requires price to reclaim `reclaim_pct`% ABOVE
-    the prior stop-out price AND composite >= min_composite. LONG-only. Each
-    re-entry that loses re-arms the cooldown at a NEW (higher) stop, so repeated
-    whipsaw must clear an ever-rising bar. Returns (allow, reason)."""
+    Conservative + whipsaw-guarded: requires price to reclaim `reclaim_pct`%
+    ABOVE the prior stop-out price AND composite >= min_composite. LONG-only.
+    Each re-entry that loses re-arms the cooldown at a NEW (higher) stop, so
+    repeated whipsaw must clear an ever-rising bar.
+
+    PURE — no coin, no logging: returns a :class:`MomentumReentryDecision`.
+    ``momentum_reentry.shadow_mode`` (code default false) does not change the
+    decision to ``allowed``; it sets ``suppressed`` when the condition fires
+    so the call sites log the counterfactual accrual line while the cooldown
+    still binds (no-op merge: shadow absent -> ``allowed`` exactly as today)."""
     mr = cfg.get("momentum_reentry") or {}
     if not mr.get("enabled", False):
-        return (False, "")
+        return MomentumReentryDecision(False, "", False)
+    shadow = bool(mr.get("shadow_mode", False))
     try:
         last_exit_px = float(last_exit_px or 0)
         current_mid = float(current_mid or 0)
     except (TypeError, ValueError):
-        return (False, "")
+        return MomentumReentryDecision(False, "", False)
     if (last_side or "").lower() != "long" or last_exit_px <= 0 or current_mid <= 0:
-        return (False, "")
+        return MomentumReentryDecision(False, "", False)
     reclaim = float(mr.get("reclaim_pct", 1.0)) / 100.0
     min_comp = float(mr.get("min_composite", 30))
     if current_mid >= last_exit_px * (1 + reclaim) and float(composite or 0) >= min_comp:
         gain = (current_mid / last_exit_px - 1) * 100
-        return (True, f"reclaimed +{gain:.1f}% above stop {last_exit_px:g}, "
-                      f"composite {float(composite or 0):.0f}")
-    return (False, "")
+        reason = (f"reclaimed +{gain:.1f}% above stop {last_exit_px:g}, "
+                  f"composite {float(composite or 0):.0f}")
+        if shadow:
+            # The condition HOLDS but the bypass must not apply: mark it
+            # shadow-suppressed so BOTH call sites log the same accrual line
+            # and the cooldown still binds. No log here — the decision stays
+            # pure; the call sites (which know the coin) emit it.
+            return MomentumReentryDecision(False, reason, True)
+        return MomentumReentryDecision(True, reason, False)
+    return MomentumReentryDecision(False, "", False)
 
 
 def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
@@ -549,6 +646,23 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 "reason": f"signal_veto ({_enf.veto_reason})",
             }
 
+    # Falling-knife guard (port of upstream 51bc23b): the composite triggers
+    # the sidestep qualifies on (pctMoveSpike/volumeSpike/shockDay/momentumBurst)
+    # are MAGNITUDE-based, so a violent SELLOFF fires them like a breakout and
+    # the PASS->LONG upgrade would buy the open of a red breakdown bar (the
+    # xyz:SMSN case). Skip the upgrade when the direction is bearish (downtrend
+    # momentum or a clearly-negative 24h move, no uptrend). Sidestep path ONLY —
+    # the whale/breakout/composite override branches keep their own gates.
+    if analysis.get("verdict") == "PASS" and ta_sidestep_strong:
+        _bear_block = _sidestep_bearish_block_reason(analysis, config)
+        if _bear_block:
+            logger.info(f"[executor] TA sidestep SKIPPED on {analysis['coin']}: {_bear_block}")
+            return {
+                "executed": False, "mode": mode,
+                "analysis_id": analysis["id"],
+                "reason": _bear_block,
+            }
+
     if analysis.get("verdict") == "PASS" and override_strong:
         trigger = ("whale-accumulation" if whale_fired
                    else f"composite={analysis.get('composite_score'):.0f}+{analysis.get('slow_burn_count')} slow-burn"
@@ -600,12 +714,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # stopped us (resumed uptrend, strong composite), bypass the anti-revenge
         # cooldown — that's a run we got shaken out of, not a falling knife.
         _last = memory.last_close_for(analysis["coin"]) or {}
-        _mr_ok, _mr_why = momentum_reentry_allowed(
+        _mr = momentum_reentry_allowed(
             _last.get("exit_px"), _last.get("side"),
             analysis.get("mid"), analysis.get("composite_score"), config)
-        if _mr_ok:
+        if _mr.suppressed:
+            # The re-entry condition FIRED but shadow_mode keeps it log-only —
+            # the counterfactual accrual record. The cooldown still binds
+            # below (the block branch is reached: is_allowed() is False).
+            logger.warning(_mr.shadow_accrual_line(analysis["coin"]))
+        if _mr.is_allowed():
             logger.info(f"[executor] momentum re-entry on {analysis['coin']}: "
-                        f"{_mr_why} — bypassing {_lc_remaining:.0f}min loss cooldown")
+                        f"{_mr.reason} — bypassing {_lc_remaining:.0f}min loss cooldown")
         else:
             return {
                 "executed": False, "mode": mode,
@@ -746,6 +865,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         state, equity, available = _read_state()
     agg_equity = float(state.get("equity") or equity)                # aggregated → exposure gate
     total_open_notional = float(state.get("total_ntl") or 0)         # aggregated → notional gate
+    # Per-account sizing equity: a trade is FUNDED by one account (main for crypto,
+    # the specific HIP-3 dex for colon coins), so the per-trade RISK budget must be
+    # based on THAT account's equity, not the aggregate. Sizing on aggregate over-sizes
+    # vs the balance that actually funds the trade -> the funding account saturates and
+    # every other mover is margin-blocked. `equity` above is already the per-`_target_dex`
+    # resolution; fall back to aggregate only on a degraded/missing breakdown (equity<=0).
+    # (Upstream 729be391cac3.) `agg_equity` stays for the aggregate exposure/gross caps.
+    size_equity = float(equity) if (equity or 0) > 0 else agg_equity
     if equity <= 0:
         # Persisted across retries — refuse rather than send an unsized order.
         return {
@@ -830,14 +957,58 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     tp_px = analysis.get("tp_px")
     stop_px = analysis.get("stop_px")
 
-    leverage = min(int(config.get("leverage", HL_LEVERAGE)),
-                   get_max_leverage(analysis["coin"]))
+    try:
+        _max_lev = get_max_leverage(analysis["coin"])
+    except Exception as _mle:
+        # Refuse rather than guess. get_max_leverage raises when the meta is
+        # unusable (e.g. a partial cache entry missing maxLeverage); defaulting
+        # to 1x here would open a position at a third of the intended leverage,
+        # silently, with no error anywhere.
+        return {
+            "executed": False, "mode": mode, "analysis_id": analysis["id"],
+            "reason": f"leverage_unresolved ({analysis['coin']}: {_mle})",
+        }
+    leverage = min(int(config.get("leverage", HL_LEVERAGE)), _max_lev)
     _notional_cap = float(config.get("max_trade_notional_usd", 0) or 0)
     _atr_sizing = config.get("atr_risk_sizing", {}) or {}
     _atr_sizing_enabled = bool(_atr_sizing.get("enabled", False))
     mid_price = 0.0
     atr = 0.0
     size_in_coin = 0.0
+
+    # Maintenance-aware liquidation bound on the server-side backup SL (T2.1/T2.2
+    # port). The backup SL (sl_atr_mult x ATR) is the WIDEST exchange-side stop and
+    # is placed later with no liq clamp. On a high-ATR / low-maxLeverage coin it can
+    # sit OUTSIDE the maintenance-aware liq distance (1/lev - maint), so on a
+    # violent gap the position liquidates BEFORE the SL fires — useless in the exact
+    # regime it exists to catch. We cap leverage to keep the SL reachable (don't
+    # shrink the SL, the validated param). The narrower DSL floor (max_loss spot) is
+    # the binding normal exit and is inside liq by construction, so only the wider
+    # backup SL needs this bound. Runs BEFORE sizing so notional/margin are computed
+    # at the (possibly capped) leverage; a lower lev is strictly safer for liq.
+    # Gated: liq_safety_frac=0 disables. A lookup hiccup never kills a trade — the
+    # DSL floor still protects normal exits.
+    _liq_safety = float(config.get("liq_safety_frac", _DEFAULT_LIQ_SAFETY_FRAC) or 0)
+    if _liq_safety > 0:
+        try:
+            _sl_mult = float(config.get("sl_atr_mult", _DEFAULT_SL_ATR_MULT))
+            if mid_price <= 0:
+                mid_price = get_hl_price(analysis["coin"])
+            if atr <= 0:
+                atr = get_hl_atr("4h", 14, analysis["coin"])
+            if mid_price > 0 and atr > 0:
+                _sl_frac = _sl_mult * atr / mid_price
+                _lev_liq = liq_safe_leverage(leverage, _sl_frac, _max_lev, _liq_safety)
+                if _lev_liq < leverage:
+                    logger.warning(
+                        f"[executor] {analysis['coin']}: backup SL {_sl_mult}x ATR "
+                        f"({_sl_frac*100:.1f}% spot) sits outside liq at {leverage}x "
+                        f"(maxLev {_max_lev}) — capping leverage to {_lev_liq}x so the "
+                        f"server-side stop stays inside liquidation "
+                        f"(book={analysis.get('strategy_book') or 'main'})")
+                    leverage = _lev_liq
+        except Exception as _liq_e:
+            logger.debug(f"[executor] liq-bound lookup failed for {analysis['coin']}: {_liq_e}")
 
     if _atr_sizing_enabled:
         coin = analysis["coin"]
@@ -868,14 +1039,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _max_roe = float(_dsl.get("max_loss_roe_pct", 40.0) or 40.0)
             _lev = max(1, leverage)
             _stop_frac = min(_max_loss, _max_roe / _lev) / 100.0
-            if agg_equity <= 0 or _risk_pct <= 0 or _stop_frac <= 0:
+            if size_equity <= 0 or _risk_pct <= 0 or _stop_frac <= 0:
                 return {
                     "executed": False, "mode": mode, "analysis_id": analysis["id"],
                     "reason": f"primary_stop_sizing_zero ({coin}: invalid inputs)",
                 }
-            trade_notional = (_risk_pct * agg_equity) / _stop_frac
-            _lev_cap = min(get_max_leverage(coin), int(config.get("leverage", HL_LEVERAGE)))
-            _max_by_lev = max(1, _lev_cap) * agg_equity
+            trade_notional = (_risk_pct * size_equity) / _stop_frac
+            # `leverage` here is the FINAL value: min(config, exchange max) THEN
+            # the liq-bound cap above. Clamp notional to it so a liq-capped lev
+            # can't be out-sized (notional > lev*equity → margin shortfall on HL).
+            _lev_cap = leverage
+            _max_by_lev = max(1, _lev_cap) * size_equity
             _clamped = []
             if trade_notional > _max_by_lev:
                 trade_notional = _max_by_lev
@@ -889,14 +1063,16 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
                 f"{', clamped:'+','.join(_clamped) if _clamped else ''})")
         else:
             _sz = atr_equal_risk_notional(
-                equity=agg_equity,
+                equity=size_equity,
                 risk_per_trade_pct=_risk_pct,
                 atr_abs=atr,
                 entry_px=mid_price,
                 sl_atr_mult=float(config.get("sl_atr_mult", _DEFAULT_SL_ATR_MULT)),
                 max_trade_notional_usd=_cap,
                 coin_max_leverage=get_max_leverage(coin),
-                config_max_leverage=int(config.get("leverage", HL_LEVERAGE)),
+                # FINAL leverage (config ∩ exchange max ∩ liq-bound cap) so the
+                # sized notional can't exceed the leverage actually set on HL.
+                config_max_leverage=leverage,
             )
             if _sz.notional_usd <= 0:
                 return {
@@ -946,13 +1122,25 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     try:
         min_notional = min_entry_notional_usd(coin, mid_price)
         if min_notional > 0 and trade_notional < min_notional:
-            return {
-                "executed": False, "mode": mode,
-                "analysis_id": analysis["id"],
-                "reason": (f"below_min_order_notional ({coin}: sized "
-                           f"${trade_notional:.2f}, HL minimum after precision "
-                           f"${min_notional:.2f})"),
-            }
+            # Entries dropped at this floor are forfeited EV, not saved risk —
+            # when the intent merely falls SHORT of the floor, round UP to it;
+            # added risk is bounded by the floor itself. Below the bump ceiling
+            # the intent is genuinely too small to express and still skips.
+            bump_max = float(config.get("min_order_bump_max_mult", 2.0) or 0.0)
+            if bump_max > 0 and trade_notional * bump_max >= min_notional:
+                logger.info(
+                    f"[executor] {coin}: sized ${trade_notional:.2f} < HL floor "
+                    f"${min_notional:.2f} — rounding UP to the floor "
+                    f"(within {bump_max:g}x bump ceiling)")
+                trade_notional = min_notional
+            else:
+                return {
+                    "executed": False, "mode": mode,
+                    "analysis_id": analysis["id"],
+                    "reason": (f"below_min_order_notional ({coin}: sized "
+                               f"${trade_notional:.2f}, HL minimum after precision "
+                               f"${min_notional:.2f})"),
+                }
         size_in_coin = entry_size_for_notional(coin, trade_notional, mid_price)
     except Exception as e:
         return {
@@ -1044,13 +1232,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # → None → the gate has no opinion and passes. Guarded on the passed
     # config's timesfm_signal.enabled (fail-closed: a config without the key
     # never pays the fetch, and tests can't reach the wire through here).
-    _timesfm_q10p = _timesfm_q90p = None
+    _timesfm_q10p = _timesfm_q90p = _timesfm_med = None
     if (config.get("timesfm_signal") or {}).get("enabled", False):
         try:
             from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync as _ts
             _tsig = _ts(analysis["coin"], trade_side)
             _timesfm_q10p = _tsig.q10_path_pct if _tsig else None
             _timesfm_q90p = _tsig.q90_path_pct if _tsig else None
+            # TimesFM median for the timesfm_mismatch mirror gate — same warm
+            # 300s per-coin cache read (no new API cost). None on error
+            # signals → the gate has no opinion and passes.
+            _timesfm_med = _tsig.median_pct if _tsig else None
         except Exception as _te:
             logger.debug(f"[executor] timesfm gate-side read failed for {analysis['coin']}: {_te}")
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
@@ -1085,6 +1277,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         chronos_q90_path_pct=_chronos_q90p,
         timesfm_q10_path_pct=_timesfm_q10p,
         timesfm_q90_path_pct=_timesfm_q90p,
+        timesfm_median_pct=_timesfm_med,
         duelist_verdict=_duelist_verdict,
     )
 
@@ -1143,6 +1336,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
             f"NOT blocking (shadow mode)")
+
+    # TimesFM mirror-leg shadow accruals: the timesfm-alone per-forecaster
+    # counterfactuals (the AND leg is the forecast_agreement_veto line
+    # below). Both gates are SHADOW-ONLY BY CONSTRUCTION — there is no
+    # shadow_mode key and no code path that blocks; enabled (default True)
+    # only controls whether they accrue these lines. The anchored strings
+    # below ('timesfm_mismatch WOULD HAVE BLOCKED' / 'timesfm_tail_trigger
+    # WOULD HAVE BLOCKED') are the counterfactual join keys.
+    _cm2 = gate_output["results"].get("timesfm_mismatch") or {}
+    if _cm2.get("shadow_would_block"):
+        logger.warning(f"[gate][SHADOW] timesfm_mismatch WOULD HAVE BLOCKED {analysis['coin']} {trade_side.upper()} (conf {analysis['confidence']:.2f}, composite {analysis.get('composite_score', 0):.1f}): {_cm2.get('reason')} — NOT blocking (shadow-only)")
+    _ct2 = gate_output["results"].get("timesfm_tail_trigger") or {}
+    if _ct2.get("shadow_would_block"):
+        logger.warning(f"[gate][SHADOW] timesfm_tail_trigger WOULD HAVE BLOCKED {analysis['coin']} {trade_side.upper()} (conf {analysis['confidence']:.2f}, composite {analysis.get('composite_score', 0):.1f}): {_ct2.get('reason')} — NOT blocking (shadow-only)")
 
     # Duelist veto shadow: the A/B duelist EXPLICITLY vetoed (or took the
     # opposite side on) this directional entry. The gate structurally passes;
@@ -1365,6 +1572,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         consecutive_breaches_required=int(dsl_config.get("consecutive_breaches_required", 1) or 1),
         noise_band_enabled=bool(_noise_cfg.get("enabled", False)),
         noise_band_atr_mult=float(_noise_cfg.get("atr_mult", 1.0)),
+        floor_exit_grace_sec=float(dsl_config.get("floor_exit_grace_sec", 0.0) or 0.0),
         phase2_tiers=_tiers if _tiers else ExitPolicy().phase2_tiers,
     )
     # ATR as % of entry — captured once here so the DSL stop width is stable
@@ -1569,9 +1777,6 @@ def fast_exit_pass(
     highs: Dict[str, List[float]] = {t.coin: [] for t in trackers}
     lows: Dict[str, List[float]] = {t.coin: [] for t in trackers}
 
-    # ms per candle, so we can tell which fetched candles still contain
-    # post-entry price action (see the loop below).
-    interval_ms = _MS_PER_CANDLE.get(candle_interval, 60_000)
     for tr in trackers:
         try:
             # Fresh mid for the floor check + also a candidate peak extreme.
@@ -1586,23 +1791,39 @@ def fast_exit_pass(
             # bypasses the read-side TTL so the still-forming candle is seen
             # every tick (the point of the tighter cadence).
             #
-            # CRITICAL: only ratchet from candles that still contain
-            # POST-ENTRY price action. fetch_hl_candles returns the last N
-            # candles, and the ones that fully closed before this position's
-            # entry carry a pre-entry spike in their high/low. Ratcheting the
-            # peak off them would arm the breakeven / phase-2 floor on the
-            # very first daemon tick (a few seconds after entry) and close the
-            # position at ~flat — fees only. That is exactly what killed JUP
-            # (2026-09-03 09:03: the 09:00 candle high was +2.2% pre-entry)
-            # and ARB (09:48: the 09:46 candle high was +1.1% pre-entry),
-            # both closed in <15s. Keep only candles whose window overlaps
-            # (entry, now]: open + interval > entry_ms.
+            # CRITICAL (two-part): only ratchet from a candle if it opened AT
+            # OR AFTER the fill. A candle that opened *before* the fill —
+            # including the entry candle still forming around the fill — has a
+            # high/low that mixes the PRE-FILL spike (the very move the order
+            # was chasing) with post-fill action. Ratcheting the peak off it
+            # arms the breakeven / phase-2 floor on a wick the position never
+            # owned, and a pull back to entry closes the trade in <60s.
+            #
+            #   * 2026-09-03 JUP/ARB fix: dropped candles that CLOSED before
+            #     entry (`c.t + interval_ms <= entry_ms`). Correct, but the
+            #     ENTRY CANDLE itself (opened a few seconds pre-fill, still
+            #     forming) survived that filter — its high was the pre-fill
+            #     spike. SOPH 09-07 18:08 (held 12s) and 09-08 03:51 (held
+            #     24s) both died to exactly that: the first daemon tick
+            #     ratcheted peak to the entry candle's high, the 0.7% breakeven
+            #     lock armed, mark < floor -> floor_breach at ~entry while price
+            #     then ran +3.7–11.5% spot.
+            #   * 2026-09-08 peak-seed fix: exclude ANY candle whose OPEN is
+            #     pre-fill (`c.t < entry_ms`). On the entry candle the only
+            #     clean post-entry peak candidate is the live MID (appended
+            #     above); the candle's own high/low is withheld until a
+            #     post-entry candle (opened >= entry) exists to ratchet from.
+            #     `c.t < entry_ms` is strictly stricter than the old
+            #     `c.t + interval_ms <= entry_ms`, so it subsumes the JUP/ARB
+            #     pre-entry filter and additionally drops the contaminated
+            #     entry candle.
             candles = fetch_hl_candles(tr.coin, candle_interval, candle_count, fresh=True)
             entry_ms = tr.entry_time * 1000
             for c in candles:
-                if c.t + interval_ms <= entry_ms:
-                    # Closed before the position opened — pre-entry price
-                    # action the position can no longer give back.
+                if c.t < entry_ms:
+                    # Opened before the fill — pre-fill price action (the
+                    # chased spike) the position can't give back. The live mid
+                    # is the clean seed for the peak on this candle.
                     continue
                 highs[tr.coin].append(float(c.h))
                 lows[tr.coin].append(float(c.l))
@@ -1842,6 +2063,51 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
             logger.debug(f"[executor] late-chase corroboration: timesfm read failed "
                          f"(non-fatal): {e}")
     return (len(names), tuple(names), tuple(shadow_names))
+
+
+def _sidestep_bearish_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
+    """Block a PASS->LONG sidestep that is actually a BEARISH impulse.
+
+    The sidestep upgrades an AI PASS to LONG when the composite/burst setup
+    clears, but the composite triggers (pctMoveSpike, volumeSpike, shockDay,
+    momentumBurst) are MAGNITUDE-based (`abs(move)`), so a violent SELLOFF — a
+    big red candle on huge volume — fires them just as hard as a breakout and
+    produces a high composite. With no direction check the sidestep buys the
+    falling knife (upstream 51bc23b, xyz:SMSN 2026-06-29: bought the open of a
+    big red breakdown bar, -9.3% ROE). The short runner gate already requires
+    `downtrend`; this restores the symmetric requirement for the long sidestep.
+
+    Bearish impulse = downtrend momentum fired AND uptrend did not, OR the 24h
+    move is clearly negative (<= sidestep_bearish_move_pct) with no uptrend.
+    Explicit uptrend momentum always wins (a real upside setup). Reads
+    `daily_move_pct` off the analysis dict (perception attaches it); a missing
+    value degrades the 24h-move clause to a no-op, leaving the downtrend clause
+    as the guaranteed protection. Flag-gated (sidestep_require_bullish,
+    default true), hot-read, reversible. Returns a reason to block, or "" to
+    allow. Analysis-only — no network in the execute hot path.
+    """
+    gate = config.get("runner_entry_gate") or {}
+    if not bool(gate.get("sidestep_require_bullish", True)):
+        return ""
+    if bool(analysis.get("uptrend_momentum_fired")):
+        return ""  # explicit bullish momentum — a real upside setup, allow
+    downtrend = bool(analysis.get("downtrend_momentum_fired"))
+    move_pct = analysis.get("daily_move_pct")
+    try:
+        move_pct = None if move_pct is None else float(move_pct)
+    except (TypeError, ValueError):
+        move_pct = None
+    try:
+        min_neg = float(gate.get("sidestep_bearish_move_pct", -3.0))
+    except (TypeError, ValueError):
+        min_neg = -3.0
+    bearish_move = move_pct is not None and move_pct <= min_neg
+    if downtrend or bearish_move:
+        why = ("downtrend momentum fired" if downtrend
+               else f"24h move {move_pct:+.1f}% <= {min_neg:.1f}%")
+        return (f"sidestep_bearish_blocked ({analysis.get('coin')}: {why}, "
+                f"no uptrend — would buy a selloff, not a breakout)")
+    return ""
 
 
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:

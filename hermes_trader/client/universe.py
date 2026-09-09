@@ -273,4 +273,20 @@ def get_market_by_coin(coin: str) -> Optional[Dict[str, Any]]:
     for m in get_universe():
         if m["coin"] == coin:
             return m
-    return None
+
+
+def filter_universe(universe: List[Dict[str, Any]], tradable: List[str]) -> List[Dict[str, Any]]:
+    """Optional operator restriction on the tradable universe (T4.4, upstream
+    16a2a0a98f9d offered as a config toggle — default OFF). `tradable` empty
+    or absent -> unmodified (byte-identical current behavior). Non-empty ->
+    only coins whose ticker (the part after ':' for HIP-3 dex names) is in
+    `tradable` (case-insensitive) pass. Pure; no fetch, no config read."""
+    if not tradable:
+        return universe
+    allow = {c.strip().upper() for c in tradable if isinstance(c, str) and c.strip()}
+    if not allow:
+        return universe
+    def _ticker(row: Dict[str, Any]) -> str:
+        coin = str(row.get("coin") or "")
+        return coin.split(":", 1)[1] if ":" in coin else coin
+    return [r for r in universe if _ticker(r).upper() in allow]

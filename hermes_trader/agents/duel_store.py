@@ -41,6 +41,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from hermes_trader.agents.config_store import read_agent_config
+
 logger = logging.getLogger(__name__)
 
 # Env var names (DUEL prefix: this is the second, observation-only model).
@@ -74,11 +76,17 @@ DEFAULT_MAX_TOKENS = 8192
 # tasks" per the model card: temperature=1.0, top_p=0.95, top_k=20,
 # min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0. Used by the
 # duelist (whose recipe serves a Qwen3.5-9B derivative with thinking
-# disabled). Verified accepted by the local llama.cpp server 2026-08-27
+# Verified accepted by the local llama.cpp server 2026-08-27
 # (HTTP 200, finish=stop) — llama.cpp maps the OpenAI fields onto its native
 # sampling flags, so top_k/min_p go in the standard body, no extra_body.
 # The primary keeps temperature 0.1: it is a fine-tuned trading model, not
 # base Qwen, and its verdicts have been calibrated under 0.1.
+# (2026-09-09: both slots' profiles became hot-configurable — this constant
+# and research.PRIMARY_SAMPLING_DEFAULT are now only the CODE DEFAULTS,
+# overridable per-key at call time by the `duelist_sampling` / `llm_sampling`
+# agent-config blocks. Absent keys = these defaults, so the on-the-wire body
+# is byte-identical to pre-change behavior; per-model note: the sampling
+# travels WITH the model choice per slot.)
 DUELIST_SAMPLING_PROFILE: Dict[str, Any] = {
     "temperature": 1.0,
     "top_p": 0.95,
@@ -87,6 +95,26 @@ DUELIST_SAMPLING_PROFILE: Dict[str, Any] = {
     "presence_penalty": 1.5,
     "repetition_penalty": 1.0,
 }
+
+
+def effective_duelist_sampling() -> Dict[str, Any]:
+    """The duelist slot's sampling profile, read at CALL time (hot, no cache).
+
+    Merge rule: {**DUELIST_SAMPLING_PROFILE, **config["duelist_sampling"]} —
+    per-key override, NOT replace-whole-dict, so a partial block keeps every
+    default key it doesn't name. Absent key = the constant, i.e. today's
+    exact body. Fail-open: any config fault degrades to the pure default —
+    the primary's verdict must never cost a duelist profile read.
+    """
+    merged = dict(DUELIST_SAMPLING_PROFILE)
+    try:
+        overrides = read_agent_config().get("duelist_sampling", {})
+        if isinstance(overrides, dict):
+            merged.update(overrides)
+    except Exception:  # noqa: BLE001 — fail-open (see docstring)
+        pass
+    logger.debug(f"[duel] duelist sampling: {merged}")
+    return merged
 
 
 def resolve_max_tokens(env_name: str, fallback: int = DEFAULT_MAX_TOKENS) -> int:
@@ -261,7 +289,7 @@ async def _async_duel_call(
                     ],
                     "stream": False,
                     "max_tokens": max_toks,
-                    **DUELIST_SAMPLING_PROFILE,
+                    **effective_duelist_sampling(),
                 },
                 headers={"Authorization": f"Bearer {api_key}"},
             )

@@ -72,6 +72,7 @@
       }
     ],
     "stale_flat_timeout_minutes": 480,
+    "floor_exit_grace_sec": 0.0,
     "regime_aware": {
       "enabled": false,
       "trend_ride": {

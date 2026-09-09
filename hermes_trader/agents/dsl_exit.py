@@ -121,6 +121,12 @@ class ExitPolicy:
     # hard_timeout bucket's +3.41% avg is driven by agers that peaked).
     # 0 = off.
     stale_flat_timeout_minutes: float = 0.0
+    # Contention floor for the stale-flat timeout (upstream 43fcd9581781,
+    # LIT post-mortem): its only purpose is freeing capital for QUEUED
+    # candidates, which exist when the book is full. Below this many active
+    # trackers the position keeps its protect/stop/hard-timeout exits and
+    # rides. 0 restores unconditional behavior.
+    stale_flat_min_positions: int = 3
     phase2_tiers: List[RetraceTier] = field(default_factory=lambda: [
         RetraceTier(5.0, 0.30),   # 5% profit → give back 30%
         RetraceTier(10.0, 0.40),  # 10% profit → lock tighter, give back 40%
@@ -146,6 +152,23 @@ class ExitPolicy:
     # DSL retrace floor above ~+13.6% peaks, and short-side trails were always
     # rejected by adjust_tp_order's longs-only parameter guard. Runner
     # protection = scale-out TP + DSL retrace floor (0.25/0.35/0.40 tiers).
+    # ── Floor-exit grace window (2026-09-08, SOPH hair-trigger fix) ────────
+    # For the first `floor_exit_grace_sec` seconds after entry, FLOOR-based
+    # exits (breakeven ratchet / phase-1 / phase-2 retrace breach) cannot
+    # fire — the position keeps re-ratcheting peak/floor state, but the
+    # breach check is suppressed. The catastrophic stops are UNAFFECTED:
+    # max_loss (checked earlier, returns before this gate) and the
+    # exchange-side 1.5x-ATR backup SL remain fully armed during the grace.
+    # Motivation: the first daemon tick after entry ratchets the peak to the
+    # ENTRY CANDLE'S high, which includes the pre-fill spike the order was
+    # chasing; the breakeven lock then arms on a wick the position never
+    # owned and a pull back to entry kills the trade in <60s (SOPH 09-07
+    # 18:08 UTC held 12s / 09-08 03:51 UTC held 24s, both floor_breach at
+    # ~entry while price ran +3.7–11.5% spot afterward). The peak-seed fix
+    # (fast_exit_pass first-tick mid-seed) addresses the root cause; this
+    # grace is the belt-and-suspenders net for any other sub-first-tier
+    # noise exit in the first seconds. 0 = off.
+    floor_exit_grace_sec: float = 0.0
 
 
 class DSLTracker:
@@ -170,6 +193,28 @@ class DSLTracker:
         self.peak_px = entry_px
         self.consecutive_breaches = 0
         self._last_floor: Optional[float] = None
+        # Last-seen exchange position size (abs szi). 0.0 = unknown (legacy
+        # state / pre-first-reconcile) — adopted silently on the next
+        # rehydrate. Used to detect position ADDS so entry_px can be
+        # refreshed to the exchange's average (P0 bug 2026-07-13, upstream
+        # f94156259ec5: a manual add left the tracker on the FIRST fill's
+        # entry, so every floor, stop, and PnL read ran off the wrong basis —
+        # SKHY showed +6.44% ROE on a trade that realized -$0.29).
+        self.size = 0.0
+
+    def refresh_entry_basis(self, new_entry_px: float, new_size: float) -> None:
+        """Adopt the exchange's average entryPx after a position ADD.
+
+        Floors/stops need no explicit recompute — every check() derives them
+        from entry_px/peak_px fresh — but peak_px is clamped to the new basis
+        so a long added above its old peak (or short below) doesn't start
+        with a negative profit range."""
+        self.entry_px = float(new_entry_px)
+        self.size = float(new_size)
+        if self.is_long():
+            self.peak_px = max(self.peak_px, self.entry_px)
+        else:
+            self.peak_px = min(self.peak_px, self.entry_px)
 
     def is_long(self) -> bool:
         return self.side == "long"
@@ -267,7 +312,15 @@ class DSLTracker:
 
         # ── Stale-flat timeout ────────────────────────────────────────
         # Only for positions that never armed phase-2: peak profit < protect.
-        if pol.stale_flat_timeout_minutes > 0 and elapsed_min >= pol.stale_flat_timeout_minutes:
+        # AND only when the book is actually CONTENDED (counterfactual
+        # 2026-07-11, n=28 closes: median +0.75% forfeited per close — LIT
+        # closed flat at 19:35 and rallied +14% overnight — while the
+        # timeout's whole purpose is freeing capital for a queue that, on a
+        # small book, does not exist. Below the contention floor the position
+        # keeps its protect/stop/hard-timeout exits and simply rides.)
+        _stale_min_pos = int(getattr(pol, "stale_flat_min_positions", 3) or 0)
+        if (pol.stale_flat_timeout_minutes > 0 and elapsed_min >= pol.stale_flat_timeout_minutes
+                and len(_active_positions) >= _stale_min_pos):
             if is_long:
                 peak_profit = (self.peak_px - self.entry_px) / self.entry_px * 100
             else:
@@ -370,6 +423,26 @@ class DSLTracker:
 
         # ── Floor breach check ────────────────────────────────────────
         breached = (is_long and mark_px < floor) or (not is_long and mark_px > floor)
+        # Grace window (2026-09-08 SOPH hair-trigger fix): for the first
+        # `floor_exit_grace_sec` seconds after entry, a floor breach is
+        # suppressed — the peak/floor state keeps ratcheting (so the net is
+        # armed the moment the grace expires) but the exit cannot fire. This
+        # is the belt-and-suspenders net behind the peak-seed fix in
+        # fast_exit_pass. The catastrophic stops are UNAFFECTED: max_loss
+        # returned earlier in this method, and the exchange-side 1.5x-ATR
+        # backup SL sits independently of the DSL floor. Peak/floor state is
+        # already persisted above this point, so a daemon restart mid-grace
+        # resumes with the armed floor intact once the grace elapses.
+        if breached and pol.floor_exit_grace_sec > 0 \
+                and elapsed_min * 60 < pol.floor_exit_grace_sec:
+            self.consecutive_breaches = 0
+            self._last_floor = floor
+            return self._verdict(
+                exit=False,
+                reason=f"floor_exit_grace ({int(elapsed_min * 60)}s < {int(pol.floor_exit_grace_sec)}s)",
+                floor_price=floor, peak_price=self.peak_px,
+                phase="phase1", unrealized_pct=upct,
+            )
         # Patch A — noise-band suppression (sub-first-tier only). The hard
         # max_loss stop already returned above; this only governs the trailing
         # give-back of a barely-green position. If peak profit hasn't yet cleared
@@ -454,6 +527,7 @@ def _tracker_to_dict(t: DSLTracker) -> Dict[str, Any]:
         "side": t.side,
         "leverage": t.leverage,
         "entry_px": t.entry_px,
+        "size": t.size,
         "entry_time": t.entry_time,
         "entry_atr_pct": t.entry_atr_pct,
         "peak_px": t.peak_px,
@@ -483,17 +557,22 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
         breakeven_lock_pct=pol_raw.get("breakeven_lock_pct", ExitPolicy.breakeven_lock_pct),
         atr_stop_enabled=pol_raw.get("atr_stop_enabled", ExitPolicy.atr_stop_enabled),
         stale_flat_timeout_minutes=pol_raw.get("stale_flat_timeout_minutes", 0.0),
+        stale_flat_min_positions=int(pol_raw.get("stale_flat_min_positions", 3) or 0),
         atr_stop_mult=pol_raw.get("atr_stop_mult", ExitPolicy.atr_stop_mult),
         atr_stop_floor_pct=pol_raw.get("atr_stop_floor_pct", ExitPolicy.atr_stop_floor_pct),
         atr_stop_ceiling_pct=pol_raw.get("atr_stop_ceiling_pct", ExitPolicy.atr_stop_ceiling_pct),
         noise_band_enabled=pol_raw.get("noise_band_enabled", ExitPolicy.noise_band_enabled),
         noise_band_atr_mult=pol_raw.get("noise_band_atr_mult", ExitPolicy.noise_band_atr_mult),
+        floor_exit_grace_sec=float(pol_raw.get("floor_exit_grace_sec", 0.0) or 0.0),
     )
     t = DSLTracker(d["coin"], d["side"], float(d["entry_px"]),
                    float(d.get("entry_time") or time.time()), policy,
                    leverage=int(d.get("leverage", 1) or 1),
                    entry_atr_pct=float(d.get("entry_atr_pct", 0.0) or 0.0))
     t.peak_px = float(d.get("peak_px", d["entry_px"]))
+    # Legacy state files predate size tracking — 0.0 means "adopt silently on
+    # the next rehydrate" (see DSLTracker.size).
+    t.size = float(d.get("size", 0.0) or 0.0)
     t.consecutive_breaches = int(d.get("consecutive_breaches", 0))
     lf = d.get("last_floor")
     t._last_floor = float(lf) if lf is not None else None
@@ -623,9 +702,11 @@ def _policy_from_config() -> ExitPolicy:
             atr_stop_floor_pct=float(atr_cfg.get("floor_pct", ExitPolicy.atr_stop_floor_pct)),
             atr_stop_ceiling_pct=float(atr_cfg.get("ceiling_pct", ExitPolicy.atr_stop_ceiling_pct)),
             stale_flat_timeout_minutes=float(dsl.get("stale_flat_timeout_minutes", 0.0) or 0.0),
+            stale_flat_min_positions=int(dsl.get("stale_flat_min_positions", 3) or 0),
             consecutive_breaches_required=int(dsl.get("consecutive_breaches_required", 1) or 1),
             noise_band_enabled=bool(noise_cfg.get("enabled", False)),
             noise_band_atr_mult=float(noise_cfg.get("atr_mult", ExitPolicy.noise_band_atr_mult)),
+            floor_exit_grace_sec=float(dsl.get("floor_exit_grace_sec", 0.0) or 0.0),
             phase2_tiers=tiers if tiers else ExitPolicy().phase2_tiers,
         )
     except Exception:
@@ -673,6 +754,66 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
             lev = int(pos_leverage.get("value", 0) or 0) if isinstance(pos_leverage, dict) else int(pos_leverage or 0)
             if not lev:
                 lev = default_leverage
+            if key in _active_positions:
+                # Size reconciliation (upstream f94156259ec5): detect position
+                # ADDS so the entry basis can be refreshed to the exchange's
+                # average. Floors/stops derive from entry_px fresh each tick,
+                # so only the basis fields need updating here.
+                t = _active_positions[key]
+                live_sz = abs(szi)
+                # Leverage drift. The tracker's leverage is what every ROE-based
+                # stop divides by, so a stale value silently rescales the exit:
+                # max_loss_roe_pct 15 held against leverage 1 fires at a 15% PRICE
+                # move, which on a position actually running 3x is 45% of margin.
+                # Observed 2026-09-06 — the operator closed and reopened xyz:BE at
+                # 3x by hand and the tracker kept saying 1x, because this function
+                # reconciles size and entry basis and never touched leverage.
+                if lev and int(getattr(t, "leverage", 0) or 0) != int(lev):
+                    old_lev = getattr(t, "leverage", None)
+                    t.leverage = int(lev)
+                    added += 1
+                    logger.warning(
+                        f"[dsl] {key} LEVERAGE changed {old_lev}x -> {lev}x "
+                        f"(manual adjust or re-open); ROE stops rescaled to match")
+                # Entry basis drift on an unchanged size: a close-and-reopen at the
+                # same size leaves size equal but the basis wrong, and every floor
+                # runs off that basis. Tolerance is 0.1%, well above float noise and
+                # well below a real re-entry.
+                #
+                # Skipped when t.size <= 0, which marks a state file written before
+                # size tracking existed. There, size is unknown, so a basis
+                # difference cannot be told apart from a legacy record that simply
+                # never stored one — and refreshing on that guess would move a live
+                # stop on no evidence. That case adopts the size below and leaves
+                # the basis alone, which is what test_legacy_unknown_size_adopted_
+                # without_entry_refresh exists to hold.
+                if (t.size > 0 and entry > 0 and t.entry_px > 0
+                        and abs(entry / t.entry_px - 1) > 0.001):
+                    old_entry = t.entry_px
+                    t.refresh_entry_basis(entry, live_sz)
+                    added += 1
+                    logger.warning(
+                        f"[dsl] {key} entry basis moved {old_entry} -> {entry} at "
+                        f"unchanged size (re-open?); floors refreshed")
+                if t.size <= 0:
+                    # legacy tracker predating size tracking — adopt silently;
+                    # entry_px came from this same exchange field at registration
+                    t.size = live_sz
+                    added += 1   # force a state save
+                elif live_sz > t.size * 1.005:
+                    # position ADD (manual or bot) — the tracker's entry basis is
+                    # stale; every floor/stop/PnL read is wrong until refreshed
+                    old_entry, old_size = t.entry_px, t.size
+                    t.refresh_entry_basis(entry, live_sz)
+                    added += 1
+                    logger.warning(
+                        f"[dsl] {key} position ADD detected ({old_size:g} -> {live_sz:g}): "
+                        f"entry basis refreshed {old_entry} -> {entry} (exchange avg); "
+                        f"floors now run off the true basis")
+                elif live_sz < t.size * 0.995:
+                    # partial close / TP scale-out — size shrinks, basis unchanged
+                    t.size = live_sz
+                    added += 1
             if key not in _active_positions:
                 # Inherit the CURRENT config exit policy, never the bare ExitPolicy()
                 # default. A synthesize happens after a blackout-induced drop (the
@@ -681,8 +822,10 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
                 # the default silently widened live stops ("policy drift"). Pull
                 # config when the caller didn't pass an explicit policy.
                 synth_policy = policy if policy is not None else _policy_from_config()
-                _active_positions[key] = DSLTracker(coin, side, entry, time.time(), synth_policy,
-                                                    leverage=lev)
+                _t = DSLTracker(coin, side, entry, time.time(), synth_policy,
+                                leverage=lev)
+                _t.size = abs(szi)
+                _active_positions[key] = _t
                 added += 1
                 logger.info(f"[dsl] Synthesized tracker for existing {key} @ {entry} ({lev}x)")
 

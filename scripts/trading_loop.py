@@ -75,6 +75,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# T3.5 port (upstream 72e4ccce43bb): refuse to start on an unsafe credential
+# setup. Runs before the first credential use (resolve_user_address) and
+# before any network I/O. Fails CLOSED: a broken preflight module must block
+# startup, not silently become a no-op.
+try:
+    import preflight_secrets
+except Exception as _e:
+    logger.critical(f"[preflight] preflight_secrets import FAILED — failing closed: {_e}")
+    sys.exit(1)
+
+_preflight_findings = preflight_secrets.run_preflight(os.environ)
+_preflight_blocking = [f for f in _preflight_findings if preflight_secrets.is_blocking(f)]
+for _f in _preflight_findings:
+    _line = preflight_secrets._redact(_f, os.environ)
+    if preflight_secrets.is_blocking(_f):
+        logger.critical(f"[preflight] {_line}")
+    else:
+        logger.warning(f"[preflight] {_line}")
+if _preflight_blocking:
+    logger.critical(
+        f"[preflight] refusing to start: {len(_preflight_blocking)} "
+        f"credential/secret problem(s)")
+    sys.exit(1)
+logger.info(
+    f"[preflight] credential setup OK ({len(_preflight_findings) - len(_preflight_blocking)} warning(s))")
+
 from hermes_trader.agents.perception import scan_once
 from hermes_trader.agents.ta_filter import analyze_perception
 from hermes_trader.agents.research import research
@@ -84,8 +110,11 @@ from hermes_trader.agents.config import get_config
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.memory import memory
 from hermes_trader.client.exchange import get_all_hl_mids, prewarm_meta_cache
-from hermes_trader.client.universe import get_universe
-from hermes_trader.client.hl_client import fetch_account_state, fetch_aggregate_contributions_since, resolve_user_address
+from hermes_trader.client.universe import filter_universe, get_universe
+from hermes_trader.client.hl_client import (fetch_account_state,
+                                            fetch_aggregate_contributions_since,
+                                            fetch_hl_candles,
+                                            resolve_user_address)
 from hermes_trader.positions_snapshot import write_snapshot
 from hermes_trader.session_log import append as log_event
 
@@ -150,6 +179,10 @@ try:
 except Exception:
     _enable_hip3 = False
 universe = get_universe(include_hip3=_enable_hip3)
+# T4.4 port (upstream 16a2a0a98f9d, config-toggle shape): tradable_universe is an
+# OPTIONAL allowlist. Empty/absent (default) = no restriction; the owner enables
+# it in .agent-config.json with the exact majors list they want. Hot-read.
+universe = filter_universe(universe, (read_agent_config() or {}).get("tradable_universe") or [])
 logger.info(
     f"Universe loaded: {len(universe)} markets"
     + (f" (HIP-3 enabled — {sum(1 for m in universe if m.get('dex'))} tokenized markets)" if _enable_hip3 else "")
@@ -719,13 +752,61 @@ def _process_coin_run(perception, ctx):
         _lc_remaining = memory.loss_cooldown_remaining_min(coin)
         if _lc_remaining > 0:
             _last_close = memory.last_close_for(coin) or {}
-            _mr_ok, _mr_why = momentum_reentry_allowed(
+            _mr = momentum_reentry_allowed(
                 _last_close.get("exit_px"), _last_close.get("side"),
                 perception.get("mid"), score, _cfg_cd)
-            if not _mr_ok:
+            if _mr.suppressed:
+                # The re-entry condition FIRED but shadow_mode keeps it
+                # log-only — accrue the counterfactual line, then the skip
+                # below still applies (cooldown binds here too: the paid
+                # research runs and is blocked at execution — exactly the
+                # pre-8ac0b0b behavior, the correct shadow reference).
+                logger.warning(_mr.shadow_accrual_line(coin))
+            if not _mr.is_allowed():
                 logger.info(f"{coin}: pre-research loss-cooldown ({_lc_remaining:.0f}min remaining) — skip")
                 log_event({"event": "ta_skip", "coin": coin,
                            "signal": "LOSS_COOLDOWN",
+                           "score": round(float(score), 1),
+                           "trigger_score": round(float(score), 1)})
+                return
+        # T4.2 port (upstream cd6eaeec677f): min_history_bars preflight.
+        # History-age floor: a high-volume NEW listing passes the volume floors
+        # with ~6 daily bars; gate it on minimum completed DAILY bars. One
+        # daily-candle fetch, short-TTL cached; only fresh candidates that already
+        # cleared the held/blocklist/cooldown/loss-cooldown cheap checks reach this.
+        # Fail-open on fetch error. Code default 0 = disabled.
+        _min_hist = int(_cfg_cd.get("min_history_bars", 0) or 0)
+        if _min_hist > 0:
+            from hermes_trader.agents.risk_gates import history_floor_reason
+            _hist_reason = history_floor_reason(coin, _min_hist,
+                                                lambda _c, _n: fetch_hl_candles(_c, "1d", _n))
+            if _hist_reason:
+                logger.info(f"{coin}: pre-research {_hist_reason} — skip")
+                log_event({"event": "ta_skip", "coin": coin,
+                           "signal": "HISTORY_FLOOR",
+                           "score": round(float(score), 1),
+                           "trigger_score": round(float(score), 1)})
+                return
+        # T4.3 port (upstream 6181322895ab): per-coin re-entry cap preflight.
+        # The book is fee-dominated by over-churned re-entries; block the
+        # (cap+1)-th entry on a coin within the rolling window. Counts real
+        # fills only (memory.record_trade fires on successful entries). Code
+        # default: DISABLED (reentry_cap.enabled absent/false) — owner enables
+        # in .agent-config.json (hot-read). Risk-REDUCING.
+        _rc = _cfg_cd.get("reentry_cap") or {}
+        if bool(_rc.get("enabled", False)):
+            try:
+                _cap = int(_rc.get("max_per_coin", 0) or 0)
+                _win_ms = float(_rc.get("window_hours", 24.0) or 24.0) * 3_600_000
+                _n_recent = memory.count_entries_since(coin, now_ms - _win_ms)
+            except Exception:
+                _cap, _n_recent = 0, 0
+            from hermes_trader.agents.risk_gates import reentry_cap_reason
+            _cap_reason = reentry_cap_reason(coin, _n_recent, _cap)
+            if _cap_reason:
+                logger.info(f"{coin}: pre-research {_cap_reason} — skip")
+                log_event({"event": "ta_skip", "coin": coin,
+                           "signal": "REENTRY_CAP",
                            "score": round(float(score), 1),
                            "trigger_score": round(float(score), 1)})
                 return
@@ -1043,6 +1124,10 @@ while True:
         if universe_refresh_s > 0 and (time.time() - _last_universe_refresh) >= universe_refresh_s:
             try:
                 universe = get_universe(force_refresh=True, include_hip3=_enable_hip3)
+                # T4.4 port (upstream 16a2a0a98f9d, config-toggle shape): apply the
+                # optional tradable_universe allowlist (empty/absent = no
+                # restriction). Reuses this tick's _cfg hot-read.
+                universe = filter_universe(universe, _cfg.get("tradable_universe") or [])
                 _last_universe_refresh = time.time()
                 logger.info(f"Universe refreshed: {len(universe)} markets")
             except Exception as e:

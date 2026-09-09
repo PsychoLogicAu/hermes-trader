@@ -40,6 +40,7 @@ class GateContext:
         chronos_q90_path_pct: Optional[List[float]] = None,
         timesfm_q10_path_pct: Optional[List[float]] = None,
         timesfm_q90_path_pct: Optional[List[float]] = None,
+        timesfm_median_pct: Optional[float] = None,
         duelist_verdict: Optional[str] = None,
     ):
         self.confidence = confidence
@@ -93,6 +94,13 @@ class GateContext:
         # tail veto from the 2026-09-02 two-model sweep.
         self.timesfm_q10_path_pct = timesfm_q10_path_pct
         self.timesfm_q90_path_pct = timesfm_q90_path_pct
+        # Median move of this coin's TimesFM-3 forecast, % vs last close
+        # (gate-side warm sync read, same pattern as chronos_median_pct and
+        # the two q-path fields above). None = no usable forecast. Fed ONLY
+        # to timesfm_mismatch_gate — the mirror of chronos_mismatch_gate on
+        # the TimesFM signal. SHADOW-ONLY by construction: the gate always
+        # passes; a data gap can never flag.
+        self.timesfm_median_pct = timesfm_median_pct
         # The A/B duelist's verdict at entry (LONG / SHORT / PASS / VETO / None),
         # carried from research.py's `duelist_at_entry` snapshot via
         # maybe_execute. None = the duelist is disabled or failed — the
@@ -266,6 +274,58 @@ def short_liquidity_floor(ctx: GateContext, min_short_volume: float) -> GateResu
     return {"pass": False,
             "reason": (f"short on thin market: 24h vol ${ctx.market_volume_24h_usd/1e6:.1f}M "
                        f"< short floor ${min_short_volume/1e6:.0f}M (squeeze risk)")}
+
+
+def history_floor_reason(coin: str, min_history_bars: int, fetch_daily) -> str:
+    """Preflight gate: block coins younger than `min_history_bars` completed DAILY bars.
+
+    Separate from the volume floors because a brand-new but high-volume listing sails
+    through `min_market_volume_usd`/`min_hip3_volume_usd` with only a handful of daily
+    bars. The perception scan's <50 check is on 5m bars (~4h), so it misses a coin that
+    has barely EXISTED. Trading a coin with no track record is manipulation-prone and
+    impossible to assess — gate on history AGE. (Upstream cd6eaeec677f.)
+
+    `fetch_daily(coin, n)` returns daily candles (or None/[]). Returns a reason string
+    to block, or "" to pass. Fail-OPEN on a transient fetch failure or empty read (don't
+    punish a 429); only block on a short-but-NON-EMPTY history = a clear young coin.
+    Disabled when min_history_bars <= 0. Pre-research preflight (needs a fetch), not a
+    GateContext execute-stage gate.
+    """
+    try:
+        min_hist = int(min_history_bars or 0)
+    except (TypeError, ValueError):
+        min_hist = 0
+    if min_hist <= 0:
+        return ""
+    try:
+        daily = fetch_daily(coin, min_hist + 5)
+    except Exception:
+        return ""  # transient fetch failure -> don't block
+    if daily is not None and 0 < len(daily) < min_hist:
+        return f"history_floor_preflight ({len(daily)}d < {min_hist}d history)"
+    return ""
+
+
+def reentry_cap_reason(coin: str, recent_entry_count: int, cap: int) -> str:
+    """Block the (cap+1)-th entry on the same coin within the rolling window.
+
+    The PnL audit found the book is fee-dominated by over-churned longs (BTC re-entered
+    44x, ZEC/SOL 43x over ~8wk; $115 of the $165 fees). A per-coin re-entry cap recovers
+    those fees — validated cost-swept: N=3 / rolling-24h ≈ +$24/56d with near-zero
+    continuation risk (it only cuts the 3rd+ re-entry/coin/day, leaving legit rides intact).
+    Risk-REDUCING. `recent_entry_count` = this coin's executed entries in the window
+    (caller supplies it, e.g. memory.count_entries_since). cap <= 0 disables.
+    """
+    try:
+        cap = int(cap or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    if cap <= 0:
+        return ""
+    n = int(recent_entry_count or 0)
+    if n >= cap:
+        return f"reentry_cap ({n} entries in window >= cap {cap})"
+    return ""
 
 
 def coin_allowlist_gate(ctx: GateContext, allowlist: List[str], blocklist: List[str]) -> GateResult:
@@ -671,6 +731,125 @@ def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
     return {"pass": False, "reason": reason}
 
 
+def timesfm_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """TimesFM direction-mismatch conviction gate (SHADOW-ONLY by construction).
+
+    The per-forecaster mirror of ``chronos_mismatch_gate`` on the TimesFM-3
+    signal: when the entry side contradicts the cached TimesFM forecast
+    (long with median_pct < 0, short with median_pct > 0, beyond
+    ``min_abs_median_pct``), the entry is ACCRUED as a would-block unless it
+    carries elevated conviction (conf >= ``min_conf`` (0.90) OR composite >=
+    ``min_composite`` (60)) — the same escape bar as the chronos pair.
+
+    SHADOW-ONLY BY CONSTRUCTION: unlike the chronos pair there is NO
+    ``shadow_mode`` config key and NO code path that returns pass=False —
+    the gate is a pure GateContext function (no log calls in-gate) that
+    ALWAYS returns pass: True. When its blocking condition would hold it
+    carries ``shadow_would_block`` plus the join variables, and the
+    EXECUTOR logs the loud accrual line next to the chronos_mismatch
+    shadow line. The only config knob is ``enabled`` (default True): it
+    controls whether the gate runs/accrues, never whether it can block.
+    The pass: False branch is simply never written — the shadow-only
+    posture is structural, not config-dependent.
+
+    Simpler than the chronos mirror on purpose: no ratio-aware deadband
+    counterfactual (that is chronos-specific, and this leg's data comes
+    from a different model family).
+
+    Fail-safes (pass, no marker, no raise): disabled; median None (cold
+    cache / model down / disabled / error signal) — a data gap can never
+    flag.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", True)):
+        return {"pass": True}
+    med = ctx.timesfm_median_pct
+    if med is None:
+        return {"pass": True}
+    deadband = float(cfg.get("min_abs_median_pct", 0.5) or 0.5)
+    if abs(med) < deadband:
+        return {"pass": True}
+    mismatch = ((ctx.trade_side == "long" and med < 0)
+                or (ctx.trade_side == "short" and med > 0))
+    if not mismatch:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"timesfm_mismatch ({ctx.trade_side} vs forecast {med:+.2f}%; "
+              f"conf {ctx.confidence:.2f} < {min_conf:.2f}, "
+              f"composite {ctx.composite_score:.1f} < {min_composite:.0f})")
+    return {
+        "pass": True,
+        "reason": reason,
+        "shadow_would_block": True,
+        "median_pct": med,
+        "confidence": ctx.confidence,
+        "composite_score": ctx.composite_score,
+    }
+
+
+def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """TimesFM tail-trigger conviction gate (SHADOW-ONLY by construction).
+
+    The per-forecaster mirror of ``chronos_tail_trigger_gate`` on the
+    TimesFM-3 signal: when the ADVERSE quantile of the cached TimesFM path
+    (q10 for longs, q90 for shorts — read via the same getattr pattern as
+    ``forecast_agreement_veto_gate``) breaches the threshold at any of the
+    first ``window_steps`` steps, the entry is ACCRUED as a would-block
+    unless it clears the elevated-conviction escape bar (conf >= min_conf
+    (0.90) OR composite >= min_composite (60)).
+
+    SHADOW-ONLY BY CONSTRUCTION: no ``shadow_mode`` key and no code path
+    that returns pass=False — always pass: True; ``shadow_would_block``
+    plus the join variables ride along when the shape fires, and the
+    executor logs the accrual line. ``enabled`` (default True) controls
+    whether the gate runs/accrues, never whether it can block.
+
+    Code defaults follow the timesfm sub-key of forecast_agreement_veto
+    (the sweep-selected timesfm window from the 2026-09-02 two-model
+    sweep): ``window_steps`` 12 (NOT 6) and ``min_adv_path_pct`` 2.0
+    (NOT 3.0). Breach: tail <= -x for longs, tail >= x for shorts.
+
+    Fail-safes (pass, no marker, no raise): disabled; path missing or
+    shorter than the window (cold cache / disabled / error / pre-change
+    signal); tail not breached. A data gap can never flag.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", True)):
+        return {"pass": True}
+    k = int(cfg.get("window_steps", 12) or 12)
+    x = float(cfg.get("min_adv_path_pct", 2.0) or 2.0)
+    if k <= 0 or x <= 0:
+        return {"pass": True}
+    path = (getattr(ctx, "timesfm_q10_path_pct", None) if ctx.trade_side == "long"
+            else getattr(ctx, "timesfm_q90_path_pct", None))
+    if not path or len(path) < k:
+        return {"pass": True}
+    window = path[:k]
+    tail = min(window) if ctx.trade_side == "long" else max(window)
+    breached = tail <= -x if ctx.trade_side == "long" else tail >= x
+    if not breached:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"timesfm_tail_trigger ({ctx.trade_side} entry, adverse q-path "
+              f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
+              f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
+              f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
+              f"{min_composite:.0f})")
+    return {
+        "pass": True,
+        "reason": reason,
+        "shadow_would_block": True,
+        "tail_pct": tail,
+        "window_steps": k,
+    }
+
+
 def forecast_agreement_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Chronos ∧ TimesFM agreement tail-veto (SHADOW by default).
 
@@ -843,6 +1022,12 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
         return {"pass": True}
     ov = (bs.get("overrides") or {}).get(ctx.coin) or {}
     bs = {**bs, **{k: v for k, v in ov.items() if v is not None}}
+    # P3 umbrella: band_snapback.shadow_mode drives this gate to would-block-only
+    # even when the gate's own shadow_mode is left at its default (true) — the
+    # single flag the operator flips to shadow the whole band-snapback feature.
+    # The gate's own band_counter_breach_gate.shadow_mode stays as a secondary
+    # (belt-and-braces): shadow = own OR umbrella.
+    umbrella_shadow = bool(bs.get("shadow_mode", False))
     interval = str(bs.get("interval", "1h"))
     span = max(2, int(bs.get("band_span", 16)))
     # Drift-reference lag: absent -> band_span (the trigger's own-window
@@ -908,7 +1093,8 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     # would-block and structurally pass — the release is a LIVE-execution
     # escape and must not fire (and must not suppress the would-block log)
     # in shadow.
-    if bool(rel.get("enabled", False)) and not bool(cfg.get("shadow_mode", True)):
+    if bool(rel.get("enabled", False)) and not (
+            bool(cfg.get("shadow_mode", True)) or umbrella_shadow):
         try:
             min_drift = float(rel.get("min_drift_pct", 2.5))
         except (TypeError, ValueError):
@@ -942,7 +1128,7 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
         f"{ctx.confidence:.2f} < {min_conf:.2f}: {shape} — the counter-trend "
         f"chase at the top/bottom of a drift needs >= {min_conf:.2f} conviction"
     )
-    if bool(cfg.get("shadow_mode", True)):
+    if bool(cfg.get("shadow_mode", True)) or umbrella_shadow:
         logger.warning(
             f"[gate] band_counter_breach would-block {ctx.coin} {ctx.trade_side} "
             f"(conf {ctx.confidence:.2f} < {min_conf:.2f}): {shape} — shadow_mode "
@@ -1140,6 +1326,16 @@ def eval_all_gates(
     # are missing — a data gap can never block a trade.
     results["forecast_agreement_veto"] = forecast_agreement_veto_gate(
         ctx, effective_config.get("forecast_agreement_veto_gate") or {})
+    # TimesFM mirror legs (per-forecaster counterfactuals — timesfm-alone;
+    # the AND leg is forecast_agreement_veto above). SHADOW-ONLY by
+    # construction: both gates are structurally pass-only (no shadow_mode
+    # key, no pass: False path) — the executor logs the would-block accrual
+    # lines. enabled (default True) controls accrual only. A data gap
+    # (missing median / q-paths) can never flag.
+    results["timesfm_mismatch"] = timesfm_mismatch_gate(
+        ctx, effective_config.get("timesfm_mismatch_gate") or {})
+    results["timesfm_tail_trigger"] = timesfm_tail_trigger_gate(
+        ctx, effective_config.get("timesfm_tail_trigger_gate") or {})
 
     block_reasons = []
     blocked = False

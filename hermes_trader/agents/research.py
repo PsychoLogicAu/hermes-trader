@@ -450,7 +450,19 @@ def _build_user_message(
     # it says plainly that the signal is never itself a reason to stand aside.
     _snap = next((t for t in perception.get("triggers", [])
                   if t.get("name") == "bandSnapback"), None)
-    if _snap and _snap.get("fired"):
+    # band_snapback.shadow_mode (P3 umbrella): the trigger keeps computing,
+    # but NO band-snapback text reaches the prompt — the fired branch, the
+    # "band trending" context branch, and the "not present" fallback all
+    # render empty (the trigger hit is still in perception's `triggers`; this
+    # only stops the rendering). The counterfactual record is the
+    # [band-snapback][SHADOW] accrual line the perception scan emits at the
+    # trigger-hit site.
+    _bs_shadow = bool(
+        (read_agent_config().get("band_snapback") or {}).get("shadow_mode", False)
+    )
+    if _bs_shadow:
+        snapback_block = ""
+    elif _snap and _snap.get("fired"):
         _snap_reason = _snap.get("reason", "")
         _snap_side = "SHORT" if _snap_reason.startswith("short") else "LONG"
         _opp = "LONG" if _snap_side == "SHORT" else "SHORT"
@@ -863,6 +875,35 @@ def _duelist_verdict(
         return None
 
 
+# Code default for the PRIMARY slot's sampling — exactly what was sent before
+# this became configurable (temperature 0.1 ONLY; adding keys would itself
+# change behavior). The live value is hot-tunable via the agent config's
+# `llm_sampling` block (P11); the duelist slot has its own independent
+# default + `duelist_sampling` block in duel_store.py, so each slot's
+# settings can travel with its own model.
+PRIMARY_SAMPLING_DEFAULT: Dict[str, Any] = {"temperature": 0.1}
+
+
+def effective_llm_sampling() -> Dict[str, Any]:
+    """The primary slot's sampling profile, read at CALL time (hot, no cache).
+
+    Merge rule: {**default, **config["llm_sampling"]} — per-key override, NOT
+    replace-whole-dict, so a partial block keeps every default key it doesn't
+    name. Absent key = the code default, i.e. today's exact body. Fail-open:
+    any config fault (missing/corrupt/unreadable file) degrades to the pure
+    default — the LLM call path must never break on a config problem.
+    """
+    merged = dict(PRIMARY_SAMPLING_DEFAULT)
+    try:
+        overrides = read_agent_config().get("llm_sampling", {})
+        if isinstance(overrides, dict):
+            merged.update(overrides)
+    except Exception:  # noqa: BLE001 — fail-open (see docstring)
+        pass
+    logger.debug(f"[research] primary LLM sampling: {merged}")
+    return merged
+
+
 async def _async_do_call(
     api_key: str,
     base_url: str,
@@ -899,7 +940,7 @@ async def _async_do_call(
                     ],
                     "stream": False,
                     "max_tokens": max_toks,
-                    "temperature": 0.1,
+                    **effective_llm_sampling(),
                 },
                 headers={"Authorization": f"Bearer {api_key}"},
             )
@@ -1106,6 +1147,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 t.get("name") == "dailyMover" and t.get("fired")
                 for t in (perception.get("triggers") or [])
             ),
+            "daily_move_pct": perception.get("daily_move_pct"),
             "whale_signal": perception.get("whale_signal"),
         }
         memory.record_analysis(analysis)
@@ -1267,6 +1309,9 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             t.get("name") == "dailyMover" and t.get("fired")
             for t in (perception.get("triggers") or [])
         ),
+        # Signed 24h move — feeds the executor's falling-knife guard for the long
+        # sidestep (upstream 51bc23b); None when perception couldn't compute it.
+        "daily_move_pct": perception.get("daily_move_pct"),
         # OI+funding accumulation signal (oi_funding_anomaly). When present,
         # the coin shows whale-loading patterns (high OI, negative funding,
         # flat price). Used as a counter-regime bypass for LONGs.
