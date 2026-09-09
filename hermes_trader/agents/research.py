@@ -863,6 +863,35 @@ def _duelist_verdict(
         return None
 
 
+# Code default for the PRIMARY slot's sampling — exactly what was sent before
+# this became configurable (temperature 0.1 ONLY; adding keys would itself
+# change behavior). The live value is hot-tunable via the agent config's
+# `llm_sampling` block (P11); the duelist slot has its own independent
+# default + `duelist_sampling` block in duel_store.py, so each slot's
+# settings can travel with its own model.
+PRIMARY_SAMPLING_DEFAULT: Dict[str, Any] = {"temperature": 0.1}
+
+
+def effective_llm_sampling() -> Dict[str, Any]:
+    """The primary slot's sampling profile, read at CALL time (hot, no cache).
+
+    Merge rule: {**default, **config["llm_sampling"]} — per-key override, NOT
+    replace-whole-dict, so a partial block keeps every default key it doesn't
+    name. Absent key = the code default, i.e. today's exact body. Fail-open:
+    any config fault (missing/corrupt/unreadable file) degrades to the pure
+    default — the LLM call path must never break on a config problem.
+    """
+    merged = dict(PRIMARY_SAMPLING_DEFAULT)
+    try:
+        overrides = read_agent_config().get("llm_sampling", {})
+        if isinstance(overrides, dict):
+            merged.update(overrides)
+    except Exception:  # noqa: BLE001 — fail-open (see docstring)
+        pass
+    logger.debug(f"[research] primary LLM sampling: {merged}")
+    return merged
+
+
 async def _async_do_call(
     api_key: str,
     base_url: str,
@@ -899,7 +928,7 @@ async def _async_do_call(
                     ],
                     "stream": False,
                     "max_tokens": max_toks,
-                    "temperature": 0.1,
+                    **effective_llm_sampling(),
                 },
                 headers={"Authorization": f"Bearer {api_key}"},
             )
