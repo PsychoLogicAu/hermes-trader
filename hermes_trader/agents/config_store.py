@@ -21,6 +21,21 @@ CONFIG_PATH = os.environ.get(
 
 DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}
 
+# Documented block shape for the LLM slots (hot-read at call time by the
+# duel_store/research helpers — model swap + settings are a same-inode config
+# flip, no recreate):
+#
+#   "llm": {
+#       "model": "<primary model id>",      # env fallback: LLM_MODEL
+#       "duelist_model": "<duelist id>",    # env fallback: LLM_DUEL_MODEL;
+#                                           # absent everywhere = duelist off
+#       "sampling": {...},                  # primary POST-body sampling
+#       "duelist_sampling": {...}           # duelist POST-body sampling
+#   }
+#
+# Endpoint/key/max-tokens stay in .env.local (LLM_BASE_URL, LLM_API_KEY,
+# LLM_DUEL_BASE_URL, LLM_DUEL_API_KEY, LLM_MAX_TOKENS, LLM_DUEL_MAX_TOKENS).
+
 
 def read_agent_config() -> Dict[str, Any]:
     """Read the agent config from .agent-config.json."""

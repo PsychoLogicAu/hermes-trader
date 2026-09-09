@@ -1,12 +1,14 @@
-"""P11 — per-slot, hot-configurable LLM sampling profiles.
+"""P11 — per-slot, hot-configurable LLM sampling profiles (block shape).
 
 The primary POST body used to hardcode ``"temperature": 0.1`` and the
 duelist body spread the module constant ``DUELIST_SAMPLING_PROFILE``;
 neither could follow a model swap. Both slots now merge a per-key
-override from the agent config's ``llm_sampling`` / ``duelist_sampling``
-block read at CALL time (hot — no module-level cache). Code defaults are
-today's exact values, so with the keys ABSENT both bodies are
-byte-identical to the pre-change ones (the no-op guarantee, pinned here).
+override from the agent config's ``llm.sampling`` /
+``llm.duelist_sampling`` blocks (inside the same ``llm`` block as the
+model names — settings travel with the model), read at CALL time (hot —
+no module-level cache). Code defaults are today's exact values, so with
+the block ABSENT both bodies are byte-identical to the pre-change ones
+(the no-op guarantee, pinned here).
 
 Config isolation: we target ``config_store.CONFIG_PATH`` DIRECTLY
 (backup / write / restore the file contents) rather than the
@@ -131,7 +133,7 @@ def _sampling_fields(body):
 # ── primary slot ────────────────────────────────────────────────────────
 
 def test_primary_body_equals_old_when_config_absent(monkeypatch, agent_cfg):
-    """No-op guarantee (primary): with `llm_sampling` absent the body's
+    """No-op guarantee (primary): with the `llm` block ABSENT the body's
     sampling fields are EXACTLY {temperature: 0.1} — the pre-change
     hardcoded literal, no extra sampling keys."""
     captured = {}
@@ -142,10 +144,10 @@ def test_primary_body_equals_old_when_config_absent(monkeypatch, agent_cfg):
 
 
 def test_primary_body_reflects_custom_llm_sampling(monkeypatch, agent_cfg):
-    """A custom `llm_sampling` block lands in the primary POST body."""
+    """A custom `llm.sampling` block lands in the primary POST body."""
     captured = {}
     _fake_httpx(monkeypatch, captured, content="ok")
-    agent_cfg.write_cfg({"llm_sampling": {"temperature": 0.3, "top_p": 0.9}})
+    agent_cfg.write_cfg({"llm": {"sampling": {"temperature": 0.3, "top_p": 0.9}}})
     body = _call_primary(captured, monkeypatch)
     assert body["temperature"] == 0.3
     assert body["top_p"] == 0.9
@@ -156,7 +158,7 @@ def test_primary_partial_override_keeps_defaults(monkeypatch, agent_cfg):
     `top_p` keeps the default temperature 0.1."""
     captured = {}
     _fake_httpx(monkeypatch, captured, content="ok")
-    agent_cfg.write_cfg({"llm_sampling": {"top_p": 0.9}})
+    agent_cfg.write_cfg({"llm": {"sampling": {"top_p": 0.9}}})
     body = _call_primary(captured, monkeypatch)
     assert body["temperature"] == 0.1
     assert body["top_p"] == 0.9
@@ -167,10 +169,10 @@ def test_primary_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
     between two calls must be visible in the second call's body."""
     captured = {}
     _fake_httpx(monkeypatch, captured, content="ok")
-    agent_cfg.write_cfg({"llm_sampling": {"temperature": 0.2}})
+    agent_cfg.write_cfg({"llm": {"sampling": {"temperature": 0.2}}})
     body1 = _call_primary(captured, monkeypatch)
     assert body1["temperature"] == 0.2
-    agent_cfg.write_cfg({"llm_sampling": {"temperature": 0.4, "top_k": 40}})
+    agent_cfg.write_cfg({"llm": {"sampling": {"temperature": 0.4, "top_k": 40}}})
     body2 = _call_primary(captured, monkeypatch)
     assert body2["temperature"] == 0.4
     assert body2["top_k"] == 40
@@ -179,7 +181,7 @@ def test_primary_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
 # ── duelist slot ────────────────────────────────────────────────────────
 
 def test_duelist_body_equals_old_when_config_absent(monkeypatch, agent_cfg):
-    """No-op guarantee (duelist): with `duelist_sampling` absent the body
+    """No-op guarantee (duelist): with the `llm` block ABSENT the body
     carries the pre-change 6-key constant, exactly."""
     captured = {}
     _fake_httpx(monkeypatch, captured)
@@ -190,12 +192,12 @@ def test_duelist_body_equals_old_when_config_absent(monkeypatch, agent_cfg):
 
 
 def test_duelist_partial_override_keeps_other_defaults(monkeypatch, agent_cfg):
-    """`duelist_sampling: {temperature: 0.8}` overrides ONLY temperature;
+    """`llm.duelist_sampling: {temperature: 0.8}` overrides ONLY temperature;
     the other 5 default keys are still present (per-key merge, not
     replace-whole-dict)."""
     captured = {}
     _fake_httpx(monkeypatch, captured)
-    agent_cfg.write_cfg({"duelist_sampling": {"temperature": 0.8}})
+    agent_cfg.write_cfg({"llm": {"duelist_sampling": {"temperature": 0.8}}})
     ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
     body = captured["json"]
     assert body["temperature"] == 0.8
@@ -209,10 +211,10 @@ def test_duelist_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
     to the same file between calls."""
     captured = {}
     _fake_httpx(monkeypatch, captured)
-    agent_cfg.write_cfg({"duelist_sampling": {"temperature": 0.5}})
+    agent_cfg.write_cfg({"llm": {"duelist_sampling": {"temperature": 0.5}}})
     ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
     assert captured["json"]["temperature"] == 0.5
-    agent_cfg.write_cfg({"duelist_sampling": {"temperature": 0.7}})
+    agent_cfg.write_cfg({"llm": {"duelist_sampling": {"temperature": 0.7}}})
     ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
     assert captured["json"]["temperature"] == 0.7
 
@@ -224,7 +226,7 @@ def test_fail_open_corrupt_config_uses_pure_defaults(monkeypatch, agent_cfg):
     slots succeed and fall back to their pure code defaults."""
     captured_p, captured_d = {}, {}
     _fake_httpx(monkeypatch, captured_p, content="ok")
-    agent_cfg.write_cfg({"llm_sampling": {"temperature": 0.9}})  # not used
+    agent_cfg.write_cfg({"llm": {"sampling": {"temperature": 0.9}}})  # not used
     with open(cs.CONFIG_PATH, "w") as f:
         f.write("{this is not valid json")
     # Primary: the corrupt file degrades to the pure default.

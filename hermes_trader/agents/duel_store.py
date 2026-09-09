@@ -7,8 +7,8 @@ verdict is recorded next to the primary's and, when a trade opened from the
 primary's verdict later closes, the same entry-context snapshot that the
 forward signal backtest uses (executor.record_entry_context -> record_close)
 carries the duelist verdict into the outcome row. That join is what makes the
-A/B report honest: both models are scored on the SAME realized trades, and the
-duelist's column is "what would have happened if it had been live".
+A/B report honest: both models are scored on the SAME realized trades, and
+the duelist's column is "what would have happened if it had been live".
 
 Persistence is an append-only JSONL (one line per paired call) — the ledger
 pattern, NOT agent-memory: the duel log is an evaluation artifact that grows
@@ -16,11 +16,22 @@ unboundedly and is never truncated, and a corrupt line is one lost row, not a
 wiped live state. Path is overridable via HERMES_DUEL_FILE (conftest isolates
 it, like HERMES_LEDGER_FILE).
 
-Enable with env (all three; model alone also works, inheriting url/key):
-    LLM_DUEL_BASE_URL=...  LLM_DUEL_MODEL=...  LLM_DUEL_API_KEY=...
-When unset the feature is fully dormant: zero extra LLM calls, zero rows, and
-the primary path is byte-for-byte the old behavior (it still just calls
-_call_ai, which now accepts explicit endpoint args with the same env fallbacks).
+Model identity + settings live in the agent config's `llm` block (hot,
+read at call time) with an env fallback — endpoint/key stay in .env.local:
+
+    "llm": {
+        "model": "...",            # primary slot (env: LLM_MODEL)
+        "duelist_model": "...",    # duelist slot (env: LLM_DUEL_MODEL;
+                                   # absent everywhere = duelist disabled)
+        "sampling": {...},         # primary POST-body sampling
+        "duelist_sampling": {...}  # duelist POST-body sampling
+    }
+
+A model swap is a same-inode config flip (no container recreate). When no
+model is named anywhere the duelist is fully dormant: zero extra LLM calls,
+zero rows, and the primary path is byte-for-byte the old behavior (it still
+just calls _call_ai, which accepts explicit endpoint args with the same env
+fallbacks).
 
 Thread-safety: research runs on a worker pool (research_max_workers > 1), so
 all file appends take a module lock (the session_log pattern) and the duelist
@@ -72,6 +83,55 @@ def _first_env(*names: str) -> str:
 
 DEFAULT_MAX_TOKENS = 8192
 
+# Env var names for the MODEL fallbacks (config `llm.model` /
+# `llm.duelist_model` win; these are read at CALL time as the fallback so a
+# test can monkeypatch the env and a running process picks up a new model
+# without a restart). Endpoint/key vars keep their own names (DUEL prefix:
+# the second, observation-only model).
+_PRIMARY_MODEL_ENV = ("LLM_MODEL", "OPENROUTER_MODEL")
+_PRIMARY_MODEL_DEFAULT = "x-ai/grok-4.3"
+
+
+def llm_block() -> Dict[str, Any]:
+    """The agent config's `llm` block (hot read, no cache), or {} on any
+    fault — fail-open: the LLM call path must never break on a config
+    problem. Shared by both slots' resolvers (the duelist helpers here and
+    research.effective_llm_sampling)."""
+    try:
+        block = read_agent_config().get("llm")
+        if isinstance(block, dict):
+            return block
+    except Exception:  # noqa: BLE001 — fail-open (see docstring)
+        pass
+    return {}
+
+
+def effective_primary_model() -> str:
+    """The PRIMARY slot's model name: agent config `llm.model` first (hot,
+    no cache), then the LLM_MODEL / OPENROUTER_MODEL env vars, then the code
+    default. A model swap is a same-inode config flip — no recreate."""
+    m = str(llm_block().get("model") or "").strip()
+    if m:
+        return m
+    for n in _PRIMARY_MODEL_ENV:
+        v = os.environ.get(n, "")
+        if v:
+            return v
+    return _PRIMARY_MODEL_DEFAULT
+
+
+def effective_duelist_model() -> Optional[str]:
+    """The DUELIST slot's model name, or None = duelist disabled: agent
+    config `llm.duelist_model` first (hot), then the LLM_DUEL_MODEL env var.
+    The model deliberately does NOT fall back to the primary's model: a
+    silent "duel the primary against itself" doubles LLM load with no A/B
+    value — the feature is dormant until a duelist model is named."""
+    m = str(llm_block().get("duelist_model") or "").strip()
+    if m:
+        return m
+    return _first_env(*_DUEL_MODEL_VARS) or None
+
+
 # Qwen3.5-9B sampling profile — "instruct (non-thinking) mode for reasoning
 # tasks" per the model card: temperature=1.0, top_p=0.95, top_k=20,
 # min_p=0.0, presence_penalty=1.5, repetition_penalty=1.0. Used by the
@@ -83,10 +143,10 @@ DEFAULT_MAX_TOKENS = 8192
 # base Qwen, and its verdicts have been calibrated under 0.1.
 # (2026-09-09: both slots' profiles became hot-configurable — this constant
 # and research.PRIMARY_SAMPLING_DEFAULT are now only the CODE DEFAULTS,
-# overridable per-key at call time by the `duelist_sampling` / `llm_sampling`
-# agent-config blocks. Absent keys = these defaults, so the on-the-wire body
-# is byte-identical to pre-change behavior; per-model note: the sampling
-# travels WITH the model choice per slot.)
+# overridable per-key at call time by the `llm.duelist_sampling` /
+# `llm.sampling` agent-config blocks. Absent blocks = these defaults, so the
+# on-the-wire body is byte-identical to pre-change behavior; per-model note:
+# the sampling travels WITH the model choice per slot.)
 DUELIST_SAMPLING_PROFILE: Dict[str, Any] = {
     "temperature": 1.0,
     "top_p": 0.95,
@@ -100,15 +160,15 @@ DUELIST_SAMPLING_PROFILE: Dict[str, Any] = {
 def effective_duelist_sampling() -> Dict[str, Any]:
     """The duelist slot's sampling profile, read at CALL time (hot, no cache).
 
-    Merge rule: {**DUELIST_SAMPLING_PROFILE, **config["duelist_sampling"]} —
-    per-key override, NOT replace-whole-dict, so a partial block keeps every
-    default key it doesn't name. Absent key = the constant, i.e. today's
+    Merge rule: {**DUELIST_SAMPLING_PROFILE, **config["llm"]["duelist_sampling"]}
+    — per-key override, NOT replace-whole-dict, so a partial block keeps every
+    default key it doesn't name. Absent block = the constant, i.e. today's
     exact body. Fail-open: any config fault degrades to the pure default —
     the primary's verdict must never cost a duelist profile read.
     """
     merged = dict(DUELIST_SAMPLING_PROFILE)
     try:
-        overrides = read_agent_config().get("duelist_sampling", {})
+        overrides = llm_block().get("duelist_sampling")
         if isinstance(overrides, dict):
             merged.update(overrides)
     except Exception:  # noqa: BLE001 — fail-open (see docstring)
@@ -140,21 +200,25 @@ def duel_file() -> str:
 
 
 def duelist_config() -> Dict[str, Any]:
-    """The duelist endpoint, resolved from env.
+    """The duelist endpoint, resolved from the agent config's `llm` block
+    with an env fallback (all read at CALL time).
 
-    Only the MODEL is duelist-specific and REQUIRED — base_url/api_key fall
-    back to the PRIMARY LLM's values when unset, so pointing only
-    LLM_DUEL_MODEL at a differently-named model on the same server is a
-    one-line change. The model deliberately does NOT fall back to LLM_MODEL:
-    a silent "duel the primary against itself" would double LLM load with no
-    A/B value — the feature is dormant until a duelist model is named.
+    The MODEL resolves `llm.duelist_model` → LLM_DUEL_MODEL (see
+    `effective_duelist_model`) and is the only duelist-specific requirement —
+    base_url/api_key fall back to the PRIMARY LLM's values when unset, so
+    pointing the duelist at a differently-named model on the same server is
+    a one-line change. The model deliberately does NOT fall back to the
+    primary's model: a silent "duel the primary against itself" would double
+    LLM load with no A/B value — the feature is dormant until a duelist
+    model is named somewhere.
     """
+    model = effective_duelist_model()
     return {
         "base_url": _first_env(*_DUEL_URL_VARS)
         or os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
         "api_key": _first_env(*_DUEL_KEY_VARS)
         or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
-        "model": _first_env(*_DUEL_MODEL_VARS),
+        "model": model or "",
         # LLM_DUEL_MAX_TOKENS, falling back to the primary's LLM_MAX_TOKENS,
         # then to DEFAULT_MAX_TOKENS — mirrors the base_url/api_key fallback
         # (setting one var controls both models).
@@ -165,7 +229,7 @@ def duelist_config() -> Dict[str, Any]:
 
 
 def duelist_enabled() -> bool:
-    return bool(duelist_config().get("model"))
+    return effective_duelist_model() is not None
 
 
 # ── Store ──────────────────────────────────────────────────────────────────

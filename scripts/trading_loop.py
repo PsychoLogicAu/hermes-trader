@@ -79,6 +79,16 @@ logger = logging.getLogger(__name__)
 # setup. Runs before the first credential use (resolve_user_address) and
 # before any network I/O. Fails CLOSED: a broken preflight module must block
 # startup, not silently become a no-op.
+# preflight_secrets.py is a sibling script; resolve it from this file's own
+# directory. The container entrypoint (python -m hermes_trader start) loads
+# this module via spec_from_file_location, which does NOT add scripts/ to
+# sys.path the way `python scripts/trading_loop.py` would — so add it here,
+# else the bare `import preflight_secrets` below fails at container boot.
+# APPEND (not insert(0)): scripts/ contains a file (short_volume.py) that
+# shares a name with a hermes_trader module; prepending scripts/ would shadow
+# the package module for the life of the long-lived loop. preflight_secrets
+# has no collision, so it still resolves as a last resort.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     import preflight_secrets
 except Exception as _e:
@@ -830,9 +840,13 @@ def _process_coin_run(perception, ctx):
 
     try:
         analysis = research(coin, perception)
-        # Model name on every verdict line (mirrors research.py's resolution) —
-        # the historical gap that made model-switch forensics a triangulation job.
-        _pm = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        # Model name on every verdict line — the model that ANSWERED this call
+        # (carried on the analysis by research.research; resolved there from
+        # the agent config's `llm.model` → env), so a config flip between
+        # calls can never make this line lie. The helper fallback covers
+        # analyses built before the key existed.
+        from hermes_trader.agents.duel_store import effective_primary_model as _epm
+        _pm = analysis.get("primary_model") or _epm()
         logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']} (model: {_pm})")
         # Store the full LLM reasoning verbatim — no character cap.
         # The feed shows the complete rationale.

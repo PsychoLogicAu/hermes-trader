@@ -2285,9 +2285,12 @@ def register_routes(app: FastAPI) -> None:
         # ── LLM fallback (Nous Hermes via OpenRouter) ─────────────────────
         try:
             import httpx
+            from hermes_trader.agents.duel_store import effective_primary_model
             api_key = os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", ""))
             base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
-            model = os.environ.get("LLM_MODEL", "x-ai/grok-4.3")
+            # The bot's primary model (config `llm.model` → env) — the
+            # dashboard chat follows the bot's model, one source of truth.
+            model = effective_primary_model()
             if not api_key:
                 return JSONResponse({"response": "Hermes chat unavailable: LLM_API_KEY not set", "kind": "error"})
 
