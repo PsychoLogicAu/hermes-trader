@@ -450,7 +450,19 @@ def _build_user_message(
     # it says plainly that the signal is never itself a reason to stand aside.
     _snap = next((t for t in perception.get("triggers", [])
                   if t.get("name") == "bandSnapback"), None)
-    if _snap and _snap.get("fired"):
+    # band_snapback.shadow_mode (P3 umbrella): the trigger keeps computing,
+    # but NO band-snapback text reaches the prompt — the fired branch, the
+    # "band trending" context branch, and the "not present" fallback all
+    # render empty (the trigger hit is still in perception's `triggers`; this
+    # only stops the rendering). The counterfactual record is the
+    # [band-snapback][SHADOW] accrual line the perception scan emits at the
+    # trigger-hit site.
+    _bs_shadow = bool(
+        (read_agent_config().get("band_snapback") or {}).get("shadow_mode", False)
+    )
+    if _bs_shadow:
+        snapback_block = ""
+    elif _snap and _snap.get("fired"):
         _snap_reason = _snap.get("reason", "")
         _snap_side = "SHORT" if _snap_reason.startswith("short") else "LONG"
         _opp = "LONG" if _snap_side == "SHORT" else "SHORT"

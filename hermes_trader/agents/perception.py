@@ -235,7 +235,7 @@ def _scan_single_market(
                         config["scan"].get("cacheTtlMs1h", 600_000),
                     )
                 if _band_candles and len(_band_candles) >= 2 * _bs_span + 2:
-                    hits.append(trigger_mod.band_snapback(
+                    _bs_hit = trigger_mod.band_snapback(
                         _band_candles,
                         band_span=_bs_span,
                         max_drift_pct=float(_bs.get("max_drift_pct", 1.5)),
@@ -245,7 +245,24 @@ def _scan_single_market(
                         # 1-bar projection to this many ATR (0.25 = measured p99
                         # overshoot on 15m/1h). None/0 disables the cap.
                         max_project_atr=_bs.get("max_project_atr", 0.25),
-                    ))
+                    )
+                    hits.append(_bs_hit)
+                    # P3 shadow accrual: with band_snapback.shadow_mode the
+                    # prompt block and the surfacing bypass are BOTH suppressed,
+                    # so this is the only visible trace of a FIRED snapback —
+                    # the counterfactual accrual record the owner greps later.
+                    # Emitted only when the umbrella flag is on AND the trigger
+                    # fired; a trending/no-snapback band has no fired accrual.
+                    # The trigger compute above is untouched (enabled still
+                    # gates it) so `fired`/`reason` keep populating either way.
+                    if _bs.get("shadow_mode") and _bs_hit.get("fired"):
+                        _bs_reason = _bs_hit.get("reason", "")
+                        _bs_side = _bs_reason.split(" ", 1)[0] if _bs_reason else ""
+                        logger.warning(
+                            f"[band-snapback][SHADOW] {market['coin']} {_bs_side} "
+                            f"— {_bs_reason} (shadow: prompt+surfacing suppressed, "
+                            f"gate log-only)"
+                        )
 
         # Daily mover surfacing: the scan already reserves slots for top 24h
         # movers, but the trigger gate can still drop an orderly runner once the
@@ -324,9 +341,13 @@ def _scan_single_market(
             h["name"] in ("bearishReversalCandle", "bullishReversalCandle") and h["fired"] for h in hits)
         # Band-snapback bypass: a fired poke+snapback surfaces the coin for AI
         # research even below the composite gate (the gate is tuned for momentum
-        # bursts, not chop mean-reversion). Gated by band_snapback.enabled.
-        snapback_bypass = bool(_bs.get("enabled")) and any(
-            h["name"] == "bandSnapback" and h["fired"] for h in hits)
+        # bursts, not chop mean-reversion). Gated by band_snapback.enabled; the
+        # P3 umbrella band_snapback.shadow_mode additionally suppresses the
+        # surfacing (the trigger still computes and accrues the [SHADOW] line).
+        snapback_bypass = (bool(_bs.get("enabled"))
+                           and not bool(_bs.get("shadow_mode"))
+                           and any(
+                               h["name"] == "bandSnapback" and h["fired"] for h in hits))
         daily_mover_bypass = any(h["name"] == "dailyMover" and h["fired"] for h in hits)
         if (score < min_score and not burst_fired and not whale_bypass
                 and not trend_bypass and not pattern_bypass and not snapback_bypass

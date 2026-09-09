@@ -594,3 +594,80 @@ def test_fresh_5m_extreme_fail_closed(monkeypatch):
         lambda coin, interval="5m", count=50, **kw: _m5m(px=1.0, pop=False, n_closed=10),
     )
     assert _fresh_5m_extreme("X", "long", 48, 1.0) is None
+
+
+# ---------------------------------------------------------------------------
+# P3 — band_snapback.shadow_mode (the single umbrella flag)
+#
+# The gate's own shadow decision now ORs in `band_snapback.shadow_mode`, so
+# the single flag the operator flips to shadow the whole band-snapback feature
+# drives this gate to would-block-only even with the gate's own
+# band_counter_breach_gate.shadow_mode left at its default. The gate's own key
+# stays a secondary (belt-and-braces): shadow = own OR umbrella.
+# ---------------------------------------------------------------------------
+
+
+def _gate_cfg_no_shadow_key(**over) -> dict:
+    """Gate cfg with the gate's OWN shadow_mode ABSENT -> code default True.
+    (Distinct from _gate_cfg, which sets shadow_mode explicitly.)"""
+    base = {"enabled": True, "min_conf": 0.9, "min_breach_pct": 1.0}
+    base.update(over)
+    return base
+
+
+def test_gate_umbrella_shadow_drives_would_block(monkeypatch):
+    """THE decisive umbrella test: band_snapback.shadow_mode=True drives the
+    gate to would-block-only EVEN WHEN the gate's own shadow_mode is armed
+    (False). Without the umbrella this exact shape BLOCKS (pass:False); with
+    it, the single flag rescues to pass:True + shadow_would_block:True."""
+    _wire(monkeypatch, _grass_shape(),
+          band_cfg={**BAND_CFG, "shadow_mode": True})
+    cfg = _gate_cfg(shadow_mode=False)  # gate's own armed
+    r = band_counter_breach_gate(_ctx("long", 0.82), cfg)
+    assert r["pass"] is True, r
+    assert r.get("shadow_would_block") is True
+    assert "via" not in r
+    assert "GRASS long" in r["reason"]
+
+
+def test_gate_umbrella_with_gate_own_at_default(monkeypatch):
+    """The literal requirement: band_snapback.shadow_mode=True with the gate's
+    own shadow_mode at its code default (absent -> True) -> still pass:True."""
+    _wire(monkeypatch, _grass_shape(),
+          band_cfg={**BAND_CFG, "shadow_mode": True})
+    cfg = _gate_cfg_no_shadow_key()  # own shadow_mode absent -> default True
+    r = band_counter_breach_gate(_ctx("long", 0.82), cfg)
+    assert r["pass"] is True, r
+    assert r.get("shadow_would_block") is True
+
+
+def test_gate_umbrella_absent_keeps_armed_block(monkeypatch):
+    """No-op guarantee: with band_snapback.shadow_mode ABSENT (code default
+    False) and the gate's own shadow_mode armed (False), the gate BLOCKS
+    exactly as before — the umbrella must never force shadow when it is off,
+    and never leak a shadow_would_block marker into a hard block."""
+    _wire(monkeypatch, _grass_shape())  # BAND_CFG, no shadow_mode key
+    cfg = _gate_cfg(shadow_mode=False)
+    r = band_counter_breach_gate(_ctx("long", 0.82), cfg)
+    assert r["pass"] is False, r
+    assert "shadow_would_block" not in r
+    assert r["reason"].startswith("[gate:band_counter_breach]")
+
+
+def test_gate_umbrella_shadow_never_releases(monkeypatch, caplog):
+    """Umbrella shadow must ALSO suppress the drift-confirmed release escape
+    (a live-execution release cannot fire while the umbrella shadows) and the
+    would-block still accrues — mirroring the gate's own shadow contract.
+    Gate's own shadow_mode armed (False) + release enabled + umbrella on:
+    without the umbrella the release would return via=drift_confirmed with no
+    shadow marker; with it the gate stays in the shadow would-block path."""
+    _wire5m(monkeypatch, _grass_shape(), _m5m(px=0.85, pop=False),
+            band_cfg={**BAND_CFG, "shadow_mode": True})
+    cfg = _gate_cfg_release(shadow_mode=False)  # own armed; release enabled
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.risk_gates"):
+        r = band_counter_breach_gate(_ctx("long", 0.82), cfg)
+    assert r["pass"] is True, r
+    assert r.get("shadow_would_block") is True
+    assert "via" not in r, "the drift-confirmed release must not fire under the umbrella"
+    logged = [rec for rec in caplog.records if "would-block" in rec.getMessage()]
+    assert logged, "shadow mode must log the would-block even when a live release would apply"

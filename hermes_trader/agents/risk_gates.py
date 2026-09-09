@@ -895,6 +895,12 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
         return {"pass": True}
     ov = (bs.get("overrides") or {}).get(ctx.coin) or {}
     bs = {**bs, **{k: v for k, v in ov.items() if v is not None}}
+    # P3 umbrella: band_snapback.shadow_mode drives this gate to would-block-only
+    # even when the gate's own shadow_mode is left at its default (true) — the
+    # single flag the operator flips to shadow the whole band-snapback feature.
+    # The gate's own band_counter_breach_gate.shadow_mode stays as a secondary
+    # (belt-and-braces): shadow = own OR umbrella.
+    umbrella_shadow = bool(bs.get("shadow_mode", False))
     interval = str(bs.get("interval", "1h"))
     span = max(2, int(bs.get("band_span", 16)))
     # Drift-reference lag: absent -> band_span (the trigger's own-window
@@ -960,7 +966,8 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     # would-block and structurally pass — the release is a LIVE-execution
     # escape and must not fire (and must not suppress the would-block log)
     # in shadow.
-    if bool(rel.get("enabled", False)) and not bool(cfg.get("shadow_mode", True)):
+    if bool(rel.get("enabled", False)) and not (
+            bool(cfg.get("shadow_mode", True)) or umbrella_shadow):
         try:
             min_drift = float(rel.get("min_drift_pct", 2.5))
         except (TypeError, ValueError):
@@ -994,7 +1001,7 @@ def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
         f"{ctx.confidence:.2f} < {min_conf:.2f}: {shape} — the counter-trend "
         f"chase at the top/bottom of a drift needs >= {min_conf:.2f} conviction"
     )
-    if bool(cfg.get("shadow_mode", True)):
+    if bool(cfg.get("shadow_mode", True)) or umbrella_shadow:
         logger.warning(
             f"[gate] band_counter_breach would-block {ctx.coin} {ctx.trade_side} "
             f"(conf {ctx.confidence:.2f} < {min_conf:.2f}): {shape} — shadow_mode "
