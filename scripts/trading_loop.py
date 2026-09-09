@@ -840,9 +840,13 @@ def _process_coin_run(perception, ctx):
 
     try:
         analysis = research(coin, perception)
-        # Model name on every verdict line (mirrors research.py's resolution) —
-        # the historical gap that made model-switch forensics a triangulation job.
-        _pm = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        # Model name on every verdict line — the model that ANSWERED this call
+        # (carried on the analysis by research.research; resolved there from
+        # the agent config's `llm.model` → env), so a config flip between
+        # calls can never make this line lie. The helper fallback covers
+        # analyses built before the key existed.
+        from hermes_trader.agents.duel_store import effective_primary_model as _epm
+        _pm = analysis.get("primary_model") or _epm()
         logger.info(f"Verdict: {analysis['verdict']}, Confidence: {analysis['confidence']} (model: {_pm})")
         # Store the full LLM reasoning verbatim — no character cap.
         # The feed shows the complete rationale.

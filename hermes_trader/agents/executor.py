@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
+from hermes_trader.agents.duel_store import effective_primary_model
 from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
 from hermes_trader.agents.dsl_exit import (
     ExitPolicy,
@@ -405,10 +406,11 @@ def _attach_llm_context_to_result(result: Dict[str, Any], analysis: Dict[str, An
         # uncertain" verdict): null + ai_down is unambiguous.
         _c = None if analysis.get("ai_down") else analysis.get("confidence")
         result["llm_confidence"] = round(float(_c), 2) if _c is not None else None
-        # Mirrors the trading_loop's resolution + default for the `Verdict:`
-        # line, so the two agree on which model produced the verdict.
-        result["llm_model"] = os.environ.get(
-            "LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        # The model that ANSWERED this call (carried on the analysis by
+        # research.research) — mirrors the trading_loop's `Verdict:` line.
+        # The env/helper fallback only covers analyses built before this key
+        # existed.
+        result["llm_model"] = analysis.get("primary_model") or effective_primary_model()
         result["ai_down"] = bool(analysis.get("ai_down"))
         _cs = analysis.get("composite_score")
         result["composite_score"] = round(float(_cs), 1) if _cs is not None else None

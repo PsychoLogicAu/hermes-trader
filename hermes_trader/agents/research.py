@@ -20,6 +20,8 @@ from hermes_trader.agents.duel_store import (
     call_duelist,
     duelist_config,
     duelist_enabled,
+    effective_primary_model,
+    llm_block,
     record_duel,
     resolve_max_tokens,
 )
@@ -757,7 +759,9 @@ def _call_ai(
     if base_url is None:
         base_url = os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")
     if model is None:
-        model = os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "x-ai/grok-4.3"))
+        # Config `llm.model` → env (hot, no cache) — the model swap is a
+        # same-inode config flip, not a recreate.
+        model = effective_primary_model()
 
     if not api_key:
         logger.warning("[research] LLM_API_KEY not set — returning empty response")
@@ -847,7 +851,7 @@ def _duelist_verdict(
             "coin": coin,
             "perception_id": perception.get("id", "unknown"),
             "mode": str(read_agent_config().get("mode", "OFF")),
-            "primary_model": os.environ.get("LLM_MODEL", os.environ.get("OPENROUTER_MODEL", "")),
+            "primary_model": effective_primary_model(),
             "duelist_model": cfg["model"],
             "primary_verdict": primary_verdict,
             "primary_confidence": primary_confidence,
@@ -878,24 +882,25 @@ def _duelist_verdict(
 # Code default for the PRIMARY slot's sampling — exactly what was sent before
 # this became configurable (temperature 0.1 ONLY; adding keys would itself
 # change behavior). The live value is hot-tunable via the agent config's
-# `llm_sampling` block (P11); the duelist slot has its own independent
-# default + `duelist_sampling` block in duel_store.py, so each slot's
-# settings can travel with its own model.
+# `llm.sampling` block (P11, moved into the `llm` block with the model name);
+# the duelist slot has its own independent default + `llm.duelist_sampling`
+# block in duel_store.py, so each slot's settings can travel with its own
+# model.
 PRIMARY_SAMPLING_DEFAULT: Dict[str, Any] = {"temperature": 0.1}
 
 
 def effective_llm_sampling() -> Dict[str, Any]:
     """The primary slot's sampling profile, read at CALL time (hot, no cache).
 
-    Merge rule: {**default, **config["llm_sampling"]} — per-key override, NOT
-    replace-whole-dict, so a partial block keeps every default key it doesn't
-    name. Absent key = the code default, i.e. today's exact body. Fail-open:
-    any config fault (missing/corrupt/unreadable file) degrades to the pure
-    default — the LLM call path must never break on a config problem.
+    Merge rule: {**default, **config["llm"]["sampling"]} — per-key override,
+    NOT replace-whole-dict, so a partial block keeps every default key it
+    doesn't name. Absent block = the code default, i.e. today's exact body.
+    Fail-open: any config fault (missing/corrupt/unreadable file) degrades to
+    the pure default — the LLM call path must never break on a config problem.
     """
     merged = dict(PRIMARY_SAMPLING_DEFAULT)
     try:
-        overrides = read_agent_config().get("llm_sampling", {})
+        overrides = llm_block().get("sampling")
         if isinstance(overrides, dict):
             merged.update(overrides)
     except Exception:  # noqa: BLE001 — fail-open (see docstring)
@@ -1231,6 +1236,13 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # The model name that ANSWERED this call (config `llm.model` → env),
+    # resolved at the call site so the `Verdict:` log line and the
+    # `Trade result` row always show the model that actually spoke — the
+    # 2026-08-25 model-switch forensics gap (a name read later from env can
+    # disagree with the one used when the config has since been flipped).
+    primary_model = effective_primary_model()
+
     analysis = {
         "id": str(uuid.uuid4()),
         "perception_id": perception.get("id", "unknown"),
@@ -1243,6 +1255,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         "tp_px": parsed["tp_px"],
         "reasoning": parsed["reasoning"],
         "news_context": news,
+        "primary_model": primary_model,
         # AI's good/bad judgment of the recent news — drives the news gate
         # (only "negative" stands the trade down; an earnings beat is fine).
         "news_risk": parsed["news_risk"],
