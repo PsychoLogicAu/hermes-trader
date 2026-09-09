@@ -7,10 +7,13 @@ No network: the LLM endpoints are monkeypatched like the shadow-signal tests.
 """
 
 import json
+import os
 import time
+import types
 
 import pytest
 
+import hermes_trader.agents.config_store as cs
 from hermes_trader.agents import duel_store as ds
 from hermes_trader.agents import research
 from hermes_trader.agents.memory import memory
@@ -140,6 +143,106 @@ def test_max_tokens_invalid_falls_back(monkeypatch):
         assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 8192
 
 
+# ── max_tokens: config `llm` block (P11 follow-on) ────────────────────────
+
+@pytest.fixture
+def agent_cfg(monkeypatch):
+    """Own the agent-config FILE for the duration of one test (the
+    CONFIG_PATH-direct isolation pattern — see test_sampling_profiles.py).
+    conftest redirects HERMES_AGENT_CONFIG_FILE to a throwaway path BEFORE
+    config_store freezes CONFIG_PATH, so writing to that file here never
+    touches the live config; the resolvers read it at CALL time (hot)."""
+    import hermes_trader.agents.config_store as cs
+    cfg_path = cs.CONFIG_PATH
+    had_cfg = os.path.exists(cfg_path)
+    backup = ""
+    if had_cfg:
+        with open(cfg_path) as f:
+            backup = f.read()
+
+    def write_cfg(cfg):
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f)
+
+    yield types.SimpleNamespace(write_cfg=write_cfg)
+
+    if had_cfg:
+        with open(cfg_path, "w") as f:
+            f.write(backup)
+    elif os.path.exists(cfg_path):
+        os.remove(cfg_path)
+
+
+def test_max_tokens_env_only_when_block_absent(monkeypatch, agent_cfg):
+    """No-op guarantee: config block ABSENT → the env-only resolution
+    (LLM_DUEL_MAX_TOKENS → LLM_MAX_TOKENS → 8192), byte-identical to the
+    pre-config behavior."""
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    agent_cfg.write_cfg({"mode": "SHADOW"})  # config present, no `llm` key
+    assert ds.effective_primary_max_tokens() == 2048
+    assert ds.duelist_config()["max_tokens"] == 2048
+
+
+def test_max_tokens_config_wins_over_env(monkeypatch, agent_cfg):
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "1024")
+    agent_cfg.write_cfg({"llm": {"max_tokens": 4096, "duelist_max_tokens": 128}})
+    assert ds.effective_primary_max_tokens() == 4096
+    assert ds.duelist_config()["max_tokens"] == 128
+
+
+def test_duelist_max_tokens_inherits_primary_resolved(monkeypatch, agent_cfg):
+    """The duelist inherits the PRIMARY's FULLY-RESOLVED budget when its own
+    config key is unset — so a primary budget set via config (not env) still
+    propagates to the duelist."""
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {"max_tokens": 4096}})
+    assert ds.effective_primary_max_tokens() == 4096
+    assert ds.effective_duelist_max_tokens() == 4096
+    # A duelist config key beats the inherited value.
+    agent_cfg.write_cfg({"llm": {"max_tokens": 4096, "duelist_max_tokens": 512}})
+    assert ds.effective_duelist_max_tokens() == 512
+
+
+def test_max_tokens_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
+    """No module-level cache: flipping the file between calls is visible
+    immediately (a max-tokens retune is a same-inode config flip)."""
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {"max_tokens": 2000}})
+    assert ds.effective_primary_max_tokens() == 2000
+    agent_cfg.write_cfg({"llm": {"max_tokens": 3000}})
+    assert ds.effective_primary_max_tokens() == 3000
+    agent_cfg.write_cfg({"mode": "SHADOW"})  # block removed → env/default
+    assert ds.effective_primary_max_tokens() == 8192
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "-5", 0, "", " ", True, None])
+def test_max_tokens_invalid_config_falls_back(monkeypatch, agent_cfg, bad):
+    """Invalid/non-positive config values fall through to the env fallback
+    (never raise, never return 0)."""
+    monkeypatch.setenv("LLM_MAX_TOKENS", "5555")
+    agent_cfg.write_cfg({"llm": {"max_tokens": bad}})
+    assert ds.effective_primary_max_tokens() == 5555
+    assert ds._config_max_tokens("max_tokens") is None
+
+
+def test_fail_open_corrupt_config_max_tokens(monkeypatch, agent_cfg):
+    """A corrupt config must never break the LLM path: the budget degrades to
+    the env fallback (fail-open, same contract as the model/sampling
+    resolvers)."""
+    monkeypatch.setenv("LLM_MAX_TOKENS", "6666")
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "4444")
+    agent_cfg.write_cfg({"llm": {"max_tokens": 9999}})
+    with open(cs.CONFIG_PATH, "w") as f:
+        f.write("{this is not valid json")
+    assert ds.effective_primary_max_tokens() == 6666
+    assert ds.effective_duelist_max_tokens() == 4444
+    # And the duelist config path still resolves end to end.
+    assert ds.duelist_config()["max_tokens"] == 4444
+
+
 def _fake_httpx(monkeypatch, captured, content="x"):
     """httpx.AsyncClient stub capturing the POST body (same shape as the
     duelist prompt-identity test below)."""
@@ -203,6 +306,35 @@ def test_research_post_uses_llm_max_tokens(monkeypatch):
         assert captured["json"]["max_tokens"] == 4096
     finally:
         loop.close()
+
+
+def test_research_post_uses_config_max_tokens(monkeypatch, agent_cfg):
+    """End-to-end: the `llm.max_tokens` config value reaches the primary's
+    POST body (the strongest no-op/presence guarantee — the on-the-wire
+    max_tokens follows the config at call time)."""
+    import asyncio
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    loop = asyncio.new_event_loop()
+    try:
+        agent_cfg.write_cfg({"llm": {"max_tokens": 5000}})
+        loop.run_until_complete(
+            research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert captured["json"]["max_tokens"] == 5000
+    finally:
+        loop.close()
+
+
+def test_duel_post_uses_config_max_tokens(monkeypatch, agent_cfg):
+    """End-to-end: the `llm.duelist_max_tokens` config value reaches the
+    duelist's POST body (config wins over the env fallback on the wire)."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured)
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "1024")  # env must lose
+    agent_cfg.write_cfg({"llm": {"duelist_max_tokens": 640}})
+    ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert captured["json"]["max_tokens"] == 640
 
 
 # ── sampling profile + timeout retry (2026-08-27) ─────────────────────────

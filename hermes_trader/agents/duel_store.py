@@ -24,7 +24,9 @@ read at call time) with an env fallback — endpoint/key stay in .env.local:
         "duelist_model": "...",    # duelist slot (env: LLM_DUEL_MODEL;
                                    # absent everywhere = duelist disabled)
         "sampling": {...},         # primary POST-body sampling
-        "duelist_sampling": {...}  # duelist POST-body sampling
+        "duelist_sampling": {...}, # duelist POST-body sampling
+        "max_tokens": 8192,        # primary completion budget (env: LLM_MAX_TOKENS)
+        "duelist_max_tokens": 8192 # duelist completion budget (env: LLM_DUEL_MAX_TOKENS)
     }
 
 A model swap is a same-inode config flip (no container recreate). When no
@@ -194,6 +196,54 @@ def resolve_max_tokens(env_name: str, fallback: int = DEFAULT_MAX_TOKENS) -> int
     return fallback
 
 
+def _config_max_tokens(key: str) -> Optional[int]:
+    """A positive-integer completion budget from the agent config's `llm` block
+    (`llm.max_tokens` / `llm.duelist_max_tokens`), read at CALL time (hot, no
+    cache), or None when absent/invalid/non-positive. Accepts an int or an
+    all-digit string (mirrors the env resolver's tolerance). Fail-open: any
+    config fault returns None so the caller degrades to the env fallback —
+    the LLM call path must never break on a config problem."""
+    try:
+        v = llm_block().get(key)
+    except Exception:  # noqa: BLE001 — fail-open (see docstring)
+        return None
+    if isinstance(v, bool):  # bool is an int subclass; reject it explicitly
+        return None
+    if isinstance(v, int) and v > 0:
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            n = int(s)
+            if n > 0:
+                return n
+    return None
+
+
+def effective_primary_max_tokens() -> int:
+    """The PRIMARY slot's completion-token budget, read at CALL time (hot, no
+    cache): agent config `llm.max_tokens` first (a same-inode config flip —
+    no recreate), then the LLM_MAX_TOKENS env var, then DEFAULT_MAX_TOKENS.
+    It caps the RESPONSE length only (not a prompt/context limit)."""
+    c = _config_max_tokens("max_tokens")
+    if c is not None:
+        return c
+    return resolve_max_tokens("LLM_MAX_TOKENS")
+
+
+def effective_duelist_max_tokens() -> int:
+    """The DUELIST slot's completion-token budget, read at CALL time (hot, no
+    cache): agent config `llm.duelist_max_tokens` first, then the
+    LLM_DUEL_MAX_TOKENS env var, then the PRIMARY's fully-resolved budget
+    (`effective_primary_max_tokens`), then DEFAULT_MAX_TOKENS. The duelist
+    inherits the primary's resolved budget when its own is unset — mirrors
+    the base_url/api_key fallback (setting one value controls both models)."""
+    c = _config_max_tokens("duelist_max_tokens")
+    if c is not None:
+        return c
+    return resolve_max_tokens("LLM_DUEL_MAX_TOKENS", effective_primary_max_tokens())
+
+
 def duel_file() -> str:
     """Current duel-log path (read at call time so tests can redirect)."""
     return os.environ.get("HERMES_DUEL_FILE", _DUEL_FILE)
@@ -210,7 +260,8 @@ def duelist_config() -> Dict[str, Any]:
     a one-line change. The model deliberately does NOT fall back to the
     primary's model: a silent "duel the primary against itself" would double
     LLM load with no A/B value — the feature is dormant until a duelist
-    model is named somewhere.
+    model is named somewhere. max_tokens resolves the same layered way
+    (`effective_duelist_max_tokens`).
     """
     model = effective_duelist_model()
     return {
@@ -219,12 +270,10 @@ def duelist_config() -> Dict[str, Any]:
         "api_key": _first_env(*_DUEL_KEY_VARS)
         or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
         "model": model or "",
-        # LLM_DUEL_MAX_TOKENS, falling back to the primary's LLM_MAX_TOKENS,
-        # then to DEFAULT_MAX_TOKENS — mirrors the base_url/api_key fallback
-        # (setting one var controls both models).
-        "max_tokens": resolve_max_tokens(
-            "LLM_DUEL_MAX_TOKENS", resolve_max_tokens("LLM_MAX_TOKENS")
-        ),
+        # llm.duelist_max_tokens → LLM_DUEL_MAX_TOKENS → the primary's
+        # resolved budget → DEFAULT_MAX_TOKENS (see effective_duelist_max_tokens;
+        # the duelist inherits the primary's value when its own is unset).
+        "max_tokens": effective_duelist_max_tokens(),
     }
 
 
@@ -301,9 +350,7 @@ def call_duelist(
         logger.warning("[duel] duelist LLM_API_KEY not set — skipping duelist call")
         return ""
     if max_tokens is None:
-        max_tokens = resolve_max_tokens(
-            "LLM_DUEL_MAX_TOKENS", resolve_max_tokens("LLM_MAX_TOKENS")
-        )
+        max_tokens = effective_duelist_max_tokens()
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(

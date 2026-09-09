@@ -30,11 +30,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}
 #       "duelist_model": "<duelist id>",    # env fallback: LLM_DUEL_MODEL;
 #                                           # absent everywhere = duelist off
 #       "sampling": {...},                  # primary POST-body sampling
-#       "duelist_sampling": {...}           # duelist POST-body sampling
+#       "duelist_sampling": {...},          # duelist POST-body sampling
+#       "max_tokens": 8192,                 # primary completion budget;
+#                                           # env fallback: LLM_MAX_TOKENS
+#       "duelist_max_tokens": 8192          # duelist completion budget;
+#                                           # env fallback: LLM_DUEL_MAX_TOKENS,
+#                                           # then the primary's resolved value
 #   }
 #
-# Endpoint/key/max-tokens stay in .env.local (LLM_BASE_URL, LLM_API_KEY,
-# LLM_DUEL_BASE_URL, LLM_DUEL_API_KEY, LLM_MAX_TOKENS, LLM_DUEL_MAX_TOKENS).
+# Endpoint/key stay in .env.local (LLM_BASE_URL, LLM_API_KEY,
+# LLM_DUEL_BASE_URL, LLM_DUEL_API_KEY). The max-tokens env vars remain as
+# FALLBACKS — the config keys above win when present.
 
 
 def read_agent_config() -> Dict[str, Any]:

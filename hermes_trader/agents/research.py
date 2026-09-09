@@ -20,10 +20,10 @@ from hermes_trader.agents.duel_store import (
     call_duelist,
     duelist_config,
     duelist_enabled,
+    effective_primary_max_tokens,
     effective_primary_model,
     llm_block,
     record_duel,
-    resolve_max_tokens,
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.system_prompt import build_system_prompt
@@ -928,10 +928,11 @@ async def _async_do_call(
     """
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
 
-        # Completion budget: operator-tunable via LLM_MAX_TOKENS (default
-        # 32768, read at call time). It caps the RESPONSE length only — the
-        # prompt size is governed by the model server's context window.
-        default_max_toks = resolve_max_tokens("LLM_MAX_TOKENS")
+        # Completion budget: agent config `llm.max_tokens` → LLM_MAX_TOKENS
+        # (default 8192, read at call time — a same-inode config flip, no
+        # recreate). It caps the RESPONSE length only — the prompt size is
+        # governed by the model server's context window.
+        default_max_toks = effective_primary_max_tokens()
 
         async def _post(max_toks: int):
             url = base_url.rstrip("/") + "/chat/completions"
