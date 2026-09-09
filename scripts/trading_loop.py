@@ -110,7 +110,7 @@ from hermes_trader.agents.config import get_config
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.memory import memory
 from hermes_trader.client.exchange import get_all_hl_mids, prewarm_meta_cache
-from hermes_trader.client.universe import get_universe
+from hermes_trader.client.universe import filter_universe, get_universe
 from hermes_trader.client.hl_client import (fetch_account_state,
                                             fetch_aggregate_contributions_since,
                                             fetch_hl_candles,
@@ -179,6 +179,10 @@ try:
 except Exception:
     _enable_hip3 = False
 universe = get_universe(include_hip3=_enable_hip3)
+# T4.4 port (upstream 16a2a0a98f9d, config-toggle shape): tradable_universe is an
+# OPTIONAL allowlist. Empty/absent (default) = no restriction; the owner enables
+# it in .agent-config.json with the exact majors list they want. Hot-read.
+universe = filter_universe(universe, (read_agent_config() or {}).get("tradable_universe") or [])
 logger.info(
     f"Universe loaded: {len(universe)} markets"
     + (f" (HIP-3 enabled — {sum(1 for m in universe if m.get('dex'))} tokenized markets)" if _enable_hip3 else "")
@@ -1113,6 +1117,10 @@ while True:
         if universe_refresh_s > 0 and (time.time() - _last_universe_refresh) >= universe_refresh_s:
             try:
                 universe = get_universe(force_refresh=True, include_hip3=_enable_hip3)
+                # T4.4 port (upstream 16a2a0a98f9d, config-toggle shape): apply the
+                # optional tradable_universe allowlist (empty/absent = no
+                # restriction). Reuses this tick's _cfg hot-read.
+                universe = filter_universe(universe, _cfg.get("tradable_universe") or [])
                 _last_universe_refresh = time.time()
                 logger.info(f"Universe refreshed: {len(universe)} markets")
             except Exception as e:
