@@ -1195,13 +1195,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # → None → the gate has no opinion and passes. Guarded on the passed
     # config's timesfm_signal.enabled (fail-closed: a config without the key
     # never pays the fetch, and tests can't reach the wire through here).
-    _timesfm_q10p = _timesfm_q90p = None
+    _timesfm_q10p = _timesfm_q90p = _timesfm_med = None
     if (config.get("timesfm_signal") or {}).get("enabled", False):
         try:
             from hermes_trader.agents.timesfm_signal import get_timesfm_signal_sync as _ts
             _tsig = _ts(analysis["coin"], trade_side)
             _timesfm_q10p = _tsig.q10_path_pct if _tsig else None
             _timesfm_q90p = _tsig.q90_path_pct if _tsig else None
+            # TimesFM median for the timesfm_mismatch mirror gate — same warm
+            # 300s per-coin cache read (no new API cost). None on error
+            # signals → the gate has no opinion and passes.
+            _timesfm_med = _tsig.median_pct if _tsig else None
         except Exception as _te:
             logger.debug(f"[executor] timesfm gate-side read failed for {analysis['coin']}: {_te}")
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
@@ -1236,6 +1240,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         chronos_q90_path_pct=_chronos_q90p,
         timesfm_q10_path_pct=_timesfm_q10p,
         timesfm_q90_path_pct=_timesfm_q90p,
+        timesfm_median_pct=_timesfm_med,
         duelist_verdict=_duelist_verdict,
     )
 
@@ -1294,6 +1299,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
             f"NOT blocking (shadow mode)")
+
+    # TimesFM mirror-leg shadow accruals: the timesfm-alone per-forecaster
+    # counterfactuals (the AND leg is the forecast_agreement_veto line
+    # below). Both gates are SHADOW-ONLY BY CONSTRUCTION — there is no
+    # shadow_mode key and no code path that blocks; enabled (default True)
+    # only controls whether they accrue these lines. The anchored strings
+    # below ('timesfm_mismatch WOULD HAVE BLOCKED' / 'timesfm_tail_trigger
+    # WOULD HAVE BLOCKED') are the counterfactual join keys.
+    _cm2 = gate_output["results"].get("timesfm_mismatch") or {}
+    if _cm2.get("shadow_would_block"):
+        logger.warning(f"[gate][SHADOW] timesfm_mismatch WOULD HAVE BLOCKED {analysis['coin']} {trade_side.upper()} (conf {analysis['confidence']:.2f}, composite {analysis.get('composite_score', 0):.1f}): {_cm2.get('reason')} — NOT blocking (shadow-only)")
+    _ct2 = gate_output["results"].get("timesfm_tail_trigger") or {}
+    if _ct2.get("shadow_would_block"):
+        logger.warning(f"[gate][SHADOW] timesfm_tail_trigger WOULD HAVE BLOCKED {analysis['coin']} {trade_side.upper()} (conf {analysis['confidence']:.2f}, composite {analysis.get('composite_score', 0):.1f}): {_ct2.get('reason')} — NOT blocking (shadow-only)")
 
     # Duelist veto shadow: the A/B duelist EXPLICITLY vetoed (or took the
     # opposite side on) this directional entry. The gate structurally passes;
