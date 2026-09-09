@@ -226,7 +226,7 @@ def select_exit_params(dsl_config: Dict[str, Any], regime: str) -> tuple:
 
 
 def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
-                             cfg: Dict[str, Any]) -> tuple:
+                             cfg: Dict[str, Any], coin: str = "") -> tuple:
     """Should we BYPASS the loss-cooldown because a stopped name has RESUMED its
     uptrend? (The autopsy leak: SPCX was force-entered, noise-stopped, then the
     180m loss-cooldown locked us out of its +29% run.) The cooldown is anti-revenge
@@ -236,10 +236,14 @@ def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
     Conservative + whipsaw-guarded: requires price to reclaim `reclaim_pct`% ABOVE
     the prior stop-out price AND composite >= min_composite. LONG-only. Each
     re-entry that loses re-arms the cooldown at a NEW (higher) stop, so repeated
-    whipsaw must clear an ever-rising bar. Returns (allow, reason)."""
+    whipsaw must clear an ever-rising bar. `momentum_reentry.shadow_mode` (code
+    default false) makes a firing condition log-only: the bypass accrues a
+    `[gate][SHADOW]` line but the cooldown still binds (returns False).
+    Returns (allow, reason)."""
     mr = cfg.get("momentum_reentry") or {}
     if not mr.get("enabled", False):
         return (False, "")
+    shadow = bool(mr.get("shadow_mode", False))
     try:
         last_exit_px = float(last_exit_px or 0)
         current_mid = float(current_mid or 0)
@@ -251,8 +255,16 @@ def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
     min_comp = float(mr.get("min_composite", 30))
     if current_mid >= last_exit_px * (1 + reclaim) and float(composite or 0) >= min_comp:
         gain = (current_mid / last_exit_px - 1) * 100
-        return (True, f"reclaimed +{gain:.1f}% above stop {last_exit_px:g}, "
-                      f"composite {float(composite or 0):.0f}")
+        reason = (f"reclaimed +{gain:.1f}% above stop {last_exit_px:g}, "
+                  f"composite {float(composite or 0):.0f}")
+        if shadow:
+            # Counterfactual accrual record: the condition HOLDS but the bypass
+            # does not apply — the cooldown still binds at every call site.
+            logger.warning(
+                f"[gate][SHADOW] momentum_reentry WOULD BYPASS cooldown for {coin} "
+                f"({reason}) — shadow_mode ON, NOT applying (cooldown still binds)")
+            return (False, reason)
+        return (True, reason)
     return (False, "")
 
 
@@ -671,7 +683,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _last = memory.last_close_for(analysis["coin"]) or {}
         _mr_ok, _mr_why = momentum_reentry_allowed(
             _last.get("exit_px"), _last.get("side"),
-            analysis.get("mid"), analysis.get("composite_score"), config)
+            analysis.get("mid"), analysis.get("composite_score"), config,
+            coin=analysis["coin"])
         if _mr_ok:
             logger.info(f"[executor] momentum re-entry on {analysis['coin']}: "
                         f"{_mr_why} — bypassing {_lc_remaining:.0f}min loss cooldown")

@@ -754,7 +754,7 @@ def _process_coin_run(perception, ctx):
             _last_close = memory.last_close_for(coin) or {}
             _mr_ok, _mr_why = momentum_reentry_allowed(
                 _last_close.get("exit_px"), _last_close.get("side"),
-                perception.get("mid"), score, _cfg_cd)
+                perception.get("mid"), score, _cfg_cd, coin=coin)
             if not _mr_ok:
                 logger.info(f"{coin}: pre-research loss-cooldown ({_lc_remaining:.0f}min remaining) — skip")
                 log_event({"event": "ta_skip", "coin": coin,
