@@ -752,10 +752,17 @@ def _process_coin_run(perception, ctx):
         _lc_remaining = memory.loss_cooldown_remaining_min(coin)
         if _lc_remaining > 0:
             _last_close = memory.last_close_for(coin) or {}
-            _mr_ok, _mr_why = momentum_reentry_allowed(
+            _mr = momentum_reentry_allowed(
                 _last_close.get("exit_px"), _last_close.get("side"),
-                perception.get("mid"), score, _cfg_cd, coin=coin)
-            if not _mr_ok:
+                perception.get("mid"), score, _cfg_cd)
+            if _mr.suppressed:
+                # The re-entry condition FIRED but shadow_mode keeps it
+                # log-only — accrue the counterfactual line, then the skip
+                # below still applies (cooldown binds here too: the paid
+                # research runs and is blocked at execution — exactly the
+                # pre-8ac0b0b behavior, the correct shadow reference).
+                logger.warning(_mr.shadow_accrual_line(coin))
+            if not _mr.is_allowed():
                 logger.info(f"{coin}: pre-research loss-cooldown ({_lc_remaining:.0f}min remaining) — skip")
                 log_event({"event": "ta_skip", "coin": coin,
                            "signal": "LOSS_COOLDOWN",

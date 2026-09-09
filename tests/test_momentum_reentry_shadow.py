@@ -1,11 +1,11 @@
-"""P6: momentum_reentry.shadow_mode — the loss-cooldown bypass becomes
-log-only when the flag is on (code default false = current bypass behavior,
-a no-op merge). The condition keeps COMPUTING in both states; the accrual
-line `[gate][SHADOW] momentum_reentry WOULD BYPASS` is the counterfactual
-record. Both call sites (executor cooldown bypass + trading_loop
-pre-research skip) consume only the (allow, reason) tuple, so the
-cooldown binds at both when shadow is on. Hermetic: pure function + one
-maybe_execute-level pin (patched I/O surface, no live LLM/candles)."""
+"""P6 (refactored 2026-09-09): momentum_reentry.shadow_mode — the loss-cooldown
+bypass becomes log-only when the flag is on (code default false = current bypass
+behavior, a no-op merge). The decision is PURE — no coin, no logging — and
+returns a MomentumReentryDecision (allowed / suppressed / no-opinion). The
+call sites (which hold the coin) emit the accrual line via
+decision.shadow_accrual_line(coin) — the single owner of the line's format.
+Hermetic: pure function + maybe_execute-level pins (patched I/O surface, no
+live LLM/candles)."""
 
 import logging
 
@@ -25,75 +25,94 @@ _NO_SHADOW_KEY = {"momentum_reentry": {"enabled": True, "reclaim_pct": 1.0,
 _DISABLED = {"momentum_reentry": {"enabled": False, "shadow_mode": True}}
 
 
-# ── (a) fire + shadow OFF -> (True, reason) ────────────────────────────────
+# ── (a) fire + shadow OFF -> allowed, no suppression, no logging ────────────
 
-def test_fire_shadow_off_allows_bypass():
-    ok, why = momentum_reentry_allowed(100.0, "long", 102.0, 50, _ON)
-    assert ok is True
-    assert "reclaimed" in why
-
-
-# ── (b) fire + shadow ON -> (False, ...) + exactly one accrual line ────────
-
-def test_fire_shadow_on_does_not_bypass_and_accrues(caplog):
-    with caplog.at_level(logging.WARNING,
-                         logger="hermes_trader.agents.executor"):
-        ok, why = momentum_reentry_allowed(100.0, "long", 102.0, 50,
-                                           _ON_SHADOW, coin="SPCX")
-    assert ok is False
-    assert "reclaimed" in why  # reason still carried for future debug
-    shadow_lines = [r for r in caplog.records
-                    if _SHADOW_LINE in r.getMessage()]
-    assert len(shadow_lines) == 1, caplog.text
-    assert "SPCX" in shadow_lines[0].getMessage()
-    assert "cooldown still binds" in shadow_lines[0].getMessage()
-
-
-# ── (c) no-fire: (False, "") in BOTH shadow states, no accrual line ────────
-
-def test_no_fire_shadow_on_is_silent(caplog):
-    with caplog.at_level(logging.WARNING,
-                         logger="hermes_trader.agents.executor"):
-        assert momentum_reentry_allowed(100.0, "long", 98.0, 50, _ON_SHADOW,
-                                        coin="ZEC") == (False, "")
-        assert momentum_reentry_allowed(100.0, "long", 100.5, 50, _ON_SHADOW,
-                                        coin="ZEC") == (False, "")
+def test_fire_shadow_off_allows_bypass(caplog):
+    with caplog.at_level(logging.WARNING):
+        d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _ON)
+    assert d.is_allowed() is True
+    assert d.suppressed is False
+    assert "reclaimed" in d.reason
     assert not [r for r in caplog.records if _SHADOW_LINE in r.getMessage()], \
-        caplog.text
+        "the decision must be pure — no logging (caplog.text)"
+
+
+# ── (b) fire + shadow ON -> suppressed, cooldown binds, accrual line ────────
+
+def test_fire_shadow_on_suppressed_not_allowed():
+    d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _ON_SHADOW)
+    assert d.is_allowed() is False
+    assert d.suppressed is True
+    assert "reclaimed" in d.reason  # the fired reason is carried for the line
+
+
+def test_accrual_line_format_single_owner():
+    """shadow_accrual_line(coin) is THE format owner — both call sites log
+    exactly this string; the anchored prefix must survive for the accrual
+    grep (TODO P7's join query)."""
+    d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _ON_SHADOW)
+    line = d.shadow_accrual_line("SPCX")
+    assert line.startswith(_SHADOW_LINE + " cooldown for SPCX")
+    assert "(reclaimed +2.0% above stop 100, composite 50)" in line
+    assert "shadow_mode ON, NOT applying (cooldown still binds)" in line
+
+
+def test_decision_is_pure_no_logging_even_suppressed(caplog):
+    with caplog.at_level(logging.WARNING):
+        d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _ON_SHADOW)
+    assert d.suppressed is True
+    assert not [r for r in caplog.records if _SHADOW_LINE in r.getMessage()], \
+        "suppression must NOT log inside the decision — the call sites log"
+
+
+# ── (c) no-fire: no-opinion decision in BOTH shadow states ──────────────────
+
+def test_no_fire_shadow_on_is_noopinion():
+    assert momentum_reentry_allowed(100.0, "long", 98.0, 50, _ON_SHADOW) \
+        .is_allowed() is False
+    assert momentum_reentry_allowed(100.0, "long", 98.0, 50, _ON_SHADOW) \
+        .suppressed is False
+    assert momentum_reentry_allowed(100.0, "long", 100.5, 50, _ON_SHADOW) \
+        .is_allowed() is False
+    assert momentum_reentry_allowed(100.0, "long", 100.5, 50, _ON_SHADOW) \
+        .suppressed is False
+    assert momentum_reentry_allowed(100.0, "long", 100.5, 50, _ON_SHADOW).reason == ""
 
 
 def test_no_fire_shadow_off():
-    assert momentum_reentry_allowed(100.0, "long", 98.0, 50, _ON) == (False, "")
-    assert momentum_reentry_allowed(100.0, "long", 100.5, 50, _ON) == (False, "")
-    assert momentum_reentry_allowed(100.0, "long", 102.0, 20, _ON) == (False, "")
+    assert momentum_reentry_allowed(100.0, "long", 98.0, 50, _ON) \
+        .is_allowed() is False
+    assert momentum_reentry_allowed(100.0, "long", 100.5, 50, _ON) \
+        .is_allowed() is False
+    assert momentum_reentry_allowed(100.0, "long", 102.0, 20, _ON) \
+        .is_allowed() is False
 
 
-# ── (d) shadow key ABSENT -> byte-identical to pre-change behavior ─────────
+# ── (d) shadow key ABSENT -> identical to pre-change behavior ───────────────
 
 def test_shadow_key_absent_is_noop():
-    # The pre-change function: same call, same expected tuple. shadow_mode
-    # absent from config must behave exactly as before (bypass allowed).
+    # The pre-change function: same inputs, same decision (allowed). The
+    # absence of shadow_mode must behave exactly as before (bypass allowed).
     assert _NO_SHADOW_KEY.get("momentum_reentry", {}).get("shadow_mode", False) is False
-    ok, why = momentum_reentry_allowed(100.0, "long", 102.0, 50, _NO_SHADOW_KEY)
-    assert (ok, why) == (True, "reclaimed +2.0% above stop 100, composite 50")
+    d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _NO_SHADOW_KEY)
+    assert d.is_allowed() is True
+    assert d.reason == "reclaimed +2.0% above stop 100, composite 50"
 
 
-# ── (e) enabled=false + shadow ON -> (False, ""), shadow never evaluated ───
+# ── (e) enabled=false + shadow ON -> no-opinion, shadow never evaluated ─────
 
-def test_disabled_short_circuits_shadow(caplog):
-    with caplog.at_level(logging.WARNING,
-                         logger="hermes_trader.agents.executor"):
-        assert momentum_reentry_allowed(100.0, "long", 102.0, 50, _DISABLED,
-                                        coin="TON") == (False, "")
-    assert not [r for r in caplog.records if _SHADOW_LINE in r.getMessage()], \
-        caplog.text
+def test_disabled_short_circuits_shadow():
+    d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _DISABLED)
+    assert d.is_allowed() is False
+    assert d.suppressed is False
+    assert d.reason == ""
 
 
-# ── (f) EXECUTION-LEVEL: the cooldown STILL BINDS at maybe_execute ─────────
-# The TODO's requirement that shadow mode leaves the cooldown in force: a
-# coin in active loss-cooldown whose conditions WOULD fire the re-entry,
-# with shadow_mode=true, must come back with the loss_cooldown block reason
-# (not executed, not bypassed) AND accrue the shadow line.
+# ── (f) EXECUTION-LEVEL: the cooldown STILL BINDS at maybe_execute ───────────
+# The TODO's requirement that shadow mode leaves the cooldown in force: a coin
+# in active loss-cooldown whose conditions WOULD fire the re-entry, with
+# shadow_mode=true, must come back with the loss_cooldown block reason (not
+# executed, not bypassed) AND accrue the shadow line AT THE CALL SITE.
 
 def _exec_baseline(monkeypatch, cfg_overrides=None, state_overrides=None):
     """Patch executor's I/O surface with sane defaults (same pattern as
@@ -175,7 +194,7 @@ def _arm_cooldown_and_last_close(monkeypatch, executor, coin, remaining_min,
 
 def test_maybe_execute_shadow_on_cooldown_still_binds(monkeypatch, caplog):
     """Shadow ON + firing re-entry condition -> NOT executed, loss_cooldown
-    reason, and the accrual line fires at the execution call site."""
+    reason, and the accrual line fires AT THE EXECUTION CALL SITE."""
     ex, captured, _ = _exec_baseline(
         monkeypatch,
         cfg_overrides={"momentum_reentry": {
@@ -192,6 +211,10 @@ def test_maybe_execute_shadow_on_cooldown_still_binds(monkeypatch, caplog):
                     if _SHADOW_LINE in r.getMessage()]
     assert len(shadow_lines) == 1, caplog.text
     assert "TON" in shadow_lines[0].getMessage()
+    # The call-site line is EXACTLY the decision's owned format:
+    d = momentum_reentry_allowed(100.0, "long", 102.0, 50, _ON_SHADOW)
+    assert shadow_lines[0].getMessage() == d.shadow_accrual_line("TON"), \
+        (shadow_lines[0].getMessage(), d.shadow_accrual_line("TON"))
 
 
 def test_maybe_execute_shadow_off_cooldown_bypassed(monkeypatch):
@@ -208,51 +231,33 @@ def test_maybe_execute_shadow_off_cooldown_bypassed(monkeypatch):
     assert captured.get("coin") == "TON", (res, captured)
 
 
-def test_maybe_execute_call_site_passes_coin_kwarg(monkeypatch):
-    """Call-site pin (executor cooldown branch): the _mr_ok=False path the
-    shadow return produces leads to the loss_cooldown dict — with the coin
-    name propagated into the accrual line, proving coin=analysis['coin']
-    is wired at the call site."""
-    from hermes_trader.agents import executor
-    from unittest.mock import patch as _patch
-    ex, _, _ = _exec_baseline(
-        monkeypatch,
-        cfg_overrides={"momentum_reentry": {
-            "enabled": True, "reclaim_pct": 1.0, "min_composite": 30,
-            "shadow_mode": True}})
-    _arm_cooldown_and_last_close(monkeypatch, ex, "TON", 180.0, 100.0, "long")
-    with _patch.object(executor, "momentum_reentry_allowed",
-                       wraps=executor.momentum_reentry_allowed) as spied:
-        res = ex.maybe_execute(_analysis())
-    assert res["executed"] is False and "loss_cooldown" in res["reason"]
-    assert spied.call_count == 1
-    _, kw = spied.call_args
-    assert kw.get("coin") == "TON", f"call site did not pass coin: {spied.call_args}"
+# ── (g) PRE-RESEARCH-SKIP level: decision-level pin ─────────────────────────
+# The trading_loop skip branch is `if not _mr.is_allowed(): ... return` — with
+# shadow on the decision is suppressed (not allowed), so the skip branch
+# applies (the paid LLM research happens, then is blocked at execution).
+# The call site's accrual line uses the SAME owned format:
 
-
-# ── (g) PRE-RESEARCH-SKIP level: function-level pin ───────────────────────
-# The trading_loop skip branch is `if not _mr_ok: ... return` — with shadow
-# on the function returns (False, ...), so the skip branch applies (the paid
-# LLM research happens, then is blocked at execution). Full integration test
-# not required; the skip branch consumes only the tuple.
-
-def test_pre_research_skip_sees_false_when_shadow_on():
+def test_pre_research_skip_sees_not_allowed_when_shadow_on():
     """Same firing inputs the trading_loop pre-research call site would pass
-    (perception mid + composite vs last close), shadow ON -> (False, ...)
-    which is exactly what the skip branch's `if not _mr_ok` keys on."""
-    # trading_loop.py: _mr_ok, _mr_why = momentum_reentry_allowed(
+    (perception mid + composite vs last close): shadow ON -> suppressed
+    (not allowed), so the skip branch applies — and the accrual line it logs
+    is the decision's owned format."""
+    # trading_loop.py: _mr = momentum_reentry_allowed(
     #     _last_close.get("exit_px"), _last_close.get("side"),
-    #     perception.get("mid"), score, _cfg_cd, coin=coin)
+    #     perception.get("mid"), score, _cfg_cd)
     _last_close = {"exit_px": 100.0, "side": "long"}
     perception = {"mid": 102.0}
     score = 50
-    ok, why = momentum_reentry_allowed(
+    d = momentum_reentry_allowed(
         _last_close.get("exit_px"), _last_close.get("side"),
-        perception.get("mid"), score, _ON_SHADOW, coin="SPCX")
-    assert not ok  # `if not _mr_ok:` -> skip branch applies
-    assert "reclaimed" in why  # reason carried, unused by the skip branch
-    # and with shadow off the same inputs return ok=True (no skip)
-    ok_off, _ = momentum_reentry_allowed(
+        perception.get("mid"), score, _ON_SHADOW)
+    assert not d.is_allowed()  # `if not _mr.is_allowed():` -> skip branch
+    assert d.suppressed is True
+    line = d.shadow_accrual_line("SPCX")  # what the call site logs
+    assert line.startswith(_SHADOW_LINE + " cooldown for SPCX")
+    # and with shadow off the same inputs allow (no skip)
+    d_off = momentum_reentry_allowed(
         _last_close.get("exit_px"), _last_close.get("side"),
-        perception.get("mid"), score, _ON, coin="SPCX")
-    assert ok_off
+        perception.get("mid"), score, _ON)
+    assert d_off.is_allowed()
+    assert d_off.suppressed is False

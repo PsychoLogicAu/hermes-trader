@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
@@ -225,32 +226,65 @@ def select_exit_params(dsl_config: Dict[str, Any], regime: str) -> tuple:
     return (base_protect, base_retrace, base_tiers, "scalp")
 
 
+@dataclass(frozen=True)
+class MomentumReentryDecision:
+    """Outcome of the momentum-continuation re-entry decision.
+
+    Carries the decision AND its three-state meaning:
+    ``allowed=True`` (bypass), ``suppressed=True`` (the condition FIRED but
+    ``momentum_reentry.shadow_mode`` kept it log-only — the cooldown still
+    binds), or neither (no opinion). The decision is pure — no logging — so
+    the call sites (which hold the coin name) emit the accrual line via
+    :meth:`shadow_accrual_line`, giving that format exactly one owner while
+    keeping I/O out of the decision. (The coin must not enter the decision
+    API: it is a logging need, not a decision input — the earlier
+    ``coin: str = ""`` kwarg was that smuggling, corrected 2026-09-09.)"""
+    allowed: bool
+    reason: str
+    suppressed: bool
+
+    def is_allowed(self) -> bool:
+        return self.allowed
+
+    def shadow_accrual_line(self, coin: str) -> str:
+        """The counterfactual accrual record for a shadow-suppressed bypass.
+        THE single owner of this line's format — both call sites log exactly
+        this string, nothing else."""
+        return (f"[gate][SHADOW] momentum_reentry WOULD BYPASS cooldown for "
+                f"{coin} ({self.reason}) — shadow_mode ON, NOT applying "
+                f"(cooldown still binds)")
+
+
 def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
-                             cfg: Dict[str, Any], coin: str = "") -> tuple:
+                             cfg: Dict[str, Any]) -> MomentumReentryDecision:
     """Should we BYPASS the loss-cooldown because a stopped name has RESUMED its
     uptrend? (The autopsy leak: SPCX was force-entered, noise-stopped, then the
-    180m loss-cooldown locked us out of its +29% run.) The cooldown is anti-revenge
-    — correct for a FALLING name; but a name that breaks back ABOVE where it stopped
-    us, with strong composite, is a momentum-continuation re-entry, not revenge.
+    180m loss-cooldown locked us out of its +29% run.) The cooldown is
+    anti-revenge — correct for a FALLING name; but a name that breaks back
+    ABOVE where it stopped us, with strong composite, is a momentum-continuation
+    re-entry, not revenge.
 
-    Conservative + whipsaw-guarded: requires price to reclaim `reclaim_pct`% ABOVE
-    the prior stop-out price AND composite >= min_composite. LONG-only. Each
-    re-entry that loses re-arms the cooldown at a NEW (higher) stop, so repeated
-    whipsaw must clear an ever-rising bar. `momentum_reentry.shadow_mode` (code
-    default false) makes a firing condition log-only: the bypass accrues a
-    `[gate][SHADOW]` line but the cooldown still binds (returns False).
-    Returns (allow, reason)."""
+    Conservative + whipsaw-guarded: requires price to reclaim `reclaim_pct`%
+    ABOVE the prior stop-out price AND composite >= min_composite. LONG-only.
+    Each re-entry that loses re-arms the cooldown at a NEW (higher) stop, so
+    repeated whipsaw must clear an ever-rising bar.
+
+    PURE — no coin, no logging: returns a :class:`MomentumReentryDecision`.
+    ``momentum_reentry.shadow_mode`` (code default false) does not change the
+    decision to ``allowed``; it sets ``suppressed`` when the condition fires
+    so the call sites log the counterfactual accrual line while the cooldown
+    still binds (no-op merge: shadow absent -> ``allowed`` exactly as today)."""
     mr = cfg.get("momentum_reentry") or {}
     if not mr.get("enabled", False):
-        return (False, "")
+        return MomentumReentryDecision(False, "", False)
     shadow = bool(mr.get("shadow_mode", False))
     try:
         last_exit_px = float(last_exit_px or 0)
         current_mid = float(current_mid or 0)
     except (TypeError, ValueError):
-        return (False, "")
+        return MomentumReentryDecision(False, "", False)
     if (last_side or "").lower() != "long" or last_exit_px <= 0 or current_mid <= 0:
-        return (False, "")
+        return MomentumReentryDecision(False, "", False)
     reclaim = float(mr.get("reclaim_pct", 1.0)) / 100.0
     min_comp = float(mr.get("min_composite", 30))
     if current_mid >= last_exit_px * (1 + reclaim) and float(composite or 0) >= min_comp:
@@ -258,14 +292,13 @@ def momentum_reentry_allowed(last_exit_px, last_side, current_mid, composite,
         reason = (f"reclaimed +{gain:.1f}% above stop {last_exit_px:g}, "
                   f"composite {float(composite or 0):.0f}")
         if shadow:
-            # Counterfactual accrual record: the condition HOLDS but the bypass
-            # does not apply — the cooldown still binds at every call site.
-            logger.warning(
-                f"[gate][SHADOW] momentum_reentry WOULD BYPASS cooldown for {coin} "
-                f"({reason}) — shadow_mode ON, NOT applying (cooldown still binds)")
-            return (False, reason)
-        return (True, reason)
-    return (False, "")
+            # The condition HOLDS but the bypass must not apply: mark it
+            # shadow-suppressed so BOTH call sites log the same accrual line
+            # and the cooldown still binds. No log here — the decision stays
+            # pure; the call sites (which know the coin) emit it.
+            return MomentumReentryDecision(False, reason, True)
+        return MomentumReentryDecision(True, reason, False)
+    return MomentumReentryDecision(False, "", False)
 
 
 def _attach_chronos_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
@@ -681,13 +714,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # stopped us (resumed uptrend, strong composite), bypass the anti-revenge
         # cooldown — that's a run we got shaken out of, not a falling knife.
         _last = memory.last_close_for(analysis["coin"]) or {}
-        _mr_ok, _mr_why = momentum_reentry_allowed(
+        _mr = momentum_reentry_allowed(
             _last.get("exit_px"), _last.get("side"),
-            analysis.get("mid"), analysis.get("composite_score"), config,
-            coin=analysis["coin"])
-        if _mr_ok:
+            analysis.get("mid"), analysis.get("composite_score"), config)
+        if _mr.suppressed:
+            # The re-entry condition FIRED but shadow_mode keeps it log-only —
+            # the counterfactual accrual record. The cooldown still binds
+            # below (the block branch is reached: is_allowed() is False).
+            logger.warning(_mr.shadow_accrual_line(analysis["coin"]))
+        if _mr.is_allowed():
             logger.info(f"[executor] momentum re-entry on {analysis['coin']}: "
-                        f"{_mr_why} — bypassing {_lc_remaining:.0f}min loss cooldown")
+                        f"{_mr.reason} — bypassing {_lc_remaining:.0f}min loss cooldown")
         else:
             return {
                 "executed": False, "mode": mode,
