@@ -23,20 +23,31 @@ DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}
 
 # Documented block shape for the LLM slots (hot-read at call time by the
 # duel_store/research helpers — model swap + settings are a same-inode config
-# flip, no recreate):
+# flip, no recreate). NESTED per-slot shape; the flat keys remain as legacy
+# per-key fallbacks:
 #
 #   "llm": {
-#       "model": "<primary model id>",      # env fallback: LLM_MODEL
-#       "duelist_model": "<duelist id>",    # env fallback: LLM_DUEL_MODEL;
-#                                           # absent everywhere = duelist off
-#       "sampling": {...},                  # primary POST-body sampling
-#       "duelist_sampling": {...},          # duelist POST-body sampling
-#       "max_tokens": 8192,                 # primary completion budget;
-#                                           # env fallback: LLM_MAX_TOKENS
-#       "duelist_max_tokens": 8192          # duelist completion budget;
-#                                           # env fallback: LLM_DUEL_MAX_TOKENS,
-#                                           # then the primary's resolved value
+#       "primary": {                     # env fallbacks: LLM_MODEL / LLM_MAX_TOKENS
+#           "model": "<primary model id>",
+#           "sampling": {...},           # primary POST-body sampling
+#           "max_tokens": 8192,          # primary completion budget
+#           "chat_template_kwargs": {...}  # optional; passed to the model
+#                                         # server verbatim (e.g.
+#                                         # {"enable_thinking": false})
+#       },
+#       "duelist": {                     # env fallbacks: LLM_DUEL_MODEL /
+#                                         # LLM_DUEL_MAX_TOKENS; absent
+#                                         # everywhere = duelist off
+#           "model": "<duelist id>",
+#           "sampling": {...},           # duelist POST-body sampling
+#           "max_tokens": 8192           # duelist completion budget (inherits
+#                                        # the primary's resolved value)
+#       }
 #   }
+#
+# Legacy flat keys (still honored, per-key, below the nested slot keys):
+# llm.model, llm.duelist_model, llm.sampling, llm.duelist_sampling,
+# llm.max_tokens, llm.duelist_max_tokens.
 #
 # Endpoint/key stay in .env.local (LLM_BASE_URL, LLM_API_KEY,
 # LLM_DUEL_BASE_URL, LLM_DUEL_API_KEY). The max-tokens env vars remain as

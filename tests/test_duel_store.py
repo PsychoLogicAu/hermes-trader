@@ -225,7 +225,7 @@ def test_max_tokens_invalid_config_falls_back(monkeypatch, agent_cfg, bad):
     monkeypatch.setenv("LLM_MAX_TOKENS", "5555")
     agent_cfg.write_cfg({"llm": {"max_tokens": bad}})
     assert ds.effective_primary_max_tokens() == 5555
-    assert ds._config_max_tokens("max_tokens") is None
+    assert ds._parse_max_tokens(ds.slot_get("primary", "max_tokens", "max_tokens")) is None
 
 
 def test_fail_open_corrupt_config_max_tokens(monkeypatch, agent_cfg):
@@ -241,6 +241,100 @@ def test_fail_open_corrupt_config_max_tokens(monkeypatch, agent_cfg):
     assert ds.effective_duelist_max_tokens() == 4444
     # And the duelist config path still resolves end to end.
     assert ds.duelist_config()["max_tokens"] == 4444
+
+
+# ── max_tokens: nested llm.primary/llm.duelist slots (2026-09-10) ─────────
+
+def test_nested_slots_win_over_flat_and_env(monkeypatch, agent_cfg):
+    """The NESTED llm.<slot> shape wins over both the legacy flat keys and
+    the env vars (priority: nested > flat > env > default)."""
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setenv("LLM_DUEL_MODEL", "duel-env")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "100")
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "200")
+    agent_cfg.write_cfg({"llm": {
+        "model": "flat-primary",              # legacy flat (must lose)
+        "duelist_model": "flat-duelist",      # legacy flat (must lose)
+        "max_tokens": 300,                    # legacy flat (must lose)
+        "duelist_max_tokens": 400,            # legacy flat (must lose)
+        "primary": {"model": "nested-primary", "max_tokens": 1234},
+        "duelist": {"model": "nested-duelist", "max_tokens": 567},
+    }})
+    assert ds.effective_primary_model() == "nested-primary"
+    assert ds.effective_duelist_model() == "nested-duelist"
+    assert ds.effective_primary_max_tokens() == 1234
+    assert ds.effective_duelist_max_tokens() == 567
+    assert ds.duelist_config()["max_tokens"] == 567
+
+
+def test_partial_nested_slot_falls_back_to_flat(monkeypatch, agent_cfg):
+    """A partial nested slot names only what it changes — every key it
+    doesn't name falls through to the flat legacy key (per-key merge, NOT
+    replace-whole-slot)."""
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {
+        "model": "flat-primary",          # no nested primary.model -> flat
+        "max_tokens": 999,                # no nested primary.max_tokens -> flat
+        "primary": {"model": "nested-primary"},  # only model named
+    }})
+    assert ds.effective_primary_model() == "nested-primary"
+    assert ds.effective_primary_max_tokens() == 999
+
+
+def test_nested_sampling_wins_over_flat(monkeypatch, agent_cfg):
+    """Nested llm.<slot>.sampling wins over the flat llm.sampling /
+    llm.duelist_sampling; a partial nested sampling keeps code defaults
+    (per-key, as before)."""
+    agent_cfg.write_cfg({"llm": {
+        "sampling": {"temperature": 0.3},                 # flat (must lose)
+        "duelist_sampling": {"temperature": 0.4},         # flat (must lose)
+        "primary": {"sampling": {"temperature": 0.9, "top_p": 0.5}},
+        "duelist": {"sampling": {"top_k": 7}},
+    }})
+    p = research.effective_llm_sampling()
+    assert p["temperature"] == 0.9 and p["top_p"] == 0.5
+    d = ds.effective_duelist_sampling()
+    # nested duelist top_k wins; the code-default keys it doesn't name survive
+    assert d["top_k"] == 7 and d["temperature"] == 1.0
+
+
+def test_nested_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {"primary": {"max_tokens": 2000}}})
+    assert ds.effective_primary_max_tokens() == 2000
+    agent_cfg.write_cfg({"llm": {"primary": {"max_tokens": 3000}}})
+    assert ds.effective_primary_max_tokens() == 3000
+    agent_cfg.write_cfg({"mode": "SHADOW"})
+    assert ds.effective_primary_max_tokens() == 8192
+
+
+def test_nested_slot_absent_keeps_flat_noop(monkeypatch, agent_cfg):
+    """No-op guarantee: a config with NO nested slots resolves exactly as the
+    flat legacy keys did pre-nest (the pre-nest live config keeps working
+    unchanged)."""
+    monkeypatch.setenv("LLM_MODEL", "flat-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    agent_cfg.write_cfg({"llm": {
+        "model": "flat-model",
+        "max_tokens": 2048,
+        "sampling": {"temperature": 0.2},
+    }})
+    assert ds.effective_primary_model() == "flat-model"
+    assert ds.effective_primary_max_tokens() == 2048
+    assert research.effective_llm_sampling()["temperature"] == 0.2
+
+
+def test_fail_open_corrupt_config_nested(monkeypatch, agent_cfg):
+    """A corrupt config degrades to the env fallback for EVERY resolver
+    (models, max_tokens, sampling) — fail-open, nested or flat."""
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "5555")
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "cfg", "max_tokens": 1}}})
+    with open(cs.CONFIG_PATH, "w") as f:
+        f.write("{corrupt")
+    assert ds.effective_primary_model() == "env-model"
+    assert ds.effective_primary_max_tokens() == 5555
+    assert research.effective_llm_sampling()["temperature"] == 0.1  # pure default
 
 
 def _fake_httpx(monkeypatch, captured, content="x"):

@@ -22,8 +22,8 @@ from hermes_trader.agents.duel_store import (
     duelist_enabled,
     effective_primary_max_tokens,
     effective_primary_model,
-    llm_block,
     record_duel,
+    slot_get,
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.system_prompt import build_system_prompt
@@ -892,15 +892,17 @@ PRIMARY_SAMPLING_DEFAULT: Dict[str, Any] = {"temperature": 0.1}
 def effective_llm_sampling() -> Dict[str, Any]:
     """The primary slot's sampling profile, read at CALL time (hot, no cache).
 
-    Merge rule: {**default, **config["llm"]["sampling"]} — per-key override,
-    NOT replace-whole-dict, so a partial block keeps every default key it
-    doesn't name. Absent block = the code default, i.e. today's exact body.
-    Fail-open: any config fault (missing/corrupt/unreadable file) degrades to
-    the pure default — the LLM call path must never break on a config problem.
+    Merge rule: {**default, **config["llm"]["primary"]["sampling"]} — per-key
+    override, NOT replace-whole-dict, so a partial block keeps every default
+    key it doesn't name. The legacy flat `llm.sampling` is the fallback when
+    the nested slot key is absent. Absent both = the code default, i.e.
+    today's exact body. Fail-open: any config fault (missing/corrupt/
+    unreadable file) degrades to the pure default — the LLM call path must
+    never break on a config problem.
     """
     merged = dict(PRIMARY_SAMPLING_DEFAULT)
     try:
-        overrides = llm_block().get("sampling")
+        overrides = slot_get("primary", "sampling", "sampling")
         if isinstance(overrides, dict):
             merged.update(overrides)
     except Exception:  # noqa: BLE001 — fail-open (see docstring)
