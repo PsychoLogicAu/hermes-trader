@@ -337,6 +337,102 @@ def test_fail_open_corrupt_config_nested(monkeypatch, agent_cfg):
     assert research.effective_llm_sampling()["temperature"] == 0.1  # pure default
 
 
+# ── chat_template_kwargs (per-request thinking toggle, 2026-09-10) ────────
+
+def test_chat_template_kwargs_absent_body_unchanged(monkeypatch, agent_cfg):
+    """NO-OP GUARANTEE: with the key absent, `chat_template_kwargs` is NOT
+    in the POST body (primary AND duelist) — byte-identical wire to the
+    pre-feature default."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m"},
+                                 "duelist": {"model": "d"}}})
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert "chat_template_kwargs" not in captured["json"]
+    finally:
+        loop.close()
+    ds.call_duelist("dk", "http://duel.test/v1", "d", "SYS", "USER")
+    assert "chat_template_kwargs" not in captured["json"]
+
+
+def test_chat_template_kwargs_primary_only(monkeypatch, agent_cfg):
+    """Nested llm.primary.chat_template_kwargs reaches the PRIMARY body
+    verbatim and does NOT leak into the duelist body."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    agent_cfg.write_cfg({"llm": {
+        "primary": {"model": "m", "chat_template_kwargs": {"enable_thinking": False}},
+        "duelist": {"model": "d"},
+    }})
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+    finally:
+        loop.close()
+    ds.call_duelist("dk", "http://duel.test/v1", "d", "SYS", "USER")
+    assert "chat_template_kwargs" not in captured["json"]
+
+
+def test_chat_template_kwargs_duelist_only(monkeypatch, agent_cfg):
+    """The reverse: the duelist key reaches the DUELIST body only."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    agent_cfg.write_cfg({"llm": {
+        "primary": {"model": "m"},
+        "duelist": {"model": "d", "chat_template_kwargs": {"enable_thinking": True}},
+    }})
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert "chat_template_kwargs" not in captured["json"]
+    finally:
+        loop.close()
+    ds.call_duelist("dk", "http://duel.test/v1", "d", "SYS", "USER")
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_chat_template_kwargs_invalid_value_is_noop(monkeypatch, agent_cfg):
+    """A non-dict value (fail-open) is never sent and never raises."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    for bad in ("not-a-dict", ["list"], None, 5):
+        agent_cfg.write_cfg({"llm": {"primary": {"model": "m",
+                                                 "chat_template_kwargs": bad}}})
+        loop = __import__("asyncio").new_event_loop()
+        try:
+            loop.run_until_complete(
+                research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        finally:
+            loop.close()
+        assert "chat_template_kwargs" not in captured["json"]
+        assert ds.effective_chat_template_kwargs("primary") == {}
+
+
+def test_chat_template_kwargs_hot_read(monkeypatch, agent_cfg):
+    """No module-level cache: a flip between calls is visible immediately."""
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m",
+                                             "chat_template_kwargs": {"enable_thinking": True}}}})
+    assert ds.effective_chat_template_kwargs("primary") == {"enable_thinking": True}
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m",
+                                             "chat_template_kwargs": {"enable_thinking": False}}}})
+    assert ds.effective_chat_template_kwargs("primary") == {"enable_thinking": False}
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m"}}})
+    assert ds.effective_chat_template_kwargs("primary") == {}
+
+
+def test_chat_template_kwargs_returns_copy(monkeypatch, agent_cfg):
+    """The resolver returns a COPY — mutating the result must never touch
+    the config dict (which the next hot read would re-serve)."""
+    agent_cfg.write_cfg({"llm": {"primary": {"chat_template_kwargs": {"a": 1}}}})
+    out = ds.effective_chat_template_kwargs("primary")
+    out["injected"] = True
+    assert ds.effective_chat_template_kwargs("primary") == {"a": 1}
+    assert agent_cfg and ds.llm_slot("primary")["chat_template_kwargs"] == {"a": 1}
+
+
 def _fake_httpx(monkeypatch, captured, content="x"):
     """httpx.AsyncClient stub capturing the POST body (same shape as the
     duelist prompt-identity test below)."""

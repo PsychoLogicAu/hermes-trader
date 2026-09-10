@@ -299,6 +299,20 @@ def effective_duelist_max_tokens() -> int:
     return resolve_max_tokens("LLM_DUEL_MAX_TOKENS", effective_primary_max_tokens())
 
 
+def effective_chat_template_kwargs(slot: str) -> Dict[str, Any]:
+    """The slot's ``chat_template_kwargs``, passed VERBATIM to the model
+    server in the POST body (e.g. ``{"enable_thinking": false}`` — disables a
+    thinking model's thinking PER REQUEST instead of loading the model with
+    ``--llamacpp-args "--reasoning off"``). Nested-only:
+    ``llm.<slot>.chat_template_kwargs`` (no flat/env — the env vars are for
+    endpoint/key/model/budget, not template internals). Must be a dict —
+    anything else (and any config fault) degrades to {}, so the POST body is
+    byte-identical to the pre-feature default (fail-open, no-op). Hot, no
+    cache; a copy is returned so the body can never mutate the config dict."""
+    v = llm_slot(slot).get("chat_template_kwargs")
+    return dict(v) if isinstance(v, dict) else {}
+
+
 def duel_file() -> str:
     """Current duel-log path (read at call time so tests can redirect)."""
     return os.environ.get("HERMES_DUEL_FILE", _DUEL_FILE)
@@ -443,20 +457,27 @@ async def _async_duel_call(
 ) -> str:
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
         url = base_url.rstrip("/") + "/chat/completions"
+        # Per-request chat-template overrides (same contract as the primary
+        # slot — e.g. {"enable_thinking": false} for a thinking-capable
+        # duelist model). Absent = {} → the key is NOT sent (no-op).
+        chat_kwargs = effective_chat_template_kwargs("duelist")
 
         async def _post(max_toks: int):
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "stream": False,
+                "max_tokens": max_toks,
+                **effective_duelist_sampling(),
+            }
+            if chat_kwargs:
+                body["chat_template_kwargs"] = chat_kwargs
             return await client.post(
                 url,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "max_tokens": max_toks,
-                    **effective_duelist_sampling(),
-                },
+                json=body,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 

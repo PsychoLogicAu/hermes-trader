@@ -20,6 +20,7 @@ from hermes_trader.agents.duel_store import (
     call_duelist,
     duelist_config,
     duelist_enabled,
+    effective_chat_template_kwargs,
     effective_primary_max_tokens,
     effective_primary_model,
     record_duel,
@@ -930,26 +931,35 @@ async def _async_do_call(
     """
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
 
-        # Completion budget: agent config `llm.max_tokens` → LLM_MAX_TOKENS
-        # (default 8192, read at call time — a same-inode config flip, no
-        # recreate). It caps the RESPONSE length only — the prompt size is
-        # governed by the model server's context window.
+        # Completion budget: agent config `llm.primary.max_tokens` → legacy
+        # llm.max_tokens → LLM_MAX_TOKENS (default 8192, read at call time —
+        # a same-inode config flip, no recreate). It caps the RESPONSE
+        # length only — the prompt size is governed by the model server's
+        # context window.
         default_max_toks = effective_primary_max_tokens()
+        # Per-request chat-template overrides (e.g. {"enable_thinking":
+        # false} — think OFF for a thinking-capable model, so the answer
+        # lands in `content` fast instead of a long `reasoning_content`
+        # prefix). Absent = {} → the key is NOT sent (no-op).
+        chat_kwargs = effective_chat_template_kwargs("primary")
 
         async def _post(max_toks: int):
             url = base_url.rstrip("/") + "/chat/completions"
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "stream": False,
+                "max_tokens": max_toks,
+                **effective_llm_sampling(),
+            }
+            if chat_kwargs:
+                body["chat_template_kwargs"] = chat_kwargs
             return await client.post(
                 url,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "max_tokens": max_toks,
-                    **effective_llm_sampling(),
-                },
+                json=body,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 
