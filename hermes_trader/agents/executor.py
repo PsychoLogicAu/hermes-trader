@@ -1339,6 +1339,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Quiet broad-tape shadow gate (2026-09-10, WATCHLIST §B.17): the BTC
+    # trail24h vol/|drift| pair says the broad tape is quiet — on the 09-05/06/07
+    # bleed the whole book bled into exactly this regime. Same would-block
+    # pattern; the accrual lines join to the ledger by coin/side/ts.
+    _qt = gate_output["results"].get("quiet_tape") or {}
+    if _qt.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] quiet_tape WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_qt.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     # TimesFM mirror-leg shadow accruals: the timesfm-alone per-forecaster
     # counterfactuals (the AND leg is the forecast_agreement_veto line
     # below). Both gates are SHADOW-ONLY BY CONSTRUCTION — there is no

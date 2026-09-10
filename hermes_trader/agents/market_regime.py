@@ -20,8 +20,10 @@ doesn't re-fetch candles for every trade attempt in a scan cycle.
 from __future__ import annotations
 
 import logging
+import math
+import statistics
 import time
-from typing import Dict, Literal, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 from hermes_trader.client.hl_client import fetch_hl_candles
 from hermes_trader.indicators.math import ema
@@ -229,3 +231,55 @@ def regime_snapshot() -> Dict[str, Dict[str, object]]:
         proxy: {"regime": regime, "age_s": round(now - ts, 1)}
         for proxy, (regime, ts) in _regime_cache.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# Broad-tape activity (quiet-tape entry gate, 2026-09-10)
+# ---------------------------------------------------------------------------
+# The 09-05/06/07 bleed (−$106.81 = 99% of the 30d loss) hit on the QUIETEST
+# broad tape of the month: BTC trailing-24h realized vol 0.76–1.37% vs a
+# ~2.0% monthly median, with |24h drift| < 1.6%. On a flat broad tape the
+# book's long entries at 5x became coin flips. Per-coin versions of this
+# condition were measured and rejected (alt vol median 8.1% vs BTC 2.1% —
+# a coin-vol gate never fires; the coin's directional condition is already
+# enforced by the LLM/perception pipeline), so BTC is the
+# "broad-tape-active" proxy. Consumed by quiet_tape_gate (risk_gates.py);
+# initial thresholds from the 2D sweep (scratch/_quiet_tape_sweep.py):
+# vol 2.5% / drift 2.0%. WATCHLIST §B.17.
+_TAPE_TTL_S = 300  # 5min — same cadence as REGIME_TTL_S
+_TAPE_MIN_BARS = 200  # fail-safe: < ~16h of 5m history → no opinion
+_tape_cache: Tuple[Optional[Dict[str, float]], float] = (None, 0.0)
+
+
+def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
+    """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %}.
+
+    vol    = pstdev of 5m log-returns × sqrt(288) × 100 (dailyized %),
+    drift  = (last close / first close − 1) × 100 (% over the ~24h window).
+
+    Both are lookback-only (no lookahead beyond the still-forming last
+    5m bar's close, which is the live price). Returns None on a data gap
+    (fetch failure or insufficient history) — the consuming gate MUST pass
+    with no opinion: a data gap can never block a trade. Cached for
+    `_TAPE_TTL_S`; `force=True` bypasses the cache (tests / operator).
+    """
+    global _tape_cache
+    now = time.time()
+    cached, ts = _tape_cache
+    if not force and cached is not None and (now - ts) < _TAPE_TTL_S:
+        return cached
+    try:
+        candles = fetch_hl_candles(CRYPTO_PROXY, interval="5m", count=290)
+    except Exception as e:
+        logger.warning(f"[regime] tape-activity fetch failed for {CRYPTO_PROXY}: {e}")
+        return None
+    if not candles:
+        return None
+    closes = [float(c.c) for c in candles if float(c.c) > 0]
+    if len(closes) < _TAPE_MIN_BARS:
+        return None
+    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    vol = statistics.pstdev(rets) * math.sqrt(288) * 100
+    drift = (closes[-1] / closes[0] - 1) * 100
+    _tape_cache = ({"vol": vol, "drift": drift}, now)
+    return _tape_cache[0]
