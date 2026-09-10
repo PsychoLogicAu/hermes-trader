@@ -1225,6 +1225,62 @@ def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     return {"pass": False, "reason": reason}
 
 
+def quiet_tape_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Quiet broad-tape entry gate (SHADOW by default, 2026-09-10).
+
+    Blocks a NEW entry when the BROAD tape (BTC, the proxy) is quiet:
+    trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| <
+    `drift_pct`. Motivation (scratch/_regime_bleed.py + _coin_vs_btc.py):
+    the 09-05/06/07 bleed (−$106.81 = 99% of the 30d loss) hit on the
+    quietest broad tape of the month — BTC trail24h vol 0.76–1.37% vs a
+    ~2.0% median — where a 100%-long 5x book at the then-10x notional
+    became a coin flip. Per-coin variants were measured and rejected
+    (alt vol median 8.1% vs BTC 2.1% — a coin-vol gate never fires; the
+    coin's own directional condition is already enforced by the
+    LLM/perception pipeline), so BTC is the "broad-tape-active" proxy.
+
+    Initial thresholds (vol 2.5 / drift 2.0) come from the 2D sweep
+    (scratch/_quiet_tape_sweep.py, n=516): the vol axis is the lever
+    (peak at v≈2.5; drift barely binds on the plateau) and the 2.5/2.0
+    cell is the tightest on the +$130 plateau (least over-blocking if
+    the OOS cohort surprises). This is a REGIME-FITTED PROXY, not a
+    regime-robust edge — the strict all-sub-window filter found no
+    qualifying cell — which is exactly why it ships shadow-first: the
+    would-block cohort must stay net-negative out-of-sample (incl. a
+    non-bleed regime week) before promotion. Owner call: build at 2.5/2.0
+    shadow 2026-09-10. WATCHLIST §B.17.
+
+    SHADOW MODE: with `shadow_mode` true (default, and how it ships) the
+    gate STRUCTURALLY returns pass=True and only carries a
+    `shadow_would_block` marker, which the executor logs loudly
+    (`[gate][SHADOW] quiet_tape WOULD HAVE BLOCKED …`) — the accrual
+    join key. Flip `shadow_mode: false` in .agent-config.json to promote.
+
+    Fail-safes (no-opinion pass): disabled; `btc_tape_activity()` returns
+    None (data gap — a gap can NEVER block a trade).
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    from hermes_trader.agents.market_regime import btc_tape_activity
+    tape = btc_tape_activity()
+    if tape is None:
+        return {"pass": True}
+    vol_pct = float(cfg.get("vol_pct", 2.5) or 0.0)
+    drift_pct = float(cfg.get("drift_pct", 2.0) or 0.0)
+    if vol_pct <= 0 or drift_pct <= 0:
+        return {"pass": True}
+    quiet = tape["vol"] < vol_pct and abs(tape["drift"]) < drift_pct
+    if not quiet:
+        return {"pass": True}
+    reason = (f"quiet_tape (broad tape inactive: BTC trail24h vol "
+              f"{tape['vol']:.2f}% < {vol_pct:.2f}% AND |drift| "
+              f"{abs(tape['drift']):.2f}% < {drift_pct:.2f}%)")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def eval_all_gates(
     ctx: GateContext,
     config: Optional[Dict[str, Any]] = None,
@@ -1336,6 +1392,14 @@ def eval_all_gates(
         ctx, effective_config.get("timesfm_mismatch_gate") or {})
     results["timesfm_tail_trigger"] = timesfm_tail_trigger_gate(
         ctx, effective_config.get("timesfm_tail_trigger_gate") or {})
+    # Quiet broad-tape entry gate (2026-09-10, WATCHLIST §B.17): blocks a new
+    # entry when BTC's trailing-24h vol AND |drift| are both below the sweep-
+    # chosen thresholds (2.5/2.0). The bleed-day broad-tape was the quietest
+    # of the month; per-coin variants measured vacuous. Shadow by default —
+    # the would-block marker accrues until shadow_mode is flipped. A data gap
+    # (btc_tape_activity() → None) can never block a trade.
+    results["quiet_tape"] = quiet_tape_gate(
+        ctx, effective_config.get("quiet_tape_gate") or {})
 
     block_reasons = []
     blocked = False
