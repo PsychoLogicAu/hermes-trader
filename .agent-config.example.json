@@ -286,17 +286,26 @@
     "release_band_pct": 0.5
   },
   "llm": {
-    "model": "Spark-X2.5-4B-GGUF-Q4_K_M",
-    "duelist_model": "Qwen2.5-Coder-7B-Instruct-GGUF-Q5_0",
-    "sampling": {
-      "temperature": 1.0,
-      "top_p": 0.95,
-      "top_k": -1
+    "primary": {
+      "model": "Spark-X2.5-4B-GGUF-Q4_K_M",
+      "sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": -1
+      },
+      "max_tokens": 8192,
+      "chat_template_kwargs": {
+        "enable_thinking": false
+      }
     },
-    "duelist_sampling": {
-      "temperature": 0.7,
-      "top_p": 0.8,
-      "repetition_penalty": 1.05
+    "duelist": {
+      "model": "Qwen2.5-Coder-7B-Instruct-GGUF-Q5_0",
+      "sampling": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "repetition_penalty": 1.05
+      },
+      "max_tokens": 8192
     }
   }
 }

@@ -7,10 +7,13 @@ No network: the LLM endpoints are monkeypatched like the shadow-signal tests.
 """
 
 import json
+import os
 import time
+import types
 
 import pytest
 
+import hermes_trader.agents.config_store as cs
 from hermes_trader.agents import duel_store as ds
 from hermes_trader.agents import research
 from hermes_trader.agents.memory import memory
@@ -140,6 +143,296 @@ def test_max_tokens_invalid_falls_back(monkeypatch):
         assert ds.resolve_max_tokens("LLM_MAX_TOKENS") == 8192
 
 
+# ── max_tokens: config `llm` block (P11 follow-on) ────────────────────────
+
+@pytest.fixture
+def agent_cfg(monkeypatch):
+    """Own the agent-config FILE for the duration of one test (the
+    CONFIG_PATH-direct isolation pattern — see test_sampling_profiles.py).
+    conftest redirects HERMES_AGENT_CONFIG_FILE to a throwaway path BEFORE
+    config_store freezes CONFIG_PATH, so writing to that file here never
+    touches the live config; the resolvers read it at CALL time (hot)."""
+    import hermes_trader.agents.config_store as cs
+    cfg_path = cs.CONFIG_PATH
+    had_cfg = os.path.exists(cfg_path)
+    backup = ""
+    if had_cfg:
+        with open(cfg_path) as f:
+            backup = f.read()
+
+    def write_cfg(cfg):
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f)
+
+    yield types.SimpleNamespace(write_cfg=write_cfg)
+
+    if had_cfg:
+        with open(cfg_path, "w") as f:
+            f.write(backup)
+    elif os.path.exists(cfg_path):
+        os.remove(cfg_path)
+
+
+def test_max_tokens_env_only_when_block_absent(monkeypatch, agent_cfg):
+    """No-op guarantee: config block ABSENT → the env-only resolution
+    (LLM_DUEL_MAX_TOKENS → LLM_MAX_TOKENS → 8192), byte-identical to the
+    pre-config behavior."""
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    agent_cfg.write_cfg({"mode": "SHADOW"})  # config present, no `llm` key
+    assert ds.effective_primary_max_tokens() == 2048
+    assert ds.duelist_config()["max_tokens"] == 2048
+
+
+def test_max_tokens_config_wins_over_env(monkeypatch, agent_cfg):
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "1024")
+    agent_cfg.write_cfg({"llm": {"max_tokens": 4096, "duelist_max_tokens": 128}})
+    assert ds.effective_primary_max_tokens() == 4096
+    assert ds.duelist_config()["max_tokens"] == 128
+
+
+def test_duelist_max_tokens_inherits_primary_resolved(monkeypatch, agent_cfg):
+    """The duelist inherits the PRIMARY's FULLY-RESOLVED budget when its own
+    config key is unset — so a primary budget set via config (not env) still
+    propagates to the duelist."""
+    monkeypatch.delenv("LLM_DUEL_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {"max_tokens": 4096}})
+    assert ds.effective_primary_max_tokens() == 4096
+    assert ds.effective_duelist_max_tokens() == 4096
+    # A duelist config key beats the inherited value.
+    agent_cfg.write_cfg({"llm": {"max_tokens": 4096, "duelist_max_tokens": 512}})
+    assert ds.effective_duelist_max_tokens() == 512
+
+
+def test_max_tokens_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
+    """No module-level cache: flipping the file between calls is visible
+    immediately (a max-tokens retune is a same-inode config flip)."""
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {"max_tokens": 2000}})
+    assert ds.effective_primary_max_tokens() == 2000
+    agent_cfg.write_cfg({"llm": {"max_tokens": 3000}})
+    assert ds.effective_primary_max_tokens() == 3000
+    agent_cfg.write_cfg({"mode": "SHADOW"})  # block removed → env/default
+    assert ds.effective_primary_max_tokens() == 8192
+
+
+@pytest.mark.parametrize("bad", ["not-a-number", "-5", 0, "", " ", True, None])
+def test_max_tokens_invalid_config_falls_back(monkeypatch, agent_cfg, bad):
+    """Invalid/non-positive config values fall through to the env fallback
+    (never raise, never return 0)."""
+    monkeypatch.setenv("LLM_MAX_TOKENS", "5555")
+    agent_cfg.write_cfg({"llm": {"max_tokens": bad}})
+    assert ds.effective_primary_max_tokens() == 5555
+    assert ds._parse_max_tokens(ds.slot_get("primary", "max_tokens", "max_tokens")) is None
+
+
+def test_fail_open_corrupt_config_max_tokens(monkeypatch, agent_cfg):
+    """A corrupt config must never break the LLM path: the budget degrades to
+    the env fallback (fail-open, same contract as the model/sampling
+    resolvers)."""
+    monkeypatch.setenv("LLM_MAX_TOKENS", "6666")
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "4444")
+    agent_cfg.write_cfg({"llm": {"max_tokens": 9999}})
+    with open(cs.CONFIG_PATH, "w") as f:
+        f.write("{this is not valid json")
+    assert ds.effective_primary_max_tokens() == 6666
+    assert ds.effective_duelist_max_tokens() == 4444
+    # And the duelist config path still resolves end to end.
+    assert ds.duelist_config()["max_tokens"] == 4444
+
+
+# ── max_tokens: nested llm.primary/llm.duelist slots (2026-09-10) ─────────
+
+def test_nested_slots_win_over_flat_and_env(monkeypatch, agent_cfg):
+    """The NESTED llm.<slot> shape wins over both the legacy flat keys and
+    the env vars (priority: nested > flat > env > default)."""
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setenv("LLM_DUEL_MODEL", "duel-env")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "100")
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "200")
+    agent_cfg.write_cfg({"llm": {
+        "model": "flat-primary",              # legacy flat (must lose)
+        "duelist_model": "flat-duelist",      # legacy flat (must lose)
+        "max_tokens": 300,                    # legacy flat (must lose)
+        "duelist_max_tokens": 400,            # legacy flat (must lose)
+        "primary": {"model": "nested-primary", "max_tokens": 1234},
+        "duelist": {"model": "nested-duelist", "max_tokens": 567},
+    }})
+    assert ds.effective_primary_model() == "nested-primary"
+    assert ds.effective_duelist_model() == "nested-duelist"
+    assert ds.effective_primary_max_tokens() == 1234
+    assert ds.effective_duelist_max_tokens() == 567
+    assert ds.duelist_config()["max_tokens"] == 567
+
+
+def test_partial_nested_slot_falls_back_to_flat(monkeypatch, agent_cfg):
+    """A partial nested slot names only what it changes — every key it
+    doesn't name falls through to the flat legacy key (per-key merge, NOT
+    replace-whole-slot)."""
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {
+        "model": "flat-primary",          # no nested primary.model -> flat
+        "max_tokens": 999,                # no nested primary.max_tokens -> flat
+        "primary": {"model": "nested-primary"},  # only model named
+    }})
+    assert ds.effective_primary_model() == "nested-primary"
+    assert ds.effective_primary_max_tokens() == 999
+
+
+def test_nested_sampling_wins_over_flat(monkeypatch, agent_cfg):
+    """Nested llm.<slot>.sampling wins over the flat llm.sampling /
+    llm.duelist_sampling; a partial nested sampling keeps code defaults
+    (per-key, as before)."""
+    agent_cfg.write_cfg({"llm": {
+        "sampling": {"temperature": 0.3},                 # flat (must lose)
+        "duelist_sampling": {"temperature": 0.4},         # flat (must lose)
+        "primary": {"sampling": {"temperature": 0.9, "top_p": 0.5}},
+        "duelist": {"sampling": {"top_k": 7}},
+    }})
+    p = research.effective_llm_sampling()
+    assert p["temperature"] == 0.9 and p["top_p"] == 0.5
+    d = ds.effective_duelist_sampling()
+    # nested duelist top_k wins; the code-default keys it doesn't name survive
+    assert d["top_k"] == 7 and d["temperature"] == 1.0
+
+
+def test_nested_hot_read_follows_config_between_calls(monkeypatch, agent_cfg):
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    agent_cfg.write_cfg({"llm": {"primary": {"max_tokens": 2000}}})
+    assert ds.effective_primary_max_tokens() == 2000
+    agent_cfg.write_cfg({"llm": {"primary": {"max_tokens": 3000}}})
+    assert ds.effective_primary_max_tokens() == 3000
+    agent_cfg.write_cfg({"mode": "SHADOW"})
+    assert ds.effective_primary_max_tokens() == 8192
+
+
+def test_nested_slot_absent_keeps_flat_noop(monkeypatch, agent_cfg):
+    """No-op guarantee: a config with NO nested slots resolves exactly as the
+    flat legacy keys did pre-nest (the pre-nest live config keeps working
+    unchanged)."""
+    monkeypatch.setenv("LLM_MODEL", "flat-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "2048")
+    agent_cfg.write_cfg({"llm": {
+        "model": "flat-model",
+        "max_tokens": 2048,
+        "sampling": {"temperature": 0.2},
+    }})
+    assert ds.effective_primary_model() == "flat-model"
+    assert ds.effective_primary_max_tokens() == 2048
+    assert research.effective_llm_sampling()["temperature"] == 0.2
+
+
+def test_fail_open_corrupt_config_nested(monkeypatch, agent_cfg):
+    """A corrupt config degrades to the env fallback for EVERY resolver
+    (models, max_tokens, sampling) — fail-open, nested or flat."""
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "5555")
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "cfg", "max_tokens": 1}}})
+    with open(cs.CONFIG_PATH, "w") as f:
+        f.write("{corrupt")
+    assert ds.effective_primary_model() == "env-model"
+    assert ds.effective_primary_max_tokens() == 5555
+    assert research.effective_llm_sampling()["temperature"] == 0.1  # pure default
+
+
+# ── chat_template_kwargs (per-request thinking toggle, 2026-09-10) ────────
+
+def test_chat_template_kwargs_absent_body_unchanged(monkeypatch, agent_cfg):
+    """NO-OP GUARANTEE: with the key absent, `chat_template_kwargs` is NOT
+    in the POST body (primary AND duelist) — byte-identical wire to the
+    pre-feature default."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m"},
+                                 "duelist": {"model": "d"}}})
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert "chat_template_kwargs" not in captured["json"]
+    finally:
+        loop.close()
+    ds.call_duelist("dk", "http://duel.test/v1", "d", "SYS", "USER")
+    assert "chat_template_kwargs" not in captured["json"]
+
+
+def test_chat_template_kwargs_primary_only(monkeypatch, agent_cfg):
+    """Nested llm.primary.chat_template_kwargs reaches the PRIMARY body
+    verbatim and does NOT leak into the duelist body."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    agent_cfg.write_cfg({"llm": {
+        "primary": {"model": "m", "chat_template_kwargs": {"enable_thinking": False}},
+        "duelist": {"model": "d"},
+    }})
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": False}
+    finally:
+        loop.close()
+    ds.call_duelist("dk", "http://duel.test/v1", "d", "SYS", "USER")
+    assert "chat_template_kwargs" not in captured["json"]
+
+
+def test_chat_template_kwargs_duelist_only(monkeypatch, agent_cfg):
+    """The reverse: the duelist key reaches the DUELIST body only."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    agent_cfg.write_cfg({"llm": {
+        "primary": {"model": "m"},
+        "duelist": {"model": "d", "chat_template_kwargs": {"enable_thinking": True}},
+    }})
+    loop = __import__("asyncio").new_event_loop()
+    try:
+        loop.run_until_complete(research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert "chat_template_kwargs" not in captured["json"]
+    finally:
+        loop.close()
+    ds.call_duelist("dk", "http://duel.test/v1", "d", "SYS", "USER")
+    assert captured["json"]["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_chat_template_kwargs_invalid_value_is_noop(monkeypatch, agent_cfg):
+    """A non-dict value (fail-open) is never sent and never raises."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    for bad in ("not-a-dict", ["list"], None, 5):
+        agent_cfg.write_cfg({"llm": {"primary": {"model": "m",
+                                                 "chat_template_kwargs": bad}}})
+        loop = __import__("asyncio").new_event_loop()
+        try:
+            loop.run_until_complete(
+                research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        finally:
+            loop.close()
+        assert "chat_template_kwargs" not in captured["json"]
+        assert ds.effective_chat_template_kwargs("primary") == {}
+
+
+def test_chat_template_kwargs_hot_read(monkeypatch, agent_cfg):
+    """No module-level cache: a flip between calls is visible immediately."""
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m",
+                                             "chat_template_kwargs": {"enable_thinking": True}}}})
+    assert ds.effective_chat_template_kwargs("primary") == {"enable_thinking": True}
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m",
+                                             "chat_template_kwargs": {"enable_thinking": False}}}})
+    assert ds.effective_chat_template_kwargs("primary") == {"enable_thinking": False}
+    agent_cfg.write_cfg({"llm": {"primary": {"model": "m"}}})
+    assert ds.effective_chat_template_kwargs("primary") == {}
+
+
+def test_chat_template_kwargs_returns_copy(monkeypatch, agent_cfg):
+    """The resolver returns a COPY — mutating the result must never touch
+    the config dict (which the next hot read would re-serve)."""
+    agent_cfg.write_cfg({"llm": {"primary": {"chat_template_kwargs": {"a": 1}}}})
+    out = ds.effective_chat_template_kwargs("primary")
+    out["injected"] = True
+    assert ds.effective_chat_template_kwargs("primary") == {"a": 1}
+    assert agent_cfg and ds.llm_slot("primary")["chat_template_kwargs"] == {"a": 1}
+
+
 def _fake_httpx(monkeypatch, captured, content="x"):
     """httpx.AsyncClient stub capturing the POST body (same shape as the
     duelist prompt-identity test below)."""
@@ -203,6 +496,35 @@ def test_research_post_uses_llm_max_tokens(monkeypatch):
         assert captured["json"]["max_tokens"] == 4096
     finally:
         loop.close()
+
+
+def test_research_post_uses_config_max_tokens(monkeypatch, agent_cfg):
+    """End-to-end: the `llm.max_tokens` config value reaches the primary's
+    POST body (the strongest no-op/presence guarantee — the on-the-wire
+    max_tokens follows the config at call time)."""
+    import asyncio
+    captured = {}
+    _fake_httpx(monkeypatch, captured, content="ok")
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    loop = asyncio.new_event_loop()
+    try:
+        agent_cfg.write_cfg({"llm": {"max_tokens": 5000}})
+        loop.run_until_complete(
+            research._async_do_call("k", "http://x/v1", "m", "S", "U"))
+        assert captured["json"]["max_tokens"] == 5000
+    finally:
+        loop.close()
+
+
+def test_duel_post_uses_config_max_tokens(monkeypatch, agent_cfg):
+    """End-to-end: the `llm.duelist_max_tokens` config value reaches the
+    duelist's POST body (config wins over the env fallback on the wire)."""
+    captured = {}
+    _fake_httpx(monkeypatch, captured)
+    monkeypatch.setenv("LLM_DUEL_MAX_TOKENS", "1024")  # env must lose
+    agent_cfg.write_cfg({"llm": {"duelist_max_tokens": 640}})
+    ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
+    assert captured["json"]["max_tokens"] == 640
 
 
 # ── sampling profile + timeout retry (2026-08-27) ─────────────────────────

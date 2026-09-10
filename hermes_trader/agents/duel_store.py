@@ -17,15 +17,31 @@ wiped live state. Path is overridable via HERMES_DUEL_FILE (conftest isolates
 it, like HERMES_LEDGER_FILE).
 
 Model identity + settings live in the agent config's `llm` block (hot,
-read at call time) with an env fallback — endpoint/key stay in .env.local:
+read at call time) with an env fallback — endpoint/key stay in .env.local.
+The NESTED per-slot shape (each slot owns its model/sampling/budget/template
+kwargs in one place):
 
     "llm": {
-        "model": "...",            # primary slot (env: LLM_MODEL)
-        "duelist_model": "...",    # duelist slot (env: LLM_DUEL_MODEL;
-                                   # absent everywhere = duelist disabled)
-        "sampling": {...},         # primary POST-body sampling
-        "duelist_sampling": {...}  # duelist POST-body sampling
+        "primary": {            # primary slot (env fallbacks: LLM_MODEL,
+                                # LLM_MAX_TOKENS)
+            "model": "...",
+            "sampling": {...},         # primary POST-body sampling
+            "max_tokens": 8192,        # primary completion budget
+            "chat_template_kwargs": {"enable_thinking": false}  # optional
+        },
+        "duelist": {           # duelist slot (env fallbacks: LLM_DUEL_MODEL,
+                                # LLM_DUEL_MAX_TOKENS; absent everywhere
+                                # = duelist disabled)
+            "model": "...",
+            "sampling": {...},         # duelist POST-body sampling
+            "max_tokens": 8192         # duelist completion budget
+        }
     }
+
+The FLAT keys (`llm.model`, `llm.duelist_model`, `llm.sampling`,
+`llm.duelist_sampling`, `llm.max_tokens`, `llm.duelist_max_tokens`) remain
+as LEGACY FALLBACKS, resolved per-key below the nested slot keys, so a
+pre-nest config keeps working unchanged.
 
 A model swap is a same-inode config flip (no container recreate). When no
 model is named anywhere the duelist is fully dormant: zero extra LLM calls,
@@ -106,11 +122,54 @@ def llm_block() -> Dict[str, Any]:
     return {}
 
 
+def llm_slot(slot: str) -> Dict[str, Any]:
+    """The agent config's `llm.<slot>` sub-dict (`slot` = ``"primary"`` or
+    ``"duelist"``), hot read (no cache), or {} on any fault — fail-open.
+
+    The nested per-slot shape (2026-09-10): each slot owns its model,
+    sampling, max_tokens and chat_template_kwargs in one place:
+
+        "llm": {
+            "primary": { "model", "sampling", "max_tokens",
+                         "chat_template_kwargs" },
+            "duelist": { "model", "sampling", "max_tokens",
+                         "chat_template_kwargs" }
+        }
+
+    The FLAT keys (``llm.model``, ``llm.duelist_model``, ``llm.sampling``,
+    ``llm.duelist_sampling``, ``llm.max_tokens``, ``llm.duelist_max_tokens``)
+    remain LEGACY FALLBACKS — resolved per-key by `slot_get`, so a
+    pre-nest config keeps working unchanged."""
+    block = llm_block()  # already fail-open ({} on any fault)
+    s = block.get(slot)
+    if isinstance(s, dict):
+        return s
+    return {}
+
+
+def slot_get(slot: str, key: str, legacy_key: Optional[str] = None) -> Any:
+    """``llm.<slot>.<key>`` (nested) first, then the legacy flat
+    ``llm.<legacy_key>`` — or None when absent in both. Hot (no cache),
+    fail-open (llm_block degrades to {} on any config fault, so this never
+    raises). Per-key, NOT replace-whole-block: a partial nested slot keeps
+    every legacy/env/code default the slot doesn't name.
+
+    Priority: nested slot key > flat legacy key > (caller's) env fallback >
+    code default."""
+    block = llm_block()
+    s = block.get(slot)
+    v = s.get(key) if isinstance(s, dict) else None
+    if v is None and legacy_key is not None:
+        v = block.get(legacy_key)
+    return v
+
+
 def effective_primary_model() -> str:
-    """The PRIMARY slot's model name: agent config `llm.model` first (hot,
-    no cache), then the LLM_MODEL / OPENROUTER_MODEL env vars, then the code
-    default. A model swap is a same-inode config flip — no recreate."""
-    m = str(llm_block().get("model") or "").strip()
+    """The PRIMARY slot's model name: agent config `llm.primary.model` first
+    (hot, no cache), then the legacy flat `llm.model`, then the LLM_MODEL /
+    OPENROUTER_MODEL env vars, then the code default. A model swap is a
+    same-inode config flip — no recreate."""
+    m = str(slot_get("primary", "model", "model") or "").strip()
     if m:
         return m
     for n in _PRIMARY_MODEL_ENV:
@@ -122,11 +181,12 @@ def effective_primary_model() -> str:
 
 def effective_duelist_model() -> Optional[str]:
     """The DUELIST slot's model name, or None = duelist disabled: agent
-    config `llm.duelist_model` first (hot), then the LLM_DUEL_MODEL env var.
-    The model deliberately does NOT fall back to the primary's model: a
+    config `llm.duelist.model` first (hot), then the legacy flat
+    `llm.duelist_model`, then the LLM_DUEL_MODEL env var. The model
+    deliberately does NOT fall back to the primary's model: a
     silent "duel the primary against itself" doubles LLM load with no A/B
     value — the feature is dormant until a duelist model is named."""
-    m = str(llm_block().get("duelist_model") or "").strip()
+    m = str(slot_get("duelist", "model", "duelist_model") or "").strip()
     if m:
         return m
     return _first_env(*_DUEL_MODEL_VARS) or None
@@ -160,15 +220,16 @@ DUELIST_SAMPLING_PROFILE: Dict[str, Any] = {
 def effective_duelist_sampling() -> Dict[str, Any]:
     """The duelist slot's sampling profile, read at CALL time (hot, no cache).
 
-    Merge rule: {**DUELIST_SAMPLING_PROFILE, **config["llm"]["duelist_sampling"]}
+    Merge rule: {**DUELIST_SAMPLING_PROFILE, **config["llm"]["duelist"]["sampling"]}
     — per-key override, NOT replace-whole-dict, so a partial block keeps every
-    default key it doesn't name. Absent block = the constant, i.e. today's
-    exact body. Fail-open: any config fault degrades to the pure default —
-    the primary's verdict must never cost a duelist profile read.
+    default key it doesn't name. The legacy flat `llm.duelist_sampling` is the
+    fallback when the nested slot key is absent. Absent both = the constant,
+    i.e. today's exact body. Fail-open: any config fault degrades to the pure
+    default — the primary's verdict must never cost a duelist profile read.
     """
     merged = dict(DUELIST_SAMPLING_PROFILE)
     try:
-        overrides = llm_block().get("duelist_sampling")
+        overrides = slot_get("duelist", "sampling", "duelist_sampling")
         if isinstance(overrides, dict):
             merged.update(overrides)
     except Exception:  # noqa: BLE001 — fail-open (see docstring)
@@ -194,6 +255,64 @@ def resolve_max_tokens(env_name: str, fallback: int = DEFAULT_MAX_TOKENS) -> int
     return fallback
 
 
+def _parse_max_tokens(v: Any) -> Optional[int]:
+    """A positive-integer completion budget from a config value, or None when
+    absent/invalid/non-positive. Accepts an int or an all-digit string
+    (mirrors the env resolver's tolerance). bool is rejected explicitly
+    (it is an int subclass)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int) and v > 0:
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            n = int(s)
+            if n > 0:
+                return n
+    return None
+
+
+def effective_primary_max_tokens() -> int:
+    """The PRIMARY slot's completion-token budget, read at CALL time (hot, no
+    cache): agent config `llm.primary.max_tokens` first (a same-inode config
+    flip — no recreate), then the legacy flat `llm.max_tokens`, then the
+    LLM_MAX_TOKENS env var, then DEFAULT_MAX_TOKENS. It caps the RESPONSE
+    length only (not a prompt/context limit)."""
+    c = _parse_max_tokens(slot_get("primary", "max_tokens", "max_tokens"))
+    if c is not None:
+        return c
+    return resolve_max_tokens("LLM_MAX_TOKENS")
+
+
+def effective_duelist_max_tokens() -> int:
+    """The DUELIST slot's completion-token budget, read at CALL time (hot, no
+    cache): agent config `llm.duelist.max_tokens` first, then the legacy flat
+    `llm.duelist_max_tokens`, then the LLM_DUEL_MAX_TOKENS env var, then the
+    PRIMARY's fully-resolved budget (`effective_primary_max_tokens`), then
+    DEFAULT_MAX_TOKENS. The duelist inherits the primary's resolved budget
+    when its own is unset — mirrors the base_url/api_key fallback (setting
+    one value controls both models)."""
+    c = _parse_max_tokens(slot_get("duelist", "max_tokens", "duelist_max_tokens"))
+    if c is not None:
+        return c
+    return resolve_max_tokens("LLM_DUEL_MAX_TOKENS", effective_primary_max_tokens())
+
+
+def effective_chat_template_kwargs(slot: str) -> Dict[str, Any]:
+    """The slot's ``chat_template_kwargs``, passed VERBATIM to the model
+    server in the POST body (e.g. ``{"enable_thinking": false}`` — disables a
+    thinking model's thinking PER REQUEST instead of loading the model with
+    ``--llamacpp-args "--reasoning off"``). Nested-only:
+    ``llm.<slot>.chat_template_kwargs`` (no flat/env — the env vars are for
+    endpoint/key/model/budget, not template internals). Must be a dict —
+    anything else (and any config fault) degrades to {}, so the POST body is
+    byte-identical to the pre-feature default (fail-open, no-op). Hot, no
+    cache; a copy is returned so the body can never mutate the config dict."""
+    v = llm_slot(slot).get("chat_template_kwargs")
+    return dict(v) if isinstance(v, dict) else {}
+
+
 def duel_file() -> str:
     """Current duel-log path (read at call time so tests can redirect)."""
     return os.environ.get("HERMES_DUEL_FILE", _DUEL_FILE)
@@ -210,7 +329,8 @@ def duelist_config() -> Dict[str, Any]:
     a one-line change. The model deliberately does NOT fall back to the
     primary's model: a silent "duel the primary against itself" would double
     LLM load with no A/B value — the feature is dormant until a duelist
-    model is named somewhere.
+    model is named somewhere. max_tokens resolves the same layered way
+    (`effective_duelist_max_tokens`).
     """
     model = effective_duelist_model()
     return {
@@ -219,12 +339,10 @@ def duelist_config() -> Dict[str, Any]:
         "api_key": _first_env(*_DUEL_KEY_VARS)
         or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
         "model": model or "",
-        # LLM_DUEL_MAX_TOKENS, falling back to the primary's LLM_MAX_TOKENS,
-        # then to DEFAULT_MAX_TOKENS — mirrors the base_url/api_key fallback
-        # (setting one var controls both models).
-        "max_tokens": resolve_max_tokens(
-            "LLM_DUEL_MAX_TOKENS", resolve_max_tokens("LLM_MAX_TOKENS")
-        ),
+        # llm.duelist_max_tokens → LLM_DUEL_MAX_TOKENS → the primary's
+        # resolved budget → DEFAULT_MAX_TOKENS (see effective_duelist_max_tokens;
+        # the duelist inherits the primary's value when its own is unset).
+        "max_tokens": effective_duelist_max_tokens(),
     }
 
 
@@ -301,9 +419,7 @@ def call_duelist(
         logger.warning("[duel] duelist LLM_API_KEY not set — skipping duelist call")
         return ""
     if max_tokens is None:
-        max_tokens = resolve_max_tokens(
-            "LLM_DUEL_MAX_TOKENS", resolve_max_tokens("LLM_MAX_TOKENS")
-        )
+        max_tokens = effective_duelist_max_tokens()
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(
@@ -341,20 +457,27 @@ async def _async_duel_call(
 ) -> str:
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
         url = base_url.rstrip("/") + "/chat/completions"
+        # Per-request chat-template overrides (same contract as the primary
+        # slot — e.g. {"enable_thinking": false} for a thinking-capable
+        # duelist model). Absent = {} → the key is NOT sent (no-op).
+        chat_kwargs = effective_chat_template_kwargs("duelist")
 
         async def _post(max_toks: int):
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "stream": False,
+                "max_tokens": max_toks,
+                **effective_duelist_sampling(),
+            }
+            if chat_kwargs:
+                body["chat_template_kwargs"] = chat_kwargs
             return await client.post(
                 url,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "max_tokens": max_toks,
-                    **effective_duelist_sampling(),
-                },
+                json=body,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 

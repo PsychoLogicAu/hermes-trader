@@ -20,10 +20,11 @@ from hermes_trader.agents.duel_store import (
     call_duelist,
     duelist_config,
     duelist_enabled,
+    effective_chat_template_kwargs,
+    effective_primary_max_tokens,
     effective_primary_model,
-    llm_block,
     record_duel,
-    resolve_max_tokens,
+    slot_get,
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.system_prompt import build_system_prompt
@@ -892,15 +893,17 @@ PRIMARY_SAMPLING_DEFAULT: Dict[str, Any] = {"temperature": 0.1}
 def effective_llm_sampling() -> Dict[str, Any]:
     """The primary slot's sampling profile, read at CALL time (hot, no cache).
 
-    Merge rule: {**default, **config["llm"]["sampling"]} — per-key override,
-    NOT replace-whole-dict, so a partial block keeps every default key it
-    doesn't name. Absent block = the code default, i.e. today's exact body.
-    Fail-open: any config fault (missing/corrupt/unreadable file) degrades to
-    the pure default — the LLM call path must never break on a config problem.
+    Merge rule: {**default, **config["llm"]["primary"]["sampling"]} — per-key
+    override, NOT replace-whole-dict, so a partial block keeps every default
+    key it doesn't name. The legacy flat `llm.sampling` is the fallback when
+    the nested slot key is absent. Absent both = the code default, i.e.
+    today's exact body. Fail-open: any config fault (missing/corrupt/
+    unreadable file) degrades to the pure default — the LLM call path must
+    never break on a config problem.
     """
     merged = dict(PRIMARY_SAMPLING_DEFAULT)
     try:
-        overrides = llm_block().get("sampling")
+        overrides = slot_get("primary", "sampling", "sampling")
         if isinstance(overrides, dict):
             merged.update(overrides)
     except Exception:  # noqa: BLE001 — fail-open (see docstring)
@@ -928,25 +931,35 @@ async def _async_do_call(
     """
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
 
-        # Completion budget: operator-tunable via LLM_MAX_TOKENS (default
-        # 32768, read at call time). It caps the RESPONSE length only — the
-        # prompt size is governed by the model server's context window.
-        default_max_toks = resolve_max_tokens("LLM_MAX_TOKENS")
+        # Completion budget: agent config `llm.primary.max_tokens` → legacy
+        # llm.max_tokens → LLM_MAX_TOKENS (default 8192, read at call time —
+        # a same-inode config flip, no recreate). It caps the RESPONSE
+        # length only — the prompt size is governed by the model server's
+        # context window.
+        default_max_toks = effective_primary_max_tokens()
+        # Per-request chat-template overrides (e.g. {"enable_thinking":
+        # false} — think OFF for a thinking-capable model, so the answer
+        # lands in `content` fast instead of a long `reasoning_content`
+        # prefix). Absent = {} → the key is NOT sent (no-op).
+        chat_kwargs = effective_chat_template_kwargs("primary")
 
         async def _post(max_toks: int):
             url = base_url.rstrip("/") + "/chat/completions"
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "stream": False,
+                "max_tokens": max_toks,
+                **effective_llm_sampling(),
+            }
+            if chat_kwargs:
+                body["chat_template_kwargs"] = chat_kwargs
             return await client.post(
                 url,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message},
-                    ],
-                    "stream": False,
-                    "max_tokens": max_toks,
-                    **effective_llm_sampling(),
-                },
+                json=body,
                 headers={"Authorization": f"Bearer {api_key}"},
             )
 
