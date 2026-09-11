@@ -2,15 +2,30 @@
 
 Multi-variant since 2026-09-11: the gate evaluates a `btc` variant (BTC
 proxy, the original) and an `alt` variant (equal-weight alt-basket index —
-the tape the bot actually trades). Each variant blocks a NEW entry when its
-trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| < `drift_pct`.
+the tape the bot actually trades). Each variant flags a NEW entry when its
+trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| < `drift_pct`
+(the raw verdict `would_block`).
 
-Merge semantics: entry blocked iff any LIVE (shadow_mode false) variant
-reads quiet; a shadow variant never blocks — it carries `shadow_would_block`
-+ `shadow_reasons` (one `quiet_tape[<name>]` reason per firing shadow
-variant), which the executor logs loudly. Fail-safes: disabled variant,
-data gap (tape fetch → None), or non-positive thresholds ALWAYS pass for
-that variant — a data gap can never block a trade.
+Merge semantics (`merge`, default "or"):
+  `or`  — entry blocked iff any LIVE (shadow_mode false) variant reads quiet.
+  `and` — entry blocked iff ALL AVAILABLE LIVE reads are quiet; a data gap
+  or shadow variant is a no-opinion (it can neither block nor release the
+  other variant's quiet verdict).
+A shadow variant never blocks under either merge — it carries
+`shadow_would_block` + `shadow_reasons` (one `quiet_tape[<name>]` reason per
+firing shadow variant), which the executor logs loudly.
+
+Accrual instrumentation (2026-09-11): the result ALWAYS carries `variants`
+(per enabled variant: `would_block`, `live`, `reads` {vol, drift}), `merge`,
+and `released_by_merge` + `released_reasons` when the entry passes while
+≥1 LIVE variant would have blocked alone (the OR-vs-AND counterfactual join
+key; the executor logs it as `[gate][ACC]`). These ride in `gate_results` →
+every `Trade result:` line, so the ledger join gets both the verdict and the
+raw readings per decision.
+
+Fail-safes: disabled variant, data gap (tape fetch → None), or
+non-positive thresholds ALWAYS pass for that variant — a data gap can never
+block a trade.
 
 Both tape-activity functions are monkeypatched so the tests never touch the
 network; the vol/drift math is the sweep's math (scratch/_quiet_tape_sweep.py
@@ -131,7 +146,8 @@ def test_flat_disabled_passes():
 
 def test_flat_data_gap_never_blocks_even_when_live():
     r = _run(CFG_LIVE, None)
-    assert r == {"pass": True}
+    assert r["pass"] is True
+    assert r["variants"]["btc"]["reads"] is None  # gap visible, no opinion
 
 
 def test_flat_quiet_shadow_marker():
@@ -151,22 +167,23 @@ def test_flat_quiet_live_blocks():
 
 def test_flat_active_tape_passes_vol_above():
     r = _run(CFG_LIVE, _tape(3.0, 0.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
+    assert "reason" not in r
 
 
 def test_flat_active_tape_passes_drift_above():
     r = _run(CFG_LIVE, _tape(0.5, 5.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
 
 
 def test_flat_drift_sign_agnostic():
     r = _run(CFG_LIVE, _tape(0.5, -5.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
 
 
 def test_flat_boundary_is_strict():
-    assert _run(CFG_LIVE, _tape(2.5, 0.0)) == {"pass": True}
-    assert _run(CFG_LIVE, _tape(0.0, 2.0)) == {"pass": True}
+    assert _run(CFG_LIVE, _tape(2.5, 0.0))["pass"] is True
+    assert _run(CFG_LIVE, _tape(0.0, 2.0))["pass"] is True
     assert _run(CFG_LIVE, _tape(2.49, 1.99))["pass"] is False
 
 
@@ -178,7 +195,7 @@ def test_flat_negative_thresholds_disable():
 
 def test_flat_default_thresholds_are_25_20():
     assert _run({"enabled": True, "shadow_mode": False}, _tape(2.0, 1.5))["pass"] is False
-    assert _run({"enabled": True, "shadow_mode": False}, _tape(3.0, 1.5)) == {"pass": True}
+    assert _run({"enabled": True, "shadow_mode": False}, _tape(3.0, 1.5))["pass"] is True
 
 
 def test_flat_side_irrelevant():
@@ -199,10 +216,13 @@ def test_flat_shape_never_fetches_alt():
 
 BQT = {"enabled": True, "shadow_mode": False, "vol_pct": 2.5, "drift_pct": 2.0}
 ALTQ = {"enabled": True, "shadow_mode": True, "vol_pct": 4.5, "drift_pct": 2.0}
+# Shipped live cells (2026-09-11 owner call): BTC best-elig 1.5/2.0, ALT 4.5/2.0.
+BQT_LIVE = {"enabled": True, "shadow_mode": False, "vol_pct": 1.5, "drift_pct": 2.0}
+ALTQ_LIVE = {"enabled": True, "shadow_mode": False, "vol_pct": 4.5, "drift_pct": 2.0}
 
 
 def test_multi_btc_live_alt_shadow_btc_quiet_blocks():
-    """BTC live+quiet blocks; alt also reads quiet but only accrues."""
+    """BTC live+quiet blocks (OR merge); alt also reads quiet but only accrues."""
     r = _run({"btc": BQT, "alt": ALTQ}, _tape(1.0, 0.5), _tape(3.0, 1.0))
     assert r["pass"] is False
     assert r.get("shadow_would_block") is True
@@ -244,7 +264,7 @@ def test_multi_alt_data_gap_never_blocks():
     """Alt tape data gap → alt variant has no opinion; BTC alone decides."""
     r = _run({"btc": {**BQT, "shadow_mode": True}, "alt": {**ALTQ, "shadow_mode": False}},
              _tape(3.0, 5.0), None)
-    assert r == {"pass": True}  # BTC active, alt no opinion
+    assert r["pass"] is True  # BTC active, alt no opinion
     r2 = _run({"btc": BQT, "alt": {**ALTQ, "shadow_mode": False}},
               _tape(1.0, 0.5), None)
     assert r2["pass"] is False  # BTC LIVE+quiet still blocks
@@ -255,13 +275,140 @@ def test_multi_alt_data_gap_never_blocks():
 def test_multi_neither_quiet_passes():
     r = _run({"btc": BQT, "alt": {**ALTQ, "shadow_mode": False}},
              _tape(3.0, 5.0), _tape(5.0, -7.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
 
 
 def test_multi_all_variants_disabled_passes():
     r = _run({"btc": {"enabled": False}, "alt": {"enabled": False}},
              _tape(0.5, 0.1), _tape(0.5, 0.1))
     assert r == {"pass": True}
+
+
+# ── Merge semantics: "or" (default) vs "and" ────────────────────────────
+
+def test_multi_merge_default_is_or():
+    r = _run({"btc": BQT, "alt": ALTQ}, _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["merge"] == "or"
+    assert r["pass"] is False  # BTC live+quiet blocks under OR
+
+
+def test_multi_merge_invalid_falls_back_to_or():
+    r = _run({"btc": BQT, "alt": ALTQ, "merge": "xor"},
+             _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["merge"] == "or"
+    assert r["pass"] is False
+
+
+def test_multi_and_both_live_both_quiet_blocks():
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["merge"] == "and"
+    assert r["pass"] is False
+    assert "quiet_tape[btc]" in r["reason"] and "quiet_tape[alt]" in r["reason"]
+    assert "released_by_merge" not in r
+
+
+def test_multi_and_btc_quiet_alt_loud_releases():
+    """The stalemate-ender: OR would block on BTC quiet; AND passes because
+    the alt tape is loud, and accrues the released counterfactual."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(1.2, 0.5), _tape(5.0, -6.6))
+    assert r["pass"] is True
+    assert r.get("released_by_merge") is True
+    # The reason still rides along (join key) even though the gate passed.
+    assert "quiet_tape[btc]" in r["reason"]
+    assert "quiet_tape[alt]" not in r["reason"]
+    assert len(r["released_reasons"]) == 1
+    assert "quiet_tape[btc]" in r["released_reasons"][0]
+
+
+def test_multi_and_btc_quiet_alt_gap_still_blocks():
+    """AND fail-safe: a data gap on one LIVE variant is a no-opinion — it
+    cannot release the other variant's quiet verdict (a broken alt feed
+    cannot silently revert to BTC-alone protection)."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(1.2, 0.5), None)
+    assert r["pass"] is False
+    assert "quiet_tape[btc]" in r["reason"]
+    assert "quiet_tape[alt]" not in r["reason"]
+
+
+def test_multi_and_btc_gap_alt_quiet_still_blocks():
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             None, _tape(3.0, 1.0))
+    assert r["pass"] is False
+    assert "quiet_tape[alt]" in r["reason"]
+    assert "quiet_tape[btc]" not in r["reason"]
+
+
+def test_multi_and_all_gap_passes_no_opinion():
+    """Both LIVE variants gap → no opinion at all → pass; the gaps are
+    visible in `variants` (reads=None), not silently dropped."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"}, None, None)
+    assert r["pass"] is True
+    assert r["variants"]["btc"]["reads"] is None
+    assert r["variants"]["alt"]["reads"] is None
+    assert "reason" not in r
+
+
+def test_multi_and_shadow_variant_does_not_merge():
+    """Under AND, a SHADOW variant never blocks: both quiet + alt shadow →
+    only BTC (the sole LIVE read) decides; alt accrues as would-block."""
+    r = _run({"btc": BQT_LIVE, "alt": {**ALTQ, "shadow_mode": True}, "merge": "and"},
+             _tape(1.2, 0.5), _tape(3.0, 1.0))
+    assert r["pass"] is False  # BTC live+quiet is the only LIVE read, quiet
+    assert r.get("shadow_would_block") is True
+    assert r["shadow_reasons"] and "quiet_tape[alt]" in r["shadow_reasons"][0]
+
+
+def test_multi_and_one_live_quiet_one_live_loud_releases_with_reasons():
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(3.0, 5.0), _tape(3.0, 1.0))  # BTC loud, ALT quiet
+    assert r["pass"] is True
+    assert r.get("released_by_merge") is True
+    assert "quiet_tape[alt]" in r["released_reasons"][0]
+
+
+def test_multi_or_btc_quiet_alt_loud_still_blocks():
+    """OR semantics unchanged: any LIVE quiet read vetoes the tape."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "or"},
+             _tape(1.2, 0.5), _tape(5.0, -6.6))
+    assert r["pass"] is False
+    assert "released_by_merge" not in r
+
+
+# ── Accrual instrumentation: variants / reads / released_by_merge ───────
+
+def test_variants_always_carried_when_tape_known():
+    """Loud tape: no reason, but the raw reads still ride along (the
+    individual gate variables for the ledger join)."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE}, _tape(3.0, 5.0), _tape(5.0, -6.6))
+    assert r["pass"] is True
+    assert "reason" not in r
+    assert r["merge"] == "or"
+    v = r["variants"]
+    assert v["btc"]["would_block"] is False and v["btc"]["live"] is True
+    assert v["btc"]["reads"] == {"vol": 3.0, "drift": 5.0}
+    assert v["alt"]["would_block"] is False
+    assert v["alt"]["reads"]["vol"] == 5.0
+    assert v["alt"]["reads"]["drift"] == -6.6
+
+
+def test_variants_gap_carries_null_reads():
+    """Data gap: the variant still appears in `variants` with reads=None,
+    so a gap is visible in the Trade result JSON (not silently dropped)."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE}, _tape(1.2, 0.5), None)
+    # BTC quiet+live under OR → blocked; alt gap visible with null reads.
+    assert r["pass"] is False
+    assert r["variants"]["btc"]["reads"]["vol"] == 1.2
+    assert r["variants"]["alt"]["reads"] is None
+
+
+def test_flat_shape_result_carries_merge_or():
+    r = _run(CFG_LIVE, _tape(0.8, 0.3))
+    assert r["merge"] == "or"
+    assert r["variants"]["btc"]["would_block"] is True
+    assert r["variants"]["btc"]["live"] is True
 
 
 # ── alt_basket_tape_activity: math + fail-safes (synthetic candles) ─────

@@ -1232,9 +1232,17 @@ def _quiet_tape_variant(
     fetch_tape,
 ) -> Optional[Dict[str, Any]]:
     """Evaluate ONE quiet_tape variant. Returns None when the variant is
-    disabled or has no opinion (data gap / non-positive thresholds / active
-    tape — a gap can never block a trade), else a GateResult whose reason
-    carries the `quiet_tape[<name>]` prefix (the per-variant join/audit key)."""
+    disabled or has no opinion (data gap / non-positive thresholds), else a
+    dict with `would_block` (bool — the raw verdict, independent of mode),
+    `live` (bool — shadow_mode false), and `reads` {vol, drift}.
+
+    2026-09-11 change: a record is ALWAYS returned when the tape read is
+    available — quiet OR loud (previously only on a fire) — so the gate's
+    `variants` map carries the individual gate variables for every decision
+    in the `Trade result:` JSON. When `would_block` is set, `reason` carries
+    the `quiet_tape[<name>]` prefix (the per-variant join/audit key, with
+    the live read values + thresholds). A data gap returns None (no opinion;
+    a gap can never block a trade)."""
     if not bool(vcfg.get("enabled", False)):
         return None
     tape = fetch_tape()
@@ -1244,14 +1252,18 @@ def _quiet_tape_variant(
     drift_pct = float(vcfg.get("drift_pct", 2.0) or 0.0)
     if vol_pct <= 0 or drift_pct <= 0:
         return None
-    if not (tape["vol"] < vol_pct and abs(tape["drift"]) < drift_pct):
-        return None
-    reason = (f"quiet_tape[{name}] (broad tape inactive: {label} trail24h vol "
-              f"{tape['vol']:.2f}% < {vol_pct:.2f}% AND |drift| "
-              f"{abs(tape['drift']):.2f}% < {drift_pct:.2f}%)")
-    if bool(vcfg.get("shadow_mode", True)):
-        return {"pass": True, "reason": reason, "shadow_would_block": True}
-    return {"pass": False, "reason": reason}
+    would_block = tape["vol"] < vol_pct and abs(tape["drift"]) < drift_pct
+    out = {
+        "would_block": would_block,
+        "live": not bool(vcfg.get("shadow_mode", True)),
+        "reads": {"vol": round(float(tape["vol"]), 4),
+                  "drift": round(float(tape["drift"]), 4)},
+    }
+    if would_block:
+        out["reason"] = (f"quiet_tape[{name}] (broad tape inactive: {label} trail24h vol "
+                         f"{tape['vol']:.2f}% < {vol_pct:.2f}% AND |drift| "
+                         f"{abs(tape['drift']):.2f}% < {drift_pct:.2f}%)")
+    return out
 
 
 def quiet_tape_gate(
@@ -1259,7 +1271,7 @@ def quiet_tape_gate(
     gate_cfg: Dict[str, Any],
     coin_blocklist: Optional[List[str]] = None,
 ) -> GateResult:
-    """Quiet broad-tape entry gate — multi-variant (2026-09-10/11, SHADOW-first).
+    """Quiet broad-tape entry gate — multi-variant (2026-09-10/11).
 
     Each VARIANT blocks a NEW entry when its broad-tape read is quiet:
     trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| <
@@ -1269,9 +1281,12 @@ def quiet_tape_gate(
         (scratch/_regime_bleed.py + _coin_vs_btc.py): the 09-05/06/07 bleed
         (−$106.81 = 99% of the 30d loss) hit on the quietest broad tape of
         the month — BTC trail24h vol 0.76–1.37% vs a ~2.0% median — where a
-        100%-long 5x book became a coin flip. Thresholds 2.5/2.0 from
-        scratch/_quiet_tape_sweep.py (n=516): the vol axis is the lever,
-        2.5/2.0 the tightest cell on the plateau.
+        100%-long 5x book became a coin flip. Thresholds from
+        scratch/_quiet_tape_sweep.py (n=516); the corrected-criterion replay
+        (scratch/_quiet_tape_replay_merge.py, 2026-09-11) picked 1.5/2.0 as
+        the best ELIGIBLE cell (Δ +74.62, blocked cohort −$74.62, all three
+        sub-windows ≤ 0) over the max-Δ live cell 2.5/2.0 (Δ +130.50 but
+        mid-window +$3.62 → not robust).
 
       `alt` — the alt-basket proxy (2026-09-11): an equal-weight index of
         the top-N main-dex alts by 24h volume (BTC excluded, vol-floored) —
@@ -1283,26 +1298,50 @@ def quiet_tape_gate(
         vol<4.5 is the conservative vol row with a net-negative blocked
         cohort; 4.5/2.0 is the tightest drift cell on that row (n=50,
         blocked cohort −$52.20, avg win +$1.04 vs avg loss −$3.48).
-        Shadow-first.
 
     Config shapes (both accepted, hot-reloaded):
       flat (legacy, BTC-only):  {"enabled":…, "shadow_mode":…, "vol_pct":…, "drift_pct":…}
-      multi-variant:           {"btc": {…}, "alt": {…}}   — per-variant enabled/shadow_mode/thresholds
+      multi-variant:           {"btc": {…}, "alt": {…}, "merge": "and"|"or"}
+                                — per-variant enabled/shadow_mode/thresholds
 
-    Merge semantics: the entry is BLOCKED iff any LIVE (shadow_mode false)
-    variant reads quiet. A shadow variant never blocks — it carries
-    `shadow_would_block` + `shadow_reasons` (one reason per firing shadow
-    variant), which the executor logs loudly (`[gate][SHADOW] quiet_tape
-    WOULD HAVE BLOCKED …: quiet_tape[alt] (…)` — the accrual join key). A
-    data gap on ANY variant is a no-opinion pass for that variant; a gap
+    Merge semantics (`merge`, default "or"):
+      `or`  — BLOCK iff any LIVE (shadow_mode false) variant reads quiet.
+              The original (2026-09-10/11) merge.
+      `and` — BLOCK iff ALL AVAILABLE reads are quiet (a data gap = that
+              variant has no opinion: it can neither block nor release the
+              other variant's quiet verdict — BTC quiet + ALT gap still
+              blocks, so a broken alt feed cannot silently revert to
+              BTC-alone protection). Owner call 2026-09-11: AND ends the
+              tape-wide stalemate (any single quiet read used to veto the
+              whole tape) at the cost of releasing the BTC-quiet/ALT-loud
+              cohort; the released-cohort P/L accrues out-of-sample via the
+              `[gate][ACC]` line before the merge choice is confirmed.
+    Shadow variants never block under either merge — they carry
+    `shadow_would_block` + `shadow_reasons` (one `quiet_tape[<name>]`
+    reason per firing shadow variant), which the executor logs loudly.
+    A data gap on ANY variant is a no-opinion pass for that variant; a gap
     can never block a trade.
+
+    Accrual instrumentation (2026-09-11): the result ALWAYS carries
+    `variants` — per enabled variant: `would_block` (raw verdict), `live`,
+    `reads` {vol, drift} (null on data gap), plus `merge` and
+    `released_by_merge` (AND merge passed while ≥1 LIVE variant would have
+    blocked alone — the OR-vs-AND counterfactual join key, logged by the
+    executor as `[gate][ACC]`). These ride in `gate_results` → every
+    `Trade result:` line (blocked AND executed), so the ledger join gets
+    both the verdict and the raw readings per decision.
     """
     cfg = gate_cfg or {}
     if "btc" in cfg or "alt" in cfg:
         variants = {"btc": cfg.get("btc") or {}, "alt": cfg.get("alt") or {}}
+        merge = str(cfg.get("merge", "or") or "or").lower()
     else:
-        # Legacy flat shape → the BTC variant only.
+        # Legacy flat shape → the BTC variant only (OR merge is vacuous
+        # with one variant).
         variants = {"btc": cfg, "alt": {}}
+        merge = "or"
+    if merge not in ("and", "or"):
+        merge = "or"
     if not any(bool(v.get("enabled", False)) for v in variants.values()):
         return {"pass": True}
     from hermes_trader.agents.market_regime import (
@@ -1319,21 +1358,71 @@ def quiet_tape_gate(
         "btc": (lambda: btc_tape_activity(), "BTC"),
         "alt": (lambda: alt_basket_tape_activity(blocklist=_blocklist), "alt-basket"),
     }
-    fired = []
+    evaluated = {}
+    gaps = []
     for name in ("btc", "alt"):
+        vcfg = variants.get(name) or {}
         fetch, label = fetchers[name]
-        r = _quiet_tape_variant(name, label, variants.get(name) or {}, fetch)
+        r = _quiet_tape_variant(name, label, vcfg, fetch)
         if r is not None:
-            fired.append((name, r))
-    if not fired:
+            evaluated[name] = r
+        elif (bool(vcfg.get("enabled", False))
+              and float(vcfg.get("vol_pct", 2.5) or 0.0) > 0
+              and float(vcfg.get("drift_pct", 2.0) or 0.0) > 0):
+            # Enabled with sane thresholds but no tape read (data gap):
+            # no opinion (a gap can never block a trade) — but it still rides
+            # along in `variants` with reads=None so the gap is visible in
+            # the Trade result JSON. (Disabled / non-positive thresholds are
+            # inert, not gaps — they don't ride along.)
+            gaps.append(name)
+    if not evaluated and not gaps:
         return {"pass": True}
-    blocked = any(not r["pass"] for _, r in fired)
-    shadow = [r for _, r in fired if r.get("shadow_would_block")]
-    reason = " ; ".join(r["reason"] for _, r in fired)
-    out: Dict[str, Any] = {"pass": not blocked, "reason": reason}
-    if shadow:
+
+    if merge == "and":
+        # All AVAILABLE LIVE reads must be quiet (shadow variants never
+        # merge — they only accrue). A missing live read (gap/disabled) is
+        # no opinion — it cannot block, and it cannot release the other
+        # variant's quiet verdict (BTC quiet + ALT gap still blocks, so a
+        # broken alt feed cannot silently revert to BTC-alone protection).
+        live_eval = [r for r in evaluated.values() if r["live"]]
+        blocked = bool(live_eval) and all(r["would_block"] for r in live_eval)
+    else:  # "or"
+        blocked = any(r["would_block"] and r["live"] for r in evaluated.values())
+
+    shadow_fired = [r for r in evaluated.values() if r["would_block"] and not r["live"]]
+    live_fired = [r for r in evaluated.values() if r["would_block"] and r["live"]]
+    # OR-vs-AND counterfactual: the entry passes (or is blocked elsewhere)
+    # while ≥1 LIVE variant would have blocked alone. Under OR this is the
+    # same set as `live_fired` minus the blocked case; under AND it is the
+    # released cohort. Always computed — cheap, and it is the join key.
+    released_by_merge = (not blocked) and bool(live_fired)
+
+    reason = " ; ".join(r["reason"] for r in evaluated.values() if r["would_block"])
+    out: Dict[str, Any] = {"pass": not blocked}
+    if reason:
+        out["reason"] = reason
+    if shadow_fired:
         out["shadow_would_block"] = True
-        out["shadow_reasons"] = [r["reason"] for r in shadow]
+        out["shadow_reasons"] = [r["reason"] for r in shadow_fired]
+    out["variants"] = {
+        name: {
+            "would_block": r["would_block"],
+            "live": r["live"],
+            "reads": r["reads"],
+        }
+        for name, r in evaluated.items()
+    }
+    for name in gaps:
+        vcfg = variants.get(name) or {}
+        out["variants"][name] = {
+            "would_block": False,
+            "live": not bool(vcfg.get("shadow_mode", True)),
+            "reads": None,  # data gap — no opinion
+        }
+    out["merge"] = merge
+    if released_by_merge:
+        out["released_by_merge"] = True
+        out["released_reasons"] = [r["reason"] for r in live_fired]
     return out
 
 
