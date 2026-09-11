@@ -251,6 +251,96 @@ _TAPE_MIN_BARS = 200  # fail-safe: < ~16h of 5m history → no opinion
 _tape_cache: Tuple[Optional[Dict[str, float]], float] = (None, 0.0)
 
 
+# Alt-basket broad-tape defaults (2026-09-11, WATCHLIST §B.17 alt variant).
+# The basket = the tape the bot actually trades: main-dex perps (no dex
+# prefix), BTC excluded, blocklist excluded, 24h-vol floored, top-N by vol.
+# Equal-weight index of the aligned 5m closes, same vol/drift math as BTC.
+# Thresholds from scratch/_quiet_tape_alt_sweep_corrected.py (same 516
+# pairs / 3 sub-windows as the BTC sweep, with the corrected sub-window
+# criterion — the inherited script's `d3 >= 0` check was sign-flipped vs
+# its own docstring): the vol axis is the protective lever, vol<4.5 is the
+# conservative vol row with a net-negative blocked cohort. Shipped anchor
+# vol 4.5 / drift 2.0 is the TIGHTEST drift cell on that row (n=50, blocked
+# cohort −$52.20, avg win +$1.04 vs avg loss −$3.48; mid-window blocked P/L
+# +$0.18 ≈ noise). Note the BTC cell 2.5/2.0 does NOT survive the corrected
+# criterion either (mid-window blocked P/L +$3.62) — pre-existing, logged
+# for the owner. The alt variant ships shadow-first regardless.
+_ALT_BASKET_DEFAULT_N = 8
+_ALT_BASKET_DEFAULT_VOL_FLOOR = 10_000_000.0
+_ALT_BASKET_EXCLUDE = frozenset(["BTC"])
+_alt_basket_cache: Tuple[Optional[Dict[str, float]], float] = (None, 0.0)
+
+
+def alt_basket_tape_activity(
+    force: bool = False,
+    basket_size: int = _ALT_BASKET_DEFAULT_N,
+    vol_floor: float = _ALT_BASKET_DEFAULT_VOL_FLOOR,
+    blocklist: Optional[Tuple[str, ...]] = None,
+) -> Optional[Dict[str, float]]:
+    """Trailing-24h alt-basket broad-tape activity: {"vol": %, "drift": %}.
+
+    Same contract as ``btc_tape_activity`` (vol = pstdev of 5m log-returns
+    × sqrt(288) × 100 dailyized; drift = net % over the window) but on an
+    EQUAL-WEIGHT index of the top-``basket_size`` main-dex alts by 24h
+    volume (BTC excluded, blocklist excluded, vol-floored) — the tape the
+    bot actually trades, not BTC. Coins with < 100 bars in the window drop
+    out of the index (a thin/delisted name can't move the read); if fewer
+    than 2 coins have history the read is None. Lookback-only; a fetch
+    failure or data gap returns None and the consuming gate MUST pass with
+    no opinion (a gap can never block a trade). Cached for ``_TAPE_TTL_S``;
+    ``force=True`` bypasses the cache.
+    """
+    global _alt_basket_cache
+    now = time.time()
+    cached, ts = _alt_basket_cache
+    if not force and cached is not None and (now - ts) < _TAPE_TTL_S:
+        return cached
+    try:
+        from hermes_trader.client.universe import get_universe
+        uni = get_universe()
+        cands = [
+            m for m in uni
+            if m.get("type") == "perp"
+            and not m.get("dex")
+            and m.get("coin") not in _ALT_BASKET_EXCLUDE
+            and m.get("coin", "").upper() not in (
+                (b or "").upper() for b in (blocklist or ())
+            )
+            and float(m.get("dayNtlVlm") or 0) >= vol_floor
+        ]
+        cands.sort(key=lambda m: float(m.get("dayNtlVlm") or 0), reverse=True)
+        basket = [m["coin"] for m in cands[: max(1, int(basket_size))]]
+        if not basket:
+            return None
+    except Exception as e:
+        logger.warning(f"[regime] alt-basket universe fetch failed: {e}")
+        return None
+    series = {}
+    for coin in basket:
+        try:
+            candles = fetch_hl_candles(coin, interval="5m", count=290)
+        except Exception as e:
+            logger.warning(f"[regime] alt-basket tape fetch failed for {coin}: {e}")
+            continue
+        closes = [float(c.c) for c in candles if float(c.c) > 0]
+        if len(closes) >= 100:
+            series[coin] = closes
+    if len(series) < 2:
+        return None
+    L = min(len(v) for v in series.values())
+    if L < 100:
+        return None
+    idx = [
+        sum(v[-L:][i] / v[-L:][0] for v in series.values()) / len(series)
+        for i in range(L)
+    ]
+    rets = [math.log(idx[i] / idx[i - 1]) for i in range(1, L)]
+    vol = statistics.pstdev(rets) * math.sqrt(288) * 100
+    drift = (idx[-1] / idx[0] - 1) * 100
+    _alt_basket_cache = ({"vol": vol, "drift": drift}, now)
+    return _alt_basket_cache[0]
+
+
 def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %}.
 

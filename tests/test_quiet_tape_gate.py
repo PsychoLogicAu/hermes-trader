@@ -1,18 +1,39 @@
 """Tests for the quiet broad-tape entry gate (2026-09-10, WATCHLIST §B.17).
 
-The gate blocks a NEW entry when the BROAD tape (BTC) is quiet — trailing-24h
-realized vol < `vol_pct` AND |trailing-24h drift| < `drift_pct`. It is SHADOW
-by default: structurally pass + `shadow_would_block` marker until
-`shadow_mode` is flipped in .agent-config.json. Fail-safes: disabled /
-data gap (btc_tape_activity() → None) always pass — a data gap can never
+Multi-variant since 2026-09-11: the gate evaluates a `btc` variant (BTC
+proxy, the original) and an `alt` variant (equal-weight alt-basket index —
+the tape the bot actually trades). Each variant flags a NEW entry when its
+trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| < `drift_pct`
+(the raw verdict `would_block`).
+
+Merge semantics (`merge`, default "or"):
+  `or`  — entry blocked iff any LIVE (shadow_mode false) variant reads quiet.
+  `and` — entry blocked iff ALL AVAILABLE LIVE reads are quiet; a data gap
+  or shadow variant is a no-opinion (it can neither block nor release the
+  other variant's quiet verdict).
+A shadow variant never blocks under either merge — it carries
+`shadow_would_block` + `shadow_reasons` (one `quiet_tape[<name>]` reason per
+firing shadow variant), which the executor logs loudly.
+
+Accrual instrumentation (2026-09-11): the result ALWAYS carries `variants`
+(per enabled variant: `would_block`, `live`, `reads` {vol, drift}), `merge`,
+and `released_by_merge` + `released_reasons` when the entry passes while
+≥1 LIVE variant would have blocked alone (the OR-vs-AND counterfactual join
+key; the executor logs it as `[gate][ACC]`). These ride in `gate_results` →
+every `Trade result:` line, so the ledger join gets both the verdict and the
+raw readings per decision.
+
+Fail-safes: disabled variant, data gap (tape fetch → None), or
+non-positive thresholds ALWAYS pass for that variant — a data gap can never
 block a trade.
 
-`btc_tape_activity()` is monkeypatched so the tests never touch the network;
-the vol/drift math itself is the sweep's math (scratch/_quiet_tape_sweep.py)
-and is exercised here only via the gate's threshold comparison.
+Both tape-activity functions are monkeypatched so the tests never touch the
+network; the vol/drift math is the sweep's math (scratch/_quiet_tape_sweep.py
+/ _quiet_tape_alt_sweep.py) and is exercised here only via synthetic candles.
 """
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -48,122 +69,430 @@ def _tape(vol: float, drift: float) -> dict:
     return {"vol": vol, "drift": drift}
 
 
-def _run(gate_cfg, tape, ctx=None):
-    """Run the gate with btc_tape_activity monkeypatched to return `tape`."""
-    # the gate imports from hermes_trader.agents.market_regime — patch there
+# Side channel for fetch-observation tests (avoids mutating the result).
+_LAST_FETCHED = {"btc": False, "alt": False}
+
+
+def _run(gate_cfg: dict, btc_tape, alt_tape: object = "absent",
+         ctx: "GateContext | None" = None):
+    """Run the gate with both tape functions monkeypatched.
+
+    `btc_tape` / `alt_tape`: tape dict, None (data gap), or "absent"
+    (default — that variant must not be fetched). Fetch observations land
+    in `_LAST_FETCHED` (test-only).
+    """
     from hermes_trader.agents import market_regime
-    orig = market_regime.btc_tape_activity
-    market_regime.btc_tape_activity = (lambda force=False: tape)
+
+    orig_btc = market_regime.btc_tape_activity
+    orig_alt = market_regime.alt_basket_tape_activity
+    _LAST_FETCHED.update({"btc": False, "alt": False})
+    if btc_tape != "absent":
+        market_regime.btc_tape_activity = (
+            lambda force=False: (_LAST_FETCHED.__setitem__("btc", True), btc_tape)[1])
+    if alt_tape != "absent":
+        market_regime.alt_basket_tape_activity = (
+            lambda force=False, **kw: (_LAST_FETCHED.__setitem__("alt", True), alt_tape)[1])
     try:
         return quiet_tape_gate(ctx or _ctx(), gate_cfg)
     finally:
-        market_regime.btc_tape_activity = orig
+        market_regime.btc_tape_activity = orig_btc
+        market_regime.alt_basket_tape_activity = orig_alt
 
+
+class _FakeCandle:
+    def __init__(self, c):
+        self.c = c
+
+
+def _alt_tape_on(coins_closes, blocklist=None):
+    """Run alt_basket_tape_activity with universe/candles monkeypatched.
+
+    `coins_closes`: {coin: [closes]} — universe vol assigned so every coin is
+    above the floor (rank by dict order). Returns the tape dict or None.
+    """
+    from hermes_trader.agents import market_regime
+    from hermes_trader.client import universe as uni_mod
+
+    vol = 1e9
+    fake_universe = [
+        {"coin": c, "type": "perp", "dex": None, "dayNtlVlm": vol - i}
+        for i, c in enumerate(coins_closes)
+    ]
+    orig_universe = uni_mod.get_universe
+    orig_fetch = market_regime.fetch_hl_candles
+    uni_mod.get_universe = (lambda **kw: fake_universe)
+    market_regime.fetch_hl_candles = lambda coin, interval="5m", count=100, fresh=False: (
+        [_FakeCandle(x) for x in coins_closes[coin]] if coin in coins_closes else [])
+    market_regime._alt_basket_cache = (None, 0.0)
+    try:
+        return market_regime.alt_basket_tape_activity(
+            force=True, blocklist=tuple(blocklist or ()))
+    finally:
+        uni_mod.get_universe = orig_universe
+        market_regime.fetch_hl_candles = orig_fetch
+        market_regime._alt_basket_cache = (None, 0.0)
+
+
+# ── Legacy flat config shape (backward compat — BTC variant only) ──────
 
 CFG_SHADOW = {"enabled": True, "shadow_mode": True, "vol_pct": 2.5, "drift_pct": 2.0}
 CFG_LIVE = {"enabled": True, "shadow_mode": False, "vol_pct": 2.5, "drift_pct": 2.0}
 
 
-def test_disabled_passes():
+def test_flat_disabled_passes():
     r = _run({"enabled": False}, _tape(0.5, 0.1))
     assert r == {"pass": True}
 
 
-def test_data_gap_never_blocks_even_when_live():
-    """A data gap can never block a trade — the fail-safe contract."""
+def test_flat_data_gap_never_blocks_even_when_live():
     r = _run(CFG_LIVE, None)
-    assert r == {"pass": True}
+    assert r["pass"] is True
+    assert r["variants"]["btc"]["reads"] is None  # gap visible, no opinion
 
 
-def test_quiet_tape_shadow_marker():
-    """Quiet tape + shadow mode: structurally passes, carries the marker."""
+def test_flat_quiet_shadow_marker():
     r = _run(CFG_SHADOW, _tape(0.8, 0.3))
     assert r["pass"] is True
     assert r.get("shadow_would_block") is True
-    assert "quiet_tape" in r["reason"]
+    assert "quiet_tape[btc]" in r["reason"]
     assert "0.80%" in r["reason"]  # vol in the reason (join/audit key)
 
 
-def test_quiet_tape_live_blocks():
+def test_flat_quiet_live_blocks():
     r = _run(CFG_LIVE, _tape(0.8, 0.3))
     assert r["pass"] is False
-    assert "quiet_tape" in r["reason"]
+    assert "quiet_tape[btc]" in r["reason"]
+    assert not r.get("shadow_would_block")
 
 
-def test_active_tape_passes_vol_above():
-    """Vol above the threshold → not quiet → pass (drift irrelevant)."""
+def test_flat_active_tape_passes_vol_above():
     r = _run(CFG_LIVE, _tape(3.0, 0.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
+    assert "reason" not in r
 
 
-def test_active_tape_passes_drift_above():
-    """Drift above the threshold → not quiet → pass (vol irrelevant)."""
+def test_flat_active_tape_passes_drift_above():
     r = _run(CFG_LIVE, _tape(0.5, 5.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
 
 
-def test_drift_sign_agnostic():
-    """|drift| — a down-tape with strong drift is ACTIVE, not quiet."""
+def test_flat_drift_sign_agnostic():
     r = _run(CFG_LIVE, _tape(0.5, -5.0))
-    assert r == {"pass": True}
+    assert r["pass"] is True
 
 
-def test_boundary_is_strict():
-    """vol == threshold or |drift| == threshold → NOT quiet (strict <)."""
-    r_at_vol = _run(CFG_LIVE, _tape(2.5, 0.0))
-    assert r_at_vol == {"pass": True}
-    r_at_drift = _run(CFG_LIVE, _tape(0.0, 2.0))
-    assert r_at_drift == {"pass": True}
-    r_just_below = _run(CFG_LIVE, _tape(2.49, 1.99))
-    assert r_just_below["pass"] is False
+def test_flat_boundary_is_strict():
+    assert _run(CFG_LIVE, _tape(2.5, 0.0))["pass"] is True
+    assert _run(CFG_LIVE, _tape(0.0, 2.0))["pass"] is True
+    assert _run(CFG_LIVE, _tape(2.49, 1.99))["pass"] is False
 
 
-def test_negative_thresholds_disable():
-    """vol_pct/drift_pct <= 0 → gate off (no opinion), never blocks."""
+def test_flat_negative_thresholds_disable():
     r = _run({"enabled": True, "shadow_mode": False, "vol_pct": 0, "drift_pct": 2.0},
              _tape(0.1, 0.1))
     assert r == {"pass": True}
 
 
-def test_default_thresholds_are_25_20():
-    """Omitted vol_pct/drift_pct fall back to the sweep's 2.5/2.0."""
-    r = _run({"enabled": True, "shadow_mode": False}, _tape(2.0, 1.5))
-    assert r["pass"] is False  # below both defaults
-    r2 = _run({"enabled": True, "shadow_mode": False}, _tape(3.0, 1.5))
-    assert r2 == {"pass": True}  # vol above default vol_pct
+def test_flat_default_thresholds_are_25_20():
+    assert _run({"enabled": True, "shadow_mode": False}, _tape(2.0, 1.5))["pass"] is False
+    assert _run({"enabled": True, "shadow_mode": False}, _tape(3.0, 1.5))["pass"] is True
 
 
-def test_side_irrelevant():
-    """The gate is side-independent — shorts get the same quiet-tape block."""
-    r_long = _run(CFG_LIVE, _tape(0.5, 0.2), _ctx(trade_side="long"))
-    r_short = _run(CFG_LIVE, _tape(0.5, 0.2), _ctx(trade_side="short"))
+def test_flat_side_irrelevant():
+    r_long = _run(CFG_LIVE, _tape(0.5, 0.2), ctx=_ctx(trade_side="long"))
+    r_short = _run(CFG_LIVE, _tape(0.5, 0.2), ctx=_ctx(trade_side="short"))
     assert r_long["pass"] is False
     assert r_short["pass"] is False
 
 
-def test_tape_activity_math_on_synthetic_candles():
-    """btc_tape_activity vol/drift math on a series with known per-bar returns.
+def test_flat_shape_never_fetches_alt():
+    """Legacy flat config must not trigger the alt-basket fetch."""
+    _run(CFG_LIVE, _tape(0.8, 0.3), alt_tape=_tape(0.8, 0.3))
+    assert _LAST_FETCHED["alt"] is False
+    assert _LAST_FETCHED["btc"] is True
 
-    251 closes built from exactly alternating ±0.5% log-returns (125 of each):
-      vol   = pstdev(returns)×sqrt(288)×100 = 0.005×16.9706×100 ≈ 8.485%
-      drift = last/first − 1 = exp(0) − 1 = 0 (pairs cancel)
-    """
-    import math
+
+# ── Multi-variant config shape ──────────────────────────────────────────
+
+BQT = {"enabled": True, "shadow_mode": False, "vol_pct": 2.5, "drift_pct": 2.0}
+ALTQ = {"enabled": True, "shadow_mode": True, "vol_pct": 4.5, "drift_pct": 2.0}
+# Shipped live cells (2026-09-11 owner call): BTC best-elig 1.5/2.0, ALT 4.5/2.0.
+BQT_LIVE = {"enabled": True, "shadow_mode": False, "vol_pct": 1.5, "drift_pct": 2.0}
+ALTQ_LIVE = {"enabled": True, "shadow_mode": False, "vol_pct": 4.5, "drift_pct": 2.0}
+
+
+def test_multi_btc_live_alt_shadow_btc_quiet_blocks():
+    """BTC live+quiet blocks (OR merge); alt also reads quiet but only accrues."""
+    r = _run({"btc": BQT, "alt": ALTQ}, _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["pass"] is False
+    assert r.get("shadow_would_block") is True
+    assert "quiet_tape[btc]" in r["reason"]
+    assert "quiet_tape[alt]" in r["reason"]
+    assert len(r["shadow_reasons"]) == 1
+    assert "quiet_tape[alt]" in r["shadow_reasons"][0]
+
+
+def test_multi_alt_live_quiet_blocks_even_when_btc_active():
+    """The alt variant has real live capability (parity with BTC)."""
+    r = _run({"btc": {**BQT}, "alt": {**ALTQ, "shadow_mode": False}},
+             _tape(3.0, 5.0), _tape(3.0, 1.0))
+    assert r["pass"] is False
+    assert "quiet_tape[alt]" in r["reason"]
+    assert "quiet_tape[btc]" not in r["reason"]
+    assert not r.get("shadow_would_block")
+
+
+def test_multi_both_shadow_never_blocks():
+    r = _run({"btc": {**BQT, "shadow_mode": True}, "alt": ALTQ},
+             _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["pass"] is True
+    assert r.get("shadow_would_block") is True
+    assert len(r["shadow_reasons"]) == 2
+    assert "quiet_tape[btc]" in r["shadow_reasons"][0]
+    assert "quiet_tape[alt]" in r["shadow_reasons"][1]
+
+
+def test_multi_alt_disabled_btc_alone():
+    r = _run({"btc": BQT, "alt": {"enabled": False, "vol_pct": 4.5, "drift_pct": 2.0}},
+             _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["pass"] is False  # BTC live+quiet still blocks
+    assert "quiet_tape[alt]" not in r["reason"]
+    assert _LAST_FETCHED["alt"] is False  # disabled variant never fetched
+
+
+def test_multi_alt_data_gap_never_blocks():
+    """Alt tape data gap → alt variant has no opinion; BTC alone decides."""
+    r = _run({"btc": {**BQT, "shadow_mode": True}, "alt": {**ALTQ, "shadow_mode": False}},
+             _tape(3.0, 5.0), None)
+    assert r["pass"] is True  # BTC active, alt no opinion
+    r2 = _run({"btc": BQT, "alt": {**ALTQ, "shadow_mode": False}},
+              _tape(1.0, 0.5), None)
+    assert r2["pass"] is False  # BTC LIVE+quiet still blocks
+    assert "quiet_tape[alt]" not in r2["reason"]
+    assert not r2.get("shadow_would_block")  # alt fired nothing to accrue
+
+
+def test_multi_neither_quiet_passes():
+    r = _run({"btc": BQT, "alt": {**ALTQ, "shadow_mode": False}},
+             _tape(3.0, 5.0), _tape(5.0, -7.0))
+    assert r["pass"] is True
+
+
+def test_multi_all_variants_disabled_passes():
+    r = _run({"btc": {"enabled": False}, "alt": {"enabled": False}},
+             _tape(0.5, 0.1), _tape(0.5, 0.1))
+    assert r == {"pass": True}
+
+
+# ── Merge semantics: "or" (default) vs "and" ────────────────────────────
+
+def test_multi_merge_default_is_or():
+    r = _run({"btc": BQT, "alt": ALTQ}, _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["merge"] == "or"
+    assert r["pass"] is False  # BTC live+quiet blocks under OR
+
+
+def test_multi_merge_invalid_falls_back_to_or():
+    r = _run({"btc": BQT, "alt": ALTQ, "merge": "xor"},
+             _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["merge"] == "or"
+    assert r["pass"] is False
+
+
+def test_multi_and_both_live_both_quiet_blocks():
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(1.0, 0.5), _tape(3.0, 1.0))
+    assert r["merge"] == "and"
+    assert r["pass"] is False
+    assert "quiet_tape[btc]" in r["reason"] and "quiet_tape[alt]" in r["reason"]
+    assert "released_by_merge" not in r
+
+
+def test_multi_and_btc_quiet_alt_loud_releases():
+    """The stalemate-ender: OR would block on BTC quiet; AND passes because
+    the alt tape is loud, and accrues the released counterfactual."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(1.2, 0.5), _tape(5.0, -6.6))
+    assert r["pass"] is True
+    assert r.get("released_by_merge") is True
+    # The reason still rides along (join key) even though the gate passed.
+    assert "quiet_tape[btc]" in r["reason"]
+    assert "quiet_tape[alt]" not in r["reason"]
+    assert len(r["released_reasons"]) == 1
+    assert "quiet_tape[btc]" in r["released_reasons"][0]
+
+
+def test_multi_and_btc_quiet_alt_gap_still_blocks():
+    """AND fail-safe: a data gap on one LIVE variant is a no-opinion — it
+    cannot release the other variant's quiet verdict (a broken alt feed
+    cannot silently revert to BTC-alone protection)."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(1.2, 0.5), None)
+    assert r["pass"] is False
+    assert "quiet_tape[btc]" in r["reason"]
+    assert "quiet_tape[alt]" not in r["reason"]
+
+
+def test_multi_and_btc_gap_alt_quiet_still_blocks():
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             None, _tape(3.0, 1.0))
+    assert r["pass"] is False
+    assert "quiet_tape[alt]" in r["reason"]
+    assert "quiet_tape[btc]" not in r["reason"]
+
+
+def test_multi_and_all_gap_passes_no_opinion():
+    """Both LIVE variants gap → no opinion at all → pass; the gaps are
+    visible in `variants` (reads=None), not silently dropped."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"}, None, None)
+    assert r["pass"] is True
+    assert r["variants"]["btc"]["reads"] is None
+    assert r["variants"]["alt"]["reads"] is None
+    assert "reason" not in r
+
+
+def test_multi_and_shadow_variant_does_not_merge():
+    """Under AND, a SHADOW variant never blocks: both quiet + alt shadow →
+    only BTC (the sole LIVE read) decides; alt accrues as would-block."""
+    r = _run({"btc": BQT_LIVE, "alt": {**ALTQ, "shadow_mode": True}, "merge": "and"},
+             _tape(1.2, 0.5), _tape(3.0, 1.0))
+    assert r["pass"] is False  # BTC live+quiet is the only LIVE read, quiet
+    assert r.get("shadow_would_block") is True
+    assert r["shadow_reasons"] and "quiet_tape[alt]" in r["shadow_reasons"][0]
+
+
+def test_multi_and_one_live_quiet_one_live_loud_releases_with_reasons():
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "and"},
+             _tape(3.0, 5.0), _tape(3.0, 1.0))  # BTC loud, ALT quiet
+    assert r["pass"] is True
+    assert r.get("released_by_merge") is True
+    assert "quiet_tape[alt]" in r["released_reasons"][0]
+
+
+def test_multi_or_btc_quiet_alt_loud_still_blocks():
+    """OR semantics unchanged: any LIVE quiet read vetoes the tape."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE, "merge": "or"},
+             _tape(1.2, 0.5), _tape(5.0, -6.6))
+    assert r["pass"] is False
+    assert "released_by_merge" not in r
+
+
+# ── Accrual instrumentation: variants / reads / released_by_merge ───────
+
+def test_variants_always_carried_when_tape_known():
+    """Loud tape: no reason, but the raw reads still ride along (the
+    individual gate variables for the ledger join)."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE}, _tape(3.0, 5.0), _tape(5.0, -6.6))
+    assert r["pass"] is True
+    assert "reason" not in r
+    assert r["merge"] == "or"
+    v = r["variants"]
+    assert v["btc"]["would_block"] is False and v["btc"]["live"] is True
+    assert v["btc"]["reads"] == {"vol": 3.0, "drift": 5.0}
+    assert v["alt"]["would_block"] is False
+    assert v["alt"]["reads"]["vol"] == 5.0
+    assert v["alt"]["reads"]["drift"] == -6.6
+
+
+def test_variants_gap_carries_null_reads():
+    """Data gap: the variant still appears in `variants` with reads=None,
+    so a gap is visible in the Trade result JSON (not silently dropped)."""
+    r = _run({"btc": BQT_LIVE, "alt": ALTQ_LIVE}, _tape(1.2, 0.5), None)
+    # BTC quiet+live under OR → blocked; alt gap visible with null reads.
+    assert r["pass"] is False
+    assert r["variants"]["btc"]["reads"]["vol"] == 1.2
+    assert r["variants"]["alt"]["reads"] is None
+
+
+def test_flat_shape_result_carries_merge_or():
+    r = _run(CFG_LIVE, _tape(0.8, 0.3))
+    assert r["merge"] == "or"
+    assert r["variants"]["btc"]["would_block"] is True
+    assert r["variants"]["btc"]["live"] is True
+
+
+# ── alt_basket_tape_activity: math + fail-safes (synthetic candles) ─────
+
+STEADY = [100.0 + i * 0.05 for i in range(250)]  # steady +1.24% tape
+
+
+def test_alt_index_equal_weight_math():
+    """Opposite 10% moves across two coins → equal-weight index is flat:
+    vol ≈ 0, drift ≈ 0. Both axes computed on the INDEX, not per-coin."""
+    up = [100.0] * 248 + [110.0] * 2   # +10% over the window
+    down = [100.0] * 248 + [90.0] * 2
+    tape = _alt_tape_on({"A": up, "B": down})
+    assert tape is not None
+    assert tape["vol"] < 0.5, tape
+    assert abs(tape["drift"]) < 0.5, tape
+
+
+def test_alt_index_steady_tape_near_zero_vol_expected_drift():
+    """A steady-drift tape has near-zero realized vol and the expected
+    drift — same independence contract as the BTC tape."""
+    tape = _alt_tape_on({"A": STEADY, "B": STEADY})
+    assert tape is not None
+    assert tape["vol"] < 0.05, tape
+    expected = (STEADY[-1] / STEADY[0] - 1) * 100
+    assert abs(tape["drift"] - expected) < 0.01, tape
+
+
+def test_alt_btc_excluded_from_basket():
+    """BTC is the measure, not the basket — it must be dropped even when
+    it is the highest-volume name."""
+    tape = _alt_tape_on({"BTC": STEADY, "A": STEADY, "B": STEADY})
+    assert tape is not None  # still has 2 alts
+    # a BTC-only + 1-alt universe has only one basket coin → no opinion
+    assert _alt_tape_on({"BTC": STEADY, "A": STEADY}) is None
+
+
+def test_alt_blocklist_respected():
+    """Blocklisted coins leave the basket; a blocked universe with <2 alts
+    → no opinion (None)."""
+    assert _alt_tape_on({"A": STEADY, "B": STEADY, "TON": STEADY},
+                        blocklist=("TON",)) is not None
+    # TON is the only non-blocklisted coin left → <2 basket coins → None
+    assert _alt_tape_on({"A": STEADY, "TON": STEADY},
+                        blocklist=("A",)) is None
+
+
+def test_alt_insufficient_history_returns_none():
+    short = [100.0] * 50  # < 100 bars in the window
+    assert _alt_tape_on({"A": short, "B": short}) is None
+
+
+def test_alt_universe_fetch_failure_returns_none():
     from hermes_trader.agents import market_regime
+    from hermes_trader.client import universe as uni_mod
 
-    class FakeCandle:
-        def __init__(self, c):
-            self.c = c
+    orig_universe = uni_mod.get_universe
+    orig_fetch = market_regime.fetch_hl_candles
+    uni_mod.get_universe = (lambda **kw: (_ for _ in ()).throw(RuntimeError("429")))
+    market_regime._alt_basket_cache = (None, 0.0)
+    try:
+        assert market_regime.alt_basket_tape_activity(force=True) is None
+    finally:
+        uni_mod.get_universe = orig_universe
+        market_regime.fetch_hl_candles = orig_fetch
+        market_regime._alt_basket_cache = (None, 0.0)
+
+
+# ── btc_tape_activity math (unchanged contract) ─────────────────────────
+
+def test_btc_tape_activity_math_on_synthetic_candles():
+    """251 closes from alternating ±0.5% log-returns:
+      vol = pstdev(returns)×sqrt(288)×100 ≈ 8.485%; drift = 0 (pairs cancel)."""
+    from hermes_trader.agents import market_regime
 
     s = 0.0
     closes = [100.0]
     for i in range(1, 251):
         s += 0.005 if i % 2 == 0 else -0.005
         closes.append(100.0 * math.exp(s))
-    candles = [FakeCandle(c) for c in closes]
+    candles = [_FakeCandle(c) for c in closes]
     orig = market_regime.fetch_hl_candles
     market_regime.fetch_hl_candles = (lambda coin, interval="5m", count=100, fresh=False: candles)
-    market_regime._tape_cache = (None, 0.0)  # reset module cache
+    market_regime._tape_cache = (None, 0.0)
     try:
         tape = market_regime.btc_tape_activity(force=True)
         assert tape is not None
@@ -174,57 +503,12 @@ def test_tape_activity_math_on_synthetic_candles():
         market_regime._tape_cache = (None, 0.0)
 
 
-def test_tape_activity_steady_tape_has_near_zero_vol():
-    """A steady-drift tape has near-zero realized vol (bar-to-bar variance is
-    ~0) and the expected drift — the two axes are independent."""
-    import math
+def test_btc_tape_activity_insufficient_history_returns_none():
     from hermes_trader.agents import market_regime
 
-    class FakeCandle:
-        def __init__(self, c):
-            self.c = c
-
-    closes = [100.0 + i * 0.01 for i in range(250)]
-    candles = [FakeCandle(c) for c in closes]
+    candles = [_FakeCandle(100.0)] * 50  # < _TAPE_MIN_BARS
     orig = market_regime.fetch_hl_candles
     market_regime.fetch_hl_candles = (lambda coin, interval="5m", count=100, fresh=False: candles)
-    market_regime._tape_cache = (None, 0.0)
-    try:
-        tape = market_regime.btc_tape_activity(force=True)
-        assert tape is not None
-        assert tape["vol"] < 0.01, tape  # steady tape ≈ 0 realized vol
-        assert abs(tape["drift"] - (closes[-1] / closes[0] - 1) * 100) < 0.01, tape
-    finally:
-        market_regime.fetch_hl_candles = orig
-        market_regime._tape_cache = (None, 0.0)
-
-
-def test_tape_activity_insufficient_history_returns_none():
-    from hermes_trader.agents import market_regime
-
-    class FakeCandle:
-        def __init__(self, c):
-            self.c = c
-
-    candles = [FakeCandle(100.0)] * 50  # < _TAPE_MIN_BARS
-    orig = market_regime.fetch_hl_candles
-    market_regime.fetch_hl_candles = (lambda coin, interval="5m", count=100, fresh=False: candles)
-    market_regime._tape_cache = (None, 0.0)
-    try:
-        assert market_regime.btc_tape_activity(force=True) is None
-    finally:
-        market_regime.fetch_hl_candles = orig
-        market_regime._tape_cache = (None, 0.0)
-
-
-def test_tape_activity_fetch_failure_returns_none():
-    from hermes_trader.agents import market_regime
-
-    def boom(coin, interval="5m", count=100, fresh=False):
-        raise RuntimeError("429")
-
-    orig = market_regime.fetch_hl_candles
-    market_regime.fetch_hl_candles = boom
     market_regime._tape_cache = (None, 0.0)
     try:
         assert market_regime.btc_tape_activity(force=True) is None
