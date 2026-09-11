@@ -1225,60 +1225,116 @@ def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     return {"pass": False, "reason": reason}
 
 
-def quiet_tape_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
-    """Quiet broad-tape entry gate (SHADOW by default, 2026-09-10).
-
-    Blocks a NEW entry when the BROAD tape (BTC, the proxy) is quiet:
-    trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| <
-    `drift_pct`. Motivation (scratch/_regime_bleed.py + _coin_vs_btc.py):
-    the 09-05/06/07 bleed (−$106.81 = 99% of the 30d loss) hit on the
-    quietest broad tape of the month — BTC trail24h vol 0.76–1.37% vs a
-    ~2.0% median — where a 100%-long 5x book at the then-10x notional
-    became a coin flip. Per-coin variants were measured and rejected
-    (alt vol median 8.1% vs BTC 2.1% — a coin-vol gate never fires; the
-    coin's own directional condition is already enforced by the
-    LLM/perception pipeline), so BTC is the "broad-tape-active" proxy.
-
-    Initial thresholds (vol 2.5 / drift 2.0) come from the 2D sweep
-    (scratch/_quiet_tape_sweep.py, n=516): the vol axis is the lever
-    (peak at v≈2.5; drift barely binds on the plateau) and the 2.5/2.0
-    cell is the tightest on the +$130 plateau (least over-blocking if
-    the OOS cohort surprises). This is a REGIME-FITTED PROXY, not a
-    regime-robust edge — the strict all-sub-window filter found no
-    qualifying cell — which is exactly why it ships shadow-first: the
-    would-block cohort must stay net-negative out-of-sample (incl. a
-    non-bleed regime week) before promotion. Owner call: build at 2.5/2.0
-    shadow 2026-09-10. WATCHLIST §B.17.
-
-    SHADOW MODE: with `shadow_mode` true (default, and how it ships) the
-    gate STRUCTURALLY returns pass=True and only carries a
-    `shadow_would_block` marker, which the executor logs loudly
-    (`[gate][SHADOW] quiet_tape WOULD HAVE BLOCKED …`) — the accrual
-    join key. Flip `shadow_mode: false` in .agent-config.json to promote.
-
-    Fail-safes (no-opinion pass): disabled; `btc_tape_activity()` returns
-    None (data gap — a gap can NEVER block a trade).
-    """
-    cfg = gate_cfg or {}
-    if not bool(cfg.get("enabled", False)):
-        return {"pass": True}
-    from hermes_trader.agents.market_regime import btc_tape_activity
-    tape = btc_tape_activity()
+def _quiet_tape_variant(
+    name: str,
+    label: str,
+    vcfg: Dict[str, Any],
+    fetch_tape,
+) -> Optional[Dict[str, Any]]:
+    """Evaluate ONE quiet_tape variant. Returns None when the variant is
+    disabled or has no opinion (data gap / non-positive thresholds / active
+    tape — a gap can never block a trade), else a GateResult whose reason
+    carries the `quiet_tape[<name>]` prefix (the per-variant join/audit key)."""
+    if not bool(vcfg.get("enabled", False)):
+        return None
+    tape = fetch_tape()
     if tape is None:
-        return {"pass": True}
-    vol_pct = float(cfg.get("vol_pct", 2.5) or 0.0)
-    drift_pct = float(cfg.get("drift_pct", 2.0) or 0.0)
+        return None
+    vol_pct = float(vcfg.get("vol_pct", 2.5) or 0.0)
+    drift_pct = float(vcfg.get("drift_pct", 2.0) or 0.0)
     if vol_pct <= 0 or drift_pct <= 0:
-        return {"pass": True}
-    quiet = tape["vol"] < vol_pct and abs(tape["drift"]) < drift_pct
-    if not quiet:
-        return {"pass": True}
-    reason = (f"quiet_tape (broad tape inactive: BTC trail24h vol "
+        return None
+    if not (tape["vol"] < vol_pct and abs(tape["drift"]) < drift_pct):
+        return None
+    reason = (f"quiet_tape[{name}] (broad tape inactive: {label} trail24h vol "
               f"{tape['vol']:.2f}% < {vol_pct:.2f}% AND |drift| "
               f"{abs(tape['drift']):.2f}% < {drift_pct:.2f}%)")
-    if bool(cfg.get("shadow_mode", True)):
+    if bool(vcfg.get("shadow_mode", True)):
         return {"pass": True, "reason": reason, "shadow_would_block": True}
     return {"pass": False, "reason": reason}
+
+
+def quiet_tape_gate(
+    ctx: GateContext,
+    gate_cfg: Dict[str, Any],
+    coin_blocklist: Optional[List[str]] = None,
+) -> GateResult:
+    """Quiet broad-tape entry gate — multi-variant (2026-09-10/11, SHADOW-first).
+
+    Each VARIANT blocks a NEW entry when its broad-tape read is quiet:
+    trailing-24h realized vol < `vol_pct` AND |trailing-24h drift| <
+    `drift_pct`. Two variants ship:
+
+      `btc` — the BTC proxy (the original gate, 2026-09-10). Motivation
+        (scratch/_regime_bleed.py + _coin_vs_btc.py): the 09-05/06/07 bleed
+        (−$106.81 = 99% of the 30d loss) hit on the quietest broad tape of
+        the month — BTC trail24h vol 0.76–1.37% vs a ~2.0% median — where a
+        100%-long 5x book became a coin flip. Thresholds 2.5/2.0 from
+        scratch/_quiet_tape_sweep.py (n=516): the vol axis is the lever,
+        2.5/2.0 the tightest cell on the plateau.
+
+      `alt` — the alt-basket proxy (2026-09-11): an equal-weight index of
+        the top-N main-dex alts by 24h volume (BTC excluded, vol-floored) —
+        the tape the bot actually trades, which on a quiet-BTC day can be
+        loud (2026-09-11: BTC vol 1.74% / drift −1.9% = quiet, while the
+        basket read 4.2% / −6.6% = active). Thresholds 4.5/2.0 from
+        scratch/_quiet_tape_alt_sweep_corrected.py (same 516 pairs / 3
+        sub-windows as the BTC sweep, corrected sub-window criterion):
+        vol<4.5 is the conservative vol row with a net-negative blocked
+        cohort; 4.5/2.0 is the tightest drift cell on that row (n=50,
+        blocked cohort −$52.20, avg win +$1.04 vs avg loss −$3.48).
+        Shadow-first.
+
+    Config shapes (both accepted, hot-reloaded):
+      flat (legacy, BTC-only):  {"enabled":…, "shadow_mode":…, "vol_pct":…, "drift_pct":…}
+      multi-variant:           {"btc": {…}, "alt": {…}}   — per-variant enabled/shadow_mode/thresholds
+
+    Merge semantics: the entry is BLOCKED iff any LIVE (shadow_mode false)
+    variant reads quiet. A shadow variant never blocks — it carries
+    `shadow_would_block` + `shadow_reasons` (one reason per firing shadow
+    variant), which the executor logs loudly (`[gate][SHADOW] quiet_tape
+    WOULD HAVE BLOCKED …: quiet_tape[alt] (…)` — the accrual join key). A
+    data gap on ANY variant is a no-opinion pass for that variant; a gap
+    can never block a trade.
+    """
+    cfg = gate_cfg or {}
+    if "btc" in cfg or "alt" in cfg:
+        variants = {"btc": cfg.get("btc") or {}, "alt": cfg.get("alt") or {}}
+    else:
+        # Legacy flat shape → the BTC variant only.
+        variants = {"btc": cfg, "alt": {}}
+    if not any(bool(v.get("enabled", False)) for v in variants.values()):
+        return {"pass": True}
+    from hermes_trader.agents.market_regime import (
+        alt_basket_tape_activity,
+        btc_tape_activity,
+    )
+    # The alt basket respects the operator's coin_blocklist (same list the
+    # coin_filter gate applies) so a blocked name can't skew the tape read.
+    try:
+        _blocklist = tuple(coin_blocklist or ())
+    except Exception:
+        _blocklist = ()
+    fetchers = {
+        "btc": (lambda: btc_tape_activity(), "BTC"),
+        "alt": (lambda: alt_basket_tape_activity(blocklist=_blocklist), "alt-basket"),
+    }
+    fired = []
+    for name in ("btc", "alt"):
+        fetch, label = fetchers[name]
+        r = _quiet_tape_variant(name, label, variants.get(name) or {}, fetch)
+        if r is not None:
+            fired.append((name, r))
+    if not fired:
+        return {"pass": True}
+    blocked = any(not r["pass"] for _, r in fired)
+    shadow = [r for _, r in fired if r.get("shadow_would_block")]
+    reason = " ; ".join(r["reason"] for _, r in fired)
+    out: Dict[str, Any] = {"pass": not blocked, "reason": reason}
+    if shadow:
+        out["shadow_would_block"] = True
+        out["shadow_reasons"] = [r["reason"] for r in shadow]
+    return out
 
 
 def eval_all_gates(
@@ -1399,7 +1455,9 @@ def eval_all_gates(
     # the would-block marker accrues until shadow_mode is flipped. A data gap
     # (btc_tape_activity() → None) can never block a trade.
     results["quiet_tape"] = quiet_tape_gate(
-        ctx, effective_config.get("quiet_tape_gate") or {})
+        ctx, effective_config.get("quiet_tape_gate") or {},
+        coin_blocklist=_cfg(effective_config, "coin_blocklist", []),
+    )
 
     block_reasons = []
     blocked = False

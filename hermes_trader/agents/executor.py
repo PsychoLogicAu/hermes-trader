@@ -1339,18 +1339,29 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
-    # Quiet broad-tape shadow gate (2026-09-10, WATCHLIST §B.17): the BTC
-    # trail24h vol/|drift| pair says the broad tape is quiet — on the 09-05/06/07
-    # bleed the whole book bled into exactly this regime. Same would-block
-    # pattern; the accrual lines join to the ledger by coin/side/ts.
+    # Quiet broad-tape shadow gate (2026-09-10, WATCHLIST §B.17): a quiet
+    # broad tape — trail24h vol/|drift| pair below the sweep thresholds —
+    # says the tape is inactive; on the 09-05/06/07 bleed the whole book
+    # bled into exactly this regime. MULTI-VARIANT (2026-09-11): the `btc`
+    # variant is the original proxy; the `alt` variant reads the alt-basket
+    # index (the tape actually traded) and ships shadow-first. Same
+    # would-block pattern; `shadow_reasons` carries the per-variant join
+    # keys (`quiet_tape[alt] (…)` / `quiet_tape[btc] (…)`).
     _qt = gate_output["results"].get("quiet_tape") or {}
     if _qt.get("shadow_would_block"):
+        _qt_reasons = _qt.get("shadow_reasons") or [_qt.get("reason")]
+        if _qt.get("pass"):
+            _qt_suffix = "NOT blocking (shadow mode)"
+        else:
+            _qt_suffix = ("shadow variant(s) would ALSO block — the entry is "
+                          "already blocked by a live variant (see gate reasons)")
         logger.warning(
             f"[gate][SHADOW] quiet_tape WOULD HAVE BLOCKED "
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
-            f"{analysis.get('composite_score', 0):.1f}): {_qt.get('reason')} — "
-            f"NOT blocking (shadow mode)")
+            f"{analysis.get('composite_score', 0):.1f}): "
+            f"{'; '.join(str(x) for x in _qt_reasons)} — "
+            f"{_qt_suffix}")
 
     # TimesFM mirror-leg shadow accruals: the timesfm-alone per-forecaster
     # counterfactuals (the AND leg is the forecast_agreement_veto line
