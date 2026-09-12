@@ -95,7 +95,8 @@ def _call_primary(captured, monkeypatch):
             research._async_do_call("k", "http://x/v1", "m", "S", "U"))
     finally:
         loop.close()
-    assert out == "ok"
+    # No `timings` in the fake response -> server_ms is None (fail-open).
+    assert out == ("ok", None)
     return captured["json"]
 
 

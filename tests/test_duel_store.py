@@ -488,7 +488,7 @@ def test_research_post_uses_llm_max_tokens(monkeypatch):
     try:
         out = loop.run_until_complete(
             research._async_do_call("k", "http://x/v1", "m", "S", "U"))
-        assert out == "ok"
+        assert out == ("ok", None)
         assert captured["json"]["max_tokens"] == 8192
         monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
         loop.run_until_complete(
@@ -578,7 +578,8 @@ def test_duel_retries_once_on_timeout(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER", timeout_s=0.5)
-    assert out == "recovered"
+    # No `timings` in the fake response -> server_ms is None (fail-open).
+    assert out == ("recovered", None)
     assert calls["n"] == 2  # first attempt timed out, exactly one retry
 
 
@@ -601,7 +602,7 @@ def test_duel_no_retry_on_second_timeout_and_never_raises(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER", timeout_s=0.5)
-    assert out == ""
+    assert out == ("", None)
 
 
 def test_duel_non_timeout_failure_loud_and_no_retry(monkeypatch, caplog):
@@ -625,7 +626,7 @@ def test_duel_non_timeout_failure_loud_and_no_retry(monkeypatch, caplog):
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     with caplog.at_level("WARNING", logger="hermes_trader.agents.duel_store"):
         out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
-    assert out == ""
+    assert out == ("", None)
     assert calls["n"] == 1  # no retry for non-timeout faults
     assert any("duelist call failed" in r.message for r in caplog.records)
 
@@ -655,11 +656,17 @@ def test_duel_timeout_loud_log(monkeypatch, caplog):
 
 def test_primary_call_ai_retries_once_on_timeout(monkeypatch):
     """_call_ai must survive a timeout, retry ONCE, and return the recovered
-    text — and still return "" (never raise) when both attempts time out.
-    This is the primary path's half of the 2026-08-27 single-retry fix."""
+    (text, server_ms) tuple — and still return ("", None) (never raise) when
+    both attempts time out. This is the primary path's half of the
+    2026-08-27 single-retry fix, now extended with the server-reported
+    processing time (the response's `timings` block)."""
     import httpx
     calls = {"n": 0}
-    body = {"choices": [{"message": {"content": "primary-ok"}}]}
+    body = {
+        "choices": [{"message": {"content": "primary-ok"}}],
+        # llama.cpp-style timings: server_processing_ms = prompt + predicted.
+        "timings": {"prompt_ms": 12.0, "predicted_ms": 2500.0},
+    }
 
     class R:
         status_code = 200
@@ -686,15 +693,16 @@ def test_primary_call_ai_retries_once_on_timeout(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     out = research._call_ai("SYS", "USER", api_key="k",
                             base_url="http://x/v1", model="m")
-    assert out == "primary-ok"
+    # (recovered text, server-reported processing time from `timings`)
+    assert out == ("primary-ok", 2512)
     assert calls["n"] == 2
 
 
 def test_primary_call_ai_never_raises_on_timeout(monkeypatch, caplog):
-    """Both attempts time out -> _call_ai returns "" (NOT an exception) and
-    logs the terminal 'TIMED OUT on both attempts' WARNING. The caller
-    (research_coin) relies on _call_ai never raising so a slow/dead LLM
-    degrades to PASS-ai_down rather than crashing the worker."""
+    """Both attempts time out -> _call_ai returns ("", None) (NOT an
+    exception) and logs the terminal 'TIMED OUT on both attempts' WARNING.
+    The caller (research_coin) relies on _call_ai never raising so a
+    slow/dead LLM degrades to PASS-ai_down rather than crashing the worker."""
     import httpx
 
     class FakeClient:
@@ -712,7 +720,7 @@ def test_primary_call_ai_never_raises_on_timeout(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="hermes_trader.agents.research"):
         out = research._call_ai("SYS", "USER", api_key="k",
                                 base_url="http://x/v1", model="m")
-    assert out == ""
+    assert out == ("", None)
     assert any("both attempts" in r.message for r in caplog.records)
 
 
@@ -748,7 +756,7 @@ def test_resolve_finds_matching_perception(_isolated_duel_file):
 
 def test_call_duelist_returns_empty_without_key(monkeypatch):
     monkeypatch.setattr(research, "_async_do_call", None)  # must not be reached
-    assert ds.call_duelist("", "http://x", "m", "s", "u") == ""
+    assert ds.call_duelist("", "http://x", "m", "s", "u") == ("", None)
 
 
 def test_call_duelist_posts_same_prompt(monkeypatch):
@@ -782,7 +790,8 @@ def test_call_duelist_posts_same_prompt(monkeypatch):
     import httpx
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     out = ds.call_duelist("dk", "http://duel.test/v1", "m", "SYS", "USER")
-    assert out == "x"
+    # No `timings` in the fake response -> server_ms is None (fail-open).
+    assert out == ("x", None)
     assert captured["url"] == "http://duel.test/v1/chat/completions"
     assert captured["json"]["messages"] == [
         {"role": "system", "content": "SYS"},
@@ -802,7 +811,7 @@ def test_call_duelist_swallows_failures(monkeypatch):
             raise AssertionError("should not enter")
 
     monkeypatch.setattr(httpx, "AsyncClient", BoomClient)
-    assert ds.call_duelist("dk", "http://duel.test/v1", "m", "s", "u") == ""
+    assert ds.call_duelist("dk", "http://duel.test/v1", "m", "s", "u") == ("", None)
 
 
 # ── P&L attribution math ───────────────────────────────────────────────────
@@ -851,6 +860,31 @@ def test_latency_stats():
     assert s2["median_ms"] == 200.0
 
 
+# ── server_processing_ms (the queue-free latency source) ──────────────────
+
+def test_server_processing_ms_from_timings():
+    """The queue-free processing time is prompt_ms + predicted_ms (the
+    llama.cpp `timings` block), as an int ms."""
+    data = {"timings": {"prompt_ms": 33.0, "predicted_ms": 2131.1,
+                        "predicted_n": 87}}
+    assert ds.server_processing_ms(data) == 2164  # round(2164.1)
+
+
+def test_server_processing_ms_fail_open():
+    """Any absent / malformed shape degrades to None (never raises) — the
+    OpenRouter / streaming case where `timings` isn't sent."""
+    assert ds.server_processing_ms({}) is None                       # no timings
+    assert ds.server_processing_ms({"choices": []}) is None          # no timings key
+    assert ds.server_processing_ms(None) is None                     # not a dict
+    assert ds.server_processing_ms("text") is None
+    assert ds.server_processing_ms({"timings": "not-a-dict"}) is None
+    assert ds.server_processing_ms({"timings": {}}) is None          # zero total
+    assert ds.server_processing_ms({"timings": {"prompt_ms": None,
+                                                "predicted_ms": None}}) is None
+    # only one half present still yields that half's value
+    assert ds.server_processing_ms({"timings": {"predicted_ms": 500.0}}) == 500
+
+
 # ── aggregate report ───────────────────────────────────────────────────────
 
 def test_aggregate_join_and_scoring(monkeypatch, _isolated_duel_file):
@@ -860,11 +894,13 @@ def test_aggregate_join_and_scoring(monkeypatch, _isolated_duel_file):
     ds.record_duel(_duel_row(perception_id="pid-1", coin="BTC",
                              primary_verdict="LONG", duelist_verdict="LONG",
                              duelist_side="long",
-                             primary_ms=100, duelist_ms=200))
+                             primary_ms=100, duelist_ms=200,
+                             primary_server_ms=80, duelist_server_ms=180))
     ds.record_duel(_duel_row(perception_id="pid-2", coin="ETH",
                              primary_verdict="LONG", duelist_verdict="SHORT",
                              duelist_side="short",
-                             primary_ms=200, duelist_ms=300))
+                             primary_ms=200, duelist_ms=300,
+                             primary_server_ms=150, duelist_server_ms=260))
     # realized closes: pid-1 won +10 (duelist concurs → +10); pid-2 lost -8
     # (duelist opposed → +8); a third close predates the duelist (no row).
     memory.record_close({
@@ -900,10 +936,15 @@ def test_aggregate_join_and_scoring(monkeypatch, _isolated_duel_file):
     assert r["duelist_if_live"]["realized_pnl_usd"] == 18.0
     assert r["duelist_if_live"]["closes"] == 2
     assert r["duelist_if_live"]["wins"] == 2
-    # latency is aggregated from the rows' *_ms fields
+    # latency is aggregated from the rows' *_ms fields (wall clock)
     assert r["latency"]["primary"] == {"n": 2, "avg_ms": 150.0,
                                        "median_ms": 150.0, "max_ms": 200.0}
     assert r["latency"]["duelist"]["n"] == 2 and r["latency"]["duelist"]["avg_ms"] == 250.0
+    # ...and from the *_server_ms fields (queue-free server processing)
+    assert r["latency"]["primary_server"] == {"n": 2, "avg_ms": 115.0,
+                                              "median_ms": 115.0, "max_ms": 150}
+    assert r["latency"]["duelist_server"]["n"] == 2
+    assert r["latency"]["duelist_server"]["avg_ms"] == 220.0
 
 
 def test_aggregate_latency_tolerates_legacy_rows(monkeypatch, _isolated_duel_file):
@@ -923,14 +964,20 @@ def test_aggregate_latency_tolerates_legacy_rows(monkeypatch, _isolated_duel_fil
     assert r["latency"]["primary"]["avg_ms"] == 120.0
     assert r["latency"]["duelist"]["n"] == 1
     assert r["latency"]["duelist"]["avg_ms"] == 340.0
+    # the *_server_ms fields are absent on BOTH rows here -> excluded (n=0),
+    # mirroring the pre-server-shipping / no-`timings` endpoints
+    assert r["latency"]["primary_server"]["n"] == 0
+    assert r["latency"]["duelist_server"]["n"] == 0
 
 
 # ── research() integration ─────────────────────────────────────────────────
 
-def _patch_research_network(monkeypatch, primary_text, duelist_text):
+def _patch_research_network(monkeypatch, primary_text, duelist_text,
+                            primary_server_ms=None, duelist_server_ms=None):
     """Patch every external touch point in research(): candle fetch, account
     state, funding/news, and user-message assembly (the latter hides the
-    _signals_block/_chronos_block network calls inside it)."""
+    _signals_block/_chronos_block network calls inside it). The two LLM fakes
+    return the production (text, server_ms) tuples."""
     monkeypatch.setattr(research, "fetch_hl_candles", lambda coin, tf, n: _candles())
     monkeypatch.setattr(research, "resolve_user_address", lambda: None)
     monkeypatch.setattr(research, "_fetch_funding_rate", lambda coin: "N/A")
@@ -943,7 +990,7 @@ def _patch_research_network(monkeypatch, primary_text, duelist_text):
         assert system_prompt == "SYS"
         assert user_message == "USER-PROMPT"
         time.sleep(0.02)  # measurable wall time for the primary_ms assert
-        return primary_text
+        return primary_text, primary_server_ms
 
     monkeypatch.setattr(research, "_call_ai", fake_call_ai)
 
@@ -952,7 +999,7 @@ def _patch_research_network(monkeypatch, primary_text, duelist_text):
         assert system_prompt == "SYS"  # same prompt, both models
         assert user_message == "USER-PROMPT"
         time.sleep(0.05)  # slower than the primary, so duelist_ms > primary_ms
-        return duelist_text
+        return duelist_text, duelist_server_ms
 
     # research.py binds call_duelist at import (from duel_store import ...),
     # so patch the NAME IN THE research module — patching duel_store.call_duelist
@@ -964,9 +1011,12 @@ def test_research_records_duel_row_when_enabled(
         monkeypatch, _isolated_duel_file, _duelist_on, _session_log, caplog):
     import logging
     caplog.set_level(logging.DEBUG)
+    # faked server-reported processing times: duelist's is smaller than its
+    # wall time (the queue-wait gap), primary's is smaller than its wall too.
     _patch_research_network(monkeypatch,
                             'PASS\n{"verdict":"PASS","confidence":0.5}',
-                            'SHORT setup\n{"verdict":"SHORT","confidence":0.7,"side":"short"}')
+                            'SHORT setup\n{"verdict":"SHORT","confidence":0.7,"side":"short"}',
+                            primary_server_ms=30, duelist_server_ms=40)
 
     perception = {"id": "pid-int", "coin": "BTC", "type": "perp", "mid": 100.0,
                   "composite_score": 40.0, "triggers": []}
@@ -992,8 +1042,16 @@ def test_research_records_duel_row_when_enabled(
     assert rows[0]["duelist_ms"] > rows[0]["primary_ms"]  # faked slower
     assert duel_events[0]["primary_ms"] == rows[0]["primary_ms"]
     assert duel_events[0]["duelist_ms"] == rows[0]["duelist_ms"]
+    # and the server-reported (queue-free) processing time rides along too
+    assert rows[0]["primary_server_ms"] == 30
+    assert rows[0]["duelist_server_ms"] == 40
+    assert duel_events[0]["primary_server_ms"] == 30
+    assert duel_events[0]["duelist_server_ms"] == 40
     assert any("[duel] BTC:" in r.message and "SPLIT" in r.message
                for r in caplog.records)
+    # the log line carries the server time so the queue gap is visible
+    assert any("ms srv" in r.message for r in caplog.records
+               if "[duel] BTC:" in r.message)
 
 
 def test_research_dormant_without_duelist(monkeypatch, _isolated_duel_file,
@@ -1031,7 +1089,8 @@ def test_research_survives_duelist_outage(monkeypatch, _isolated_duel_file,
     monkeypatch.setattr(research, "_fetch_news", lambda coin: "no news")
     monkeypatch.setattr(research, "_build_user_message", lambda *a, **k: "USER-PROMPT")
     monkeypatch.setattr(research, "build_system_prompt", lambda *a, **k: "SYS")
-    monkeypatch.setattr(research, "_call_ai", lambda sp, um, **kw: 'PASS\n{"verdict":"PASS","confidence":0.9}')
+    monkeypatch.setattr(research, "_call_ai",
+                        lambda sp, um, **kw: ('PASS\n{"verdict":"PASS","confidence":0.9}', None))
 
     def boom(*a, **k):
         raise RuntimeError("duelist down")

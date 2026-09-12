@@ -24,6 +24,7 @@ from hermes_trader.agents.duel_store import (
     effective_primary_max_tokens,
     effective_primary_model,
     record_duel,
+    server_processing_ms,
     slot_get,
 )
 from hermes_trader.agents.memory import memory
@@ -747,8 +748,13 @@ def _call_ai(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
-) -> str:
+) -> tuple:
     """Call the LLM API (runs the async client in a fresh event loop).
+
+    Returns ``(text, server_ms)`` — the raw response text plus the model
+    server's self-reported processing time (``server_processing_ms`` from the
+    response's ``timings`` block; None when the backend doesn't send it) —
+    with ``("", None)`` on any failure.
 
     Endpoint resolution: explicit args win, otherwise the primary LLM_* env
     vars. The duelist (duel_store.call_duelist) uses its own LLM_DUEL_* values
@@ -766,7 +772,7 @@ def _call_ai(
 
     if not api_key:
         logger.warning("[research] LLM_API_KEY not set — returning empty response")
-        return ""
+        return "", None
 
     loop = asyncio.new_event_loop()
     try:
@@ -792,13 +798,13 @@ def _call_ai(
                 f"[research] LLM call TIMED OUT on both attempts (~240s total) — "
                 f"coin defaults to PASS ai_down this cycle"
             )
-            return ""
+            return "", None
     except Exception as e:  # noqa: BLE001 — research worker must survive any LLM fault
         # Non-timeout fault (ConnectionError to a dead endpoint, bad JSON,
         # …). LOUD: previously these returned "" via the same silent path
         # as a 402 — a dead LLM endpoint looked like "no setups".
         logger.warning(f"[research] LLM call failed (non-fatal): {type(e).__name__}: {e}")
-        return ""
+        return "", None
     finally:
         loop.close()
 
@@ -811,6 +817,7 @@ def _duelist_verdict(
     primary_verdict: str,
     primary_confidence: float,
     primary_ms: int = 0,
+    primary_server_ms: int | None = None,
     held_coins: set | None = None,
 ) -> Dict[str, Any] | None:
     """Run the A/B duelist: the SAME prompt to the second model, recorded but
@@ -833,12 +840,12 @@ def _duelist_verdict(
             return None
         cfg = duelist_config()
         _dl_t0 = time.monotonic()
-        dl_text = call_duelist(cfg["api_key"], cfg["base_url"], cfg["model"],
-                               system_prompt, user_message,
-                               max_tokens=cfg["max_tokens"])
+        dl_text, dl_server_ms = call_duelist(cfg["api_key"], cfg["base_url"], cfg["model"],
+                                             system_prompt, user_message,
+                                             max_tokens=cfg["max_tokens"])
         duelist_ms = int((time.monotonic() - _dl_t0) * 1000)
         # Empty text = the duelist call failed (402/429/timeout — call_duelist
-        # swallows errors and returns ""). parse_verdict would tag it
+        # swallows errors and returns ("", None)). parse_verdict would tag it
         # verdict=PASS/ai_down, which would log a bogus "AGREE" row against a
         # primary that said PASS. A failed duelist is "no observation", not an
         # opinion — record nothing.
@@ -865,13 +872,24 @@ def _duelist_verdict(
             # (a faster model with equal accuracy can change cycle budget).
             "primary_ms": int(primary_ms or 0),
             "duelist_ms": duelist_ms,
+            # Server-reported processing time (ms, from the response's `timings`
+            # block — queue-free: excludes the time a request waited behind
+            # another on a serial server). None when the backend doesn't send
+            # `timings` (OpenRouter etc.); the wall-vs-server gap IS the queue
+            # wait. Both are recorded so the report can separate them.
+            "primary_server_ms": (int(primary_server_ms) if primary_server_ms is not None else None),
+            "duelist_server_ms": (int(dl_server_ms) if dl_server_ms is not None else None),
         }
         record_duel(row)
+        # The log line carries wall + server times for each model so an
+        # operator sees the queue-wait gap (wall − server) at a glance.
+        _p_srv = f", {row['primary_server_ms']}ms srv" if row["primary_server_ms"] is not None else ""
+        _d_srv = f", {row['duelist_server_ms']}ms srv" if row["duelist_server_ms"] is not None else ""
         logger.info(
             f"[duel] {coin}: primary {row['primary_model']} {primary_verdict} "
-            f"(conf {primary_confidence:.2f}, {row['primary_ms']}ms) "
+            f"(conf {primary_confidence:.2f}, {row['primary_ms']}ms{_p_srv}) "
             f"vs duelist {row['duelist_model']} {row['duelist_verdict']} "
-            f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms) — "
+            f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms{_d_srv}) — "
             f"{'AGREE' if row['duelist_verdict'] == primary_verdict else 'SPLIT'}"
         )
         return row
@@ -918,8 +936,13 @@ async def _async_do_call(
     model: str,
     system_prompt: str,
     user_message: str,
-) -> str:
+) -> tuple:
     """Async POST to the chat-completions endpoint.
+
+    Returns ``(text, server_ms)`` — the raw response text plus the model
+    server's self-reported processing time (``server_processing_ms`` from the
+    response's ``timings`` block; None when the backend doesn't send it) —
+    with ``("", None)`` on any non-success response.
 
     On a 402 that includes an affordability hint ("can only afford N tokens"),
     retries ONCE with max_tokens shrunk to the affordable budget. During the
@@ -981,9 +1004,12 @@ async def _async_do_call(
             if choices:
                 msg = choices[0].get("message", {})
                 text = msg.get("content") or msg.get("reasoning") or ""
-                return text
+                # server_ms from the response's own timings block (None when
+                # the backend doesn't report it) — the queue-free processing
+                # time the wall-clock timer can't separate from real work.
+                return (text, server_processing_ms(data))
             logger.error("[research] LLM returned 200 but no choices — empty response")
-            return ""
+            return "", None
         # LOUD failure. A non-200 (esp. 402 Payment Required = out of OpenRouter
         # credits, or 401/429) previously returned "" silently → parse_verdict
         # defaulted every coin to PASS conf 0.0, so a billing/API outage looked
@@ -993,7 +1019,7 @@ async def _async_do_call(
             f"[research] LLM call FAILED: HTTP {resp.status_code} — AI research is "
             f"DOWN, all verdicts will default to PASS until fixed. {body}"
         )
-    return ""
+    return "", None
 
 
 def parse_verdict(
@@ -1213,7 +1239,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     ai_t0 = time.monotonic()
-    ai_text = _call_ai(system_prompt, user_message)
+    ai_text, primary_server_ms = _call_ai(system_prompt, user_message)
     primary_ms = int((time.monotonic() - ai_t0) * 1000)
     # `held_coins` = the live open book (same `open_positions` fed to the
     # prompt), so a CLOSE on a coin we don't hold is deterministically
@@ -1226,11 +1252,13 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     # included) can never delay or break execution. `duelist_at_entry` is
     # carried into the analysis dict → executor's entry-context snapshot →
     # the outcome store's close row, which is the join the A/B report
-    # (duel_store.aggregate) keys on.
+    # (duel_store.aggregate) keys on. The primary's wall AND server-reported
+    # processing times ride along so the duel row can report the queue gap.
     duelist_row = _duelist_verdict(
         system_prompt, user_message, coin, perception,
         parsed["verdict"], parsed["confidence"],
         primary_ms=primary_ms,
+        primary_server_ms=primary_server_ms,
         held_coins=held_coins,
     )
     if duelist_row is not None:
@@ -1245,6 +1273,8 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 "agree": duelist_row["duelist_verdict"] == duelist_row["primary_verdict"],
                 "primary_ms": duelist_row["primary_ms"],
                 "duelist_ms": duelist_row["duelist_ms"],
+                "primary_server_ms": duelist_row["primary_server_ms"],
+                "duelist_server_ms": duelist_row["duelist_server_ms"],
             })
         except Exception:
             pass

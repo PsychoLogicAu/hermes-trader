@@ -266,7 +266,7 @@ def test_research_analysis_carries_model_that_answered(monkeypatch, agent_cfg):
     monkeypatch.setattr(research, "resolve_user_address", lambda: None)
     monkeypatch.setattr(research, "fetch_account_state", lambda *a, **k: {})
     monkeypatch.setattr(research, "_call_ai",
-                        lambda *a, **k: '{"verdict":"PASS","confidence":0.0}')
+                        lambda *a, **k: ('{"verdict":"PASS","confidence":0.0}', None))
     monkeypatch.setattr(research.memory, "record_analysis", lambda a: None)
     monkeypatch.setattr(research.memory, "update_equity", lambda e: None)
     monkeypatch.setattr(research.memory, "get_win_rate",
