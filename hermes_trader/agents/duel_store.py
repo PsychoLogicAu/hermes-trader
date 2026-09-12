@@ -318,6 +318,41 @@ def duel_file() -> str:
     return os.environ.get("HERMES_DUEL_FILE", _DUEL_FILE)
 
 
+def server_processing_ms(data: Any) -> Optional[int]:
+    """The model server's own processing time for a completion, in ms — or
+    None when it isn't reported.
+
+    llama.cpp-backed OpenAI-compatible servers (lemonade-server) attach a
+    non-standard ``timings`` object to every NON-STREAMED completion:
+    ``prompt_ms`` (prefill) + ``predicted_ms`` (generation). Their sum is the
+    actual inference work and EXCLUDES queue wait — a request queued behind
+    another on a serial server reports only its own work, not the time it
+    spent waiting. That is exactly what the wall-clock ``*_ms`` fields
+    cannot distinguish from real generation, which is why this exists.
+
+    Fail-open by design: OpenRouter and other OpenAI-compatible endpoints do
+    NOT send ``timings``, and streaming responses drop it — so any absent /
+    malformed shape degrades to None (the caller records nothing extra),
+    never an exception. The bot always sends ``stream: false``, so the full
+    block is present whenever the backend provides it. ``predicted_ms`` is a
+    PREDICTION (per-token speed × token count), not a stopwatch, but the
+    predicted speed matches observed generation within a few % in practice;
+    cross-checkable as ``usage.completion_tokens / predicted_per_second``.
+    """
+    try:
+        t = data.get("timings") if isinstance(data, dict) else None
+        if not isinstance(t, dict):
+            return None
+        prompt = float(t.get("prompt_ms") or 0.0)
+        gen = float(t.get("predicted_ms") or 0.0)
+        total = prompt + gen
+        if total <= 0:
+            return None
+        return int(round(total))
+    except Exception:  # noqa: BLE001 — fail-open (see docstring)
+        return None
+
+
 def duelist_config() -> Dict[str, Any]:
     """The duelist endpoint, resolved from the agent config's `llm` block
     with an env fallback (all read at CALL time).
@@ -407,17 +442,19 @@ def call_duelist(
     user_message: str,
     timeout_s: float = 120.0,
     max_tokens: Optional[int] = None,
-) -> str:
-    """POST the SAME prompt to the duelist endpoint. Returns the raw text (""
-    on any failure) and NEVER raises — a duelist outage must not cost the
-    primary's verdict. Same shape as research._async_do_call (402-affordability
-    retry included), with the 402 branch omitted: the duelist is a
-    shadow/eval consumer, so a paid-provider credit failure degrades to a
-    missing row rather than burning a shrunk call.
+) -> tuple:
+    """POST the SAME prompt to the duelist endpoint. Returns ``(text,
+    server_ms)`` — the raw text plus the model server's self-reported
+    processing time (None when the backend doesn't send ``timings``) —
+    with ``("", None)`` on ANY failure. NEVER raises: a duelist outage must
+    not cost the primary's verdict. Same shape as research._async_do_call
+    (402-affordability retry included), with the 402 branch omitted: the
+    duelist is a shadow/eval consumer, so a paid-provider credit failure
+    degrades to a missing row rather than burning a shrunk call.
     """
     if not api_key:
         logger.warning("[duel] duelist LLM_API_KEY not set — skipping duelist call")
-        return ""
+        return "", None
     if max_tokens is None:
         max_tokens = effective_duelist_max_tokens()
     loop = asyncio.new_event_loop()
@@ -441,7 +478,7 @@ def call_duelist(
             )
         else:
             logger.warning(f"[duel] duelist call failed (non-fatal): {type(e).__name__}: {e}")
-        return ""
+        return "", None
     finally:
         loop.close()
 
@@ -454,7 +491,11 @@ async def _async_duel_call(
     user_message: str,
     timeout_s: float,
     max_tokens: int,
-) -> str:
+) -> tuple:
+    """Returns ``(text, server_ms)``: the raw response text and the model
+    server's self-reported processing time (``server_processing_ms`` — None
+    when the backend doesn't send ``timings``). See the caller for the
+    failure contract (any fault yields ``("", None)``)."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
         url = base_url.rstrip("/") + "/chat/completions"
         # Per-request chat-template overrides (same contract as the primary
@@ -507,11 +548,15 @@ async def _async_duel_call(
             choices = data.get("choices", [])
             if choices:
                 msg = choices[0].get("message", {})
-                return msg.get("content") or msg.get("reasoning") or ""
+                # server_ms from the response's own timings block (None when
+                # the backend doesn't report it) — the queue-free processing
+                # time the wall-clock timer can't separate from real work.
+                return (msg.get("content") or msg.get("reasoning") or "",
+                        server_processing_ms(data))
             logger.error("[duel] duelist returned 200 but no choices")
-            return ""
+            return "", None
         logger.warning(f"[duel] duelist call FAILED: HTTP {resp.status_code} (non-fatal)")
-    return ""
+    return "", None
 
 
 # ── Report ─────────────────────────────────────────────────────────────────
@@ -631,6 +676,8 @@ def aggregate() -> Dict[str, Any]:
     dl_verdicts: Dict[str, int] = {}
     primary_ms: List[Optional[float]] = []
     duelist_ms: List[Optional[float]] = []
+    primary_server_ms: List[Optional[float]] = []
+    duelist_server_ms: List[Optional[float]] = []
     for d in duels:
         v = d.get("duelist_verdict")
         if v:
@@ -642,6 +689,11 @@ def aggregate() -> Dict[str, Any]:
                 splits += 1
         primary_ms.append(d.get("primary_ms"))
         duelist_ms.append(d.get("duelist_ms"))
+        # Server-reported processing time (queue-free). Absent on rows written
+        # before this shipped AND on endpoints that don't send `timings` —
+        # excluded from the stats, exactly like the wall-clock fields.
+        primary_server_ms.append(d.get("primary_server_ms"))
+        duelist_server_ms.append(d.get("duelist_server_ms"))
 
     return {
         "duel_calls": len(duels),
@@ -653,15 +705,22 @@ def aggregate() -> Dict[str, Any]:
         "primary": _model_stats(primary_pnls),
         "duelist_if_live": _model_stats(duelist_pnls),
         "duelist_verdicts": dl_verdicts,
-        "latency": {"primary": _latency_stats(primary_ms),
-                    "duelist": _latency_stats(duelist_ms)},
+        "latency": {
+            "primary": _latency_stats(primary_ms),
+            "duelist": _latency_stats(duelist_ms),
+            # wall minus server ≈ queue wait + transport (the distortion the
+            # wall-only numbers can't show on a serial server under load).
+            "primary_server": _latency_stats(primary_server_ms),
+            "duelist_server": _latency_stats(duelist_server_ms),
+        },
     }
 
 
-def _latency_line(label: str, s: Dict[str, Any]) -> str:
+def _latency_line(label: str, s: Dict[str, Any], kind: str = "wall") -> str:
     if not s["n"]:
-        return f"  {label:<10} latency  --  (no *_ms fields recorded yet)"
-    return (f"  {label:<10} latency  avg {s['avg_ms']:>8.1f} ms   "
+        return (f"  {label:<10} {kind:6}  --  "
+                f"(no {'*_server_ms' if kind == 'server' else '*_ms'} fields recorded yet)")
+    return (f"  {label:<10} {kind:6}  avg {s['avg_ms']:>8.1f} ms   "
             f"median {s['median_ms']:>8.1f} ms   max {s['max_ms']:>9.1f} ms   "
             f"(n={s['n']})")
 
@@ -680,8 +739,15 @@ def print_report() -> None:
     else:
         print(f"{a['rate'] * 100:.0f}% agree")
     print(f"  duelist verdict mix: {r['duelist_verdicts'] or '{}'}")
-    print(_latency_line("primary", r["latency"]["primary"]))
-    print(_latency_line("duelist", r["latency"]["duelist"]))
+    # Wall-clock (submit→retrieve; includes queue wait on a serial server)
+    # AND server-reported processing time (queue-free, from the response's
+    # `timings`). The gap between the two is the queue-wait distortion the
+    # original wall-only numbers hid.
+    lat = r["latency"]
+    print(_latency_line("primary", lat["primary"], "wall"))
+    print(_latency_line("duelist", lat["duelist"], "wall"))
+    print(_latency_line("primary", lat["primary_server"], "server"))
+    print(_latency_line("duelist", lat["duelist_server"], "server"))
     if r["closes_with_duelist"] == 0:
         print("\n  No realized trades carry a duelist verdict yet — the P&L table")
         print("  fills in as trades opened since the duelist shipped get closed.")
