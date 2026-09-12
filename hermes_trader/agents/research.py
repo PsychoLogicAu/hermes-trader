@@ -700,9 +700,12 @@ def _build_user_message(
     position_block = (
         f"Open positions (do not re-enter these; a CLOSE verdict applies ONLY to "
         f"{coin} itself, never to any other listed position; CLOSE only if "
-        f"{coin}'s own structure flipped — for THIS coin also weigh the age and "
-        f"best-move annotation: a young bag that has barely moved from entry is "
-        f"going nowhere and should be CLOSED rather than nursed): "
+        f"{coin}'s own structure flipped — for THIS coin weigh the PnL annotation: "
+        f"'best move' is the one-way peak since entry, 'now' is the live PnL vs "
+        f"entry and is the number that matters for a CLOSE call. A held position "
+        f"whose 'now' is at or below entry (roughly 0% or negative) is not doing "
+        f"its job and should be CLOSED rather than nursed — 'barely moved' means "
+        f"no progress, it does not mean it is safe to keep): "
         + ", ".join(f"{p['coin']} {p['side']}{_held_annotation(p['coin'], p['side'])}"
                     for p in open_positions)
         if open_positions

@@ -2987,6 +2987,33 @@ def test_held_annotation_no_now_when_no_price_anywhere():
     assert "now " not in msg
 
 
+def test_held_position_block_instruction_anchors_close_on_now():
+    """A2: the held-position CLOSE instruction must key off the live 'now' PnL,
+    not the one-way peak. The 2026-09-05 'young bag that has barely moved ...
+    should be CLOSED rather than nursed' framing read the OPPOSITE of its intent
+    on a loser — VVV 2026-09-11 showed 'best move +0.2%' while sitting at -5%,
+    and the model cited the +0.2% as 'no adverse structure'. The instruction now
+    (a) names 'now' as the number that matters for a CLOSE call, and (b) makes
+    explicit that 'barely moved' = no progress, not safe-to-keep."""
+    from hermes_trader.agents.research import _build_user_message
+    msg = _build_user_message(
+        "BLUR", {"type": "perp", "mid": 1.0, "composite_score": 33, "triggers": []},
+        {"last_close": 1.0}, {"last_close": 1.0}, {"last_close": 1.0},
+        "0.001%/hr", "no news", 300.0,
+        [{"coin": "VVV", "side": "long", "size_usd": 364.0}], "LIVE",
+    )
+    # The instruction line is the text between "Open positions (" and the
+    # ": <position list)" terminator.
+    start = msg.find("Open positions (")
+    end = msg.find("): VVV long")  # instruction ends, position list begins
+    block = msg[start:end]
+    assert "is the number that matters for a CLOSE call" in block
+    assert "no progress, it does not mean it is safe to keep" in block
+    # The old self-defeating 'young bag that has barely moved ... going nowhere'
+    # framing must be gone.
+    assert "young bag that has barely moved" not in block
+
+
 def test_parse_verdict_regex_fallback_midtext():
     """JSON not on the last line is recovered by the regex fallback."""
     from hermes_trader.agents.research import parse_verdict
