@@ -2877,7 +2877,10 @@ def test_build_user_message_includes_whale_and_structure_blocks():
 def test_build_user_message_omits_account_equity_and_notional():
     """Account equity / notional must NOT reach the LLM — leverage/exposure is
     the gates' job and was causing the model to PASS good setups on 'over-leverage'
-    grounds. Only the held coins/sides are surfaced (for dup/CLOSE detection)."""
+    grounds. The prompt only shows whether the CANDIDATE coin itself is held —
+    other positions are hidden (2026-09-11 VVV review: the whole-book listing
+    drove 13 foreign-coin CLOSE calls during one hold; the no-pyramid
+    protection lives in the execution gate, not the prompt)."""
     from hermes_trader.agents.research import _build_user_message
     perception = {"type": "perp", "mid": 100, "composite_score": 10, "triggers": []}
     snap = {"last_close": 100}
@@ -2890,8 +2893,10 @@ def test_build_user_message_omits_account_equity_and_notional():
     assert "Equity" not in msg
     assert "$300" not in msg and "114.00" not in msg
     assert "$779" not in msg
-    # held coin/side still surfaced so the model won't double-trade / can CLOSE
-    assert "ETH long" in msg
+    # candidate's own held state surfaced (here: not held); OTHER positions
+    # are no longer listed in a foreign coin's prompt
+    assert "Open position on xyz:MU: none" in msg
+    assert "ETH" not in msg
 
 
 def test_build_user_message_annotates_held_age_and_peak():
@@ -2902,13 +2907,16 @@ def test_build_user_message_annotates_held_age_and_peak():
     sizes (rule above still holds)."""
     import time as _t
     from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents import research as research_mod
     from hermes_trader.agents.research import _build_user_message
     trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
                               entry_time=_t.time() - 125 * 60)
     trk.peak_px = 6520.0  # +0.3% best move
     trk.last_mark_px = 6400.0  # now -1.5% vs entry (a loser, not a flat bag)
     dsl_exit._active_positions["CHIP_long"] = trk
+    real_candles = research_mod.fetch_hl_candles
     try:
+        research_mod.fetch_hl_candles = lambda *a, **k: []  # no 5m fetch in test
         perception = {"type": "perp", "mid": 6400, "composite_score": 0,
                       "triggers": [{"name": "heldReeval", "fired": True,
                                     "reason": "scheduled re-evaluation"}]}
@@ -2919,8 +2927,10 @@ def test_build_user_message_annotates_held_age_and_peak():
         )
     finally:
         dsl_exit._active_positions.pop("CHIP_long", None)
+        research_mod.fetch_hl_candles = real_candles
+    # mark 6400 vs peak 6520 vs entry 6500: now -1.5%, pullback -1.8%
     assert "CHIP long (held 125min, best move since entry +0.3%, " \
-           "now -1.5% vs entry)" in msg
+           "now -1.5% vs entry, -1.8% vs best move)" in msg
     # dollar sizes must still never leak into the prompt
     assert "$364" not in msg and "364.0" not in msg
 
@@ -2932,6 +2942,7 @@ def test_held_annotation_now_falls_back_to_live_price():
     tick. Deterministic: monkeypatch the price read, no network."""
     import time as _t
     from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents import research as research_mod
     from hermes_trader.agents.research import _build_user_message
     from hermes_trader.client import exchange
     trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
@@ -2940,8 +2951,10 @@ def test_held_annotation_now_falls_back_to_live_price():
     trk.last_mark_px = None  # no tick yet -> must fall back to the price read
     dsl_exit._active_positions["CHIP_long"] = trk
     real = exchange.get_hl_price
+    real_candles = research_mod.fetch_hl_candles
     try:
         exchange.get_hl_price = lambda coin: 6400.0
+        research_mod.fetch_hl_candles = lambda *a, **k: []  # no 5m fetch in test
         msg = _build_user_message(
             "CHIP", {"type": "perp", "mid": 6400, "composite_score": 0,
                      "triggers": []},
@@ -2952,7 +2965,8 @@ def test_held_annotation_now_falls_back_to_live_price():
     finally:
         dsl_exit._active_positions.pop("CHIP_long", None)
         exchange.get_hl_price = real
-    assert "best move since entry +0.3%, now -1.5% vs entry" in msg
+        research_mod.fetch_hl_candles = real_candles
+    assert "best move since entry +0.3%, now -1.5% vs entry, -1.8% vs best move" in msg
 
 
 def test_held_annotation_no_now_when_no_price_anywhere():
@@ -2987,31 +3001,147 @@ def test_held_annotation_no_now_when_no_price_anywhere():
     assert "now " not in msg
 
 
-def test_held_position_block_instruction_anchors_close_on_now():
-    """A2: the held-position CLOSE instruction must key off the live 'now' PnL,
-    not the one-way peak. The 2026-09-05 'young bag that has barely moved ...
-    should be CLOSED rather than nursed' framing read the OPPOSITE of its intent
-    on a loser — VVV 2026-09-11 showed 'best move +0.2%' while sitting at -5%,
-    and the model cited the +0.2% as 'no adverse structure'. The instruction now
-    (a) names 'now' as the number that matters for a CLOSE call, and (b) makes
-    explicit that 'barely moved' = no progress, not safe-to-keep."""
+def test_held_position_block_scoped_to_candidate_coin():
+    """2026-09-11 VVV review: the held-position block is scoped to the CANDIDATE
+    coin. A foreign coin's prompt no longer lists the book at all — that
+    listing drove 13 foreign-coin CLOSE calls during the VVV hold (each nulled
+    by the parse_verdict guard). No-pyramid protection is unaffected: the
+    execution gate blocks re-entry on a held coin regardless of the prompt."""
+    from hermes_trader.agents import research as research_mod
     from hermes_trader.agents.research import _build_user_message
-    msg = _build_user_message(
-        "BLUR", {"type": "perp", "mid": 1.0, "composite_score": 33, "triggers": []},
-        {"last_close": 1.0}, {"last_close": 1.0}, {"last_close": 1.0},
-        "0.001%/hr", "no news", 300.0,
-        [{"coin": "VVV", "side": "long", "size_usd": 364.0}], "LIVE",
-    )
-    # The instruction line is the text between "Open positions (" and the
-    # ": <position list)" terminator.
-    start = msg.find("Open positions (")
-    end = msg.find("): VVV long")  # instruction ends, position list begins
+    real_candles = research_mod.fetch_hl_candles
+    try:
+        research_mod.fetch_hl_candles = lambda *a, **k: []
+        msg = _build_user_message(
+            "BLUR", {"type": "perp", "mid": 1.0, "composite_score": 33, "triggers": []},
+            {"last_close": 1.0}, {"last_close": 1.0}, {"last_close": 1.0},
+            "0.001%/hr", "no news", 300.0,
+            [{"coin": "VVV", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        research_mod.fetch_hl_candles = real_candles
+    # candidate's own held state = none; the held VVV must NOT leak in
+    assert "Open position on BLUR: none" in msg
+    assert "VVV" not in msg
+    assert "you only judge BLUR's own setup" in msg
+
+
+def test_held_position_block_instruction_anchors_close_on_now():
+    """A2 (re-scoped 2026-09-12): the held-position CLOSE instruction keys off
+    the live 'now' PnL, not the one-way peak, and encodes the down-but-
+    recovering asymmetry: CLOSE only when now <= entry AND no recovery; a
+    position down vs entry but RECOVERING (price rising over the last 30min)
+    is not a close candidate on PnL grounds. 'Barely moved' = no progress,
+    not safe-to-keep. The instruction now renders only in the CANDIDATE's own
+    prompt (scoping per test above)."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents import research as research_mod
+    from hermes_trader.agents.research import _build_user_message
+    # A live VVV tracker so the annotation renders (the 2026-09-11 shape:
+    # best move +0.2%, now -4.7% sinking).
+    trk = dsl_exit.DSLTracker(coin="VVV", side="long", entry_px=26.14,
+                              entry_time=_t.time() - 71 * 60)
+    trk.peak_px = 26.19  # +0.2% best move
+    trk.last_mark_px = 24.90  # now -4.7%
+    dsl_exit._active_positions["VVV_long"] = trk
+    real_candles = research_mod.fetch_hl_candles
+    try:
+        research_mod.fetch_hl_candles = lambda *a, **k: []  # no 5m fetch in test
+        msg = _build_user_message(
+            "VVV", {"type": "perp", "mid": 25.0, "composite_score": 33, "triggers": []},
+            {"last_close": 25.0}, {"last_close": 25.0}, {"last_close": 25.0},
+            "0.001%/hr", "no news", 300.0,
+            [{"coin": "VVV", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop("VVV_long", None)
+        research_mod.fetch_hl_candles = real_candles
+    # The instruction is the text between "Open position on VVV (" and the
+    # position annotation.
+    start = msg.find("Open position on VVV (")
+    end = msg.find("VVV long (held")  # instruction ends, annotation begins
     block = msg[start:end]
     assert "is the number that matters for a CLOSE call" in block
+    # the recovery asymmetry (the A2 wording fix — 'now <= entry' alone must
+    # no longer be an unconditional CLOSE trigger)
+    assert "AND there is" in block
+    assert "RECOVERING" in block
+    assert "not a close candidate on PnL grounds" in block
     assert "no progress, it does not mean it is safe to keep" in block
     # The old self-defeating 'young bag that has barely moved ... going nowhere'
     # framing must be gone.
     assert "young bag that has barely moved" not in block
+    # the held annotation itself is present for the candidate's own position
+    assert "VVV long (held" in msg
+
+
+def test_held_annotation_direction_of_travel_5m():
+    """Direction-of-travel field: price change over the last 6 CLOSED 5m bars
+    (30min), excluding the still-forming last candle (candleSnapshot includes
+    it — the fast-exit path exists precisely because of that). A 30min
+    recovery is the 'trending back in the right direction' tell a
+    down-but-recovering close-check needs (VVV 2026-09-11: a 1h window was
+    too coarse — it read -3.5% while the position sat at its full -5% stop
+    inside the current bar)."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents import research as research_mod
+    from hermes_trader.agents.research import _build_user_message
+    trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
+                              entry_time=_t.time() - 40 * 60)
+    trk.peak_px = 6520.0
+    trk.last_mark_px = 6400.0
+    dsl_exit._active_positions["CHIP_long"] = trk
+    # 7 candles: 6 closed (6300 -> 6400, a +1.6% recovery) + 1 forming at 6410
+    # that MUST be excluded — if it leaked in, the field would read +1.7%.
+    closes = [6300, 6320, 6340, 6360, 6380, 6400, 6410]
+    c5m = [{"t": i, "o": c, "h": c, "l": c, "c": c, "v": 1.0} for i, c in enumerate(closes)]
+    real_candles = research_mod.fetch_hl_candles
+    try:
+        research_mod.fetch_hl_candles = lambda *a, **k: c5m
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 6400, "composite_score": 0, "triggers": []},
+            {"last_close": 6400}, {"last_close": 6400}, {"last_close": 6400},
+            "N/A", "no news", 300.0,
+            [{"coin": "CHIP", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop("CHIP_long", None)
+        research_mod.fetch_hl_candles = real_candles
+    assert "now -1.5% vs entry, -1.8% vs best move, price +1.6% " \
+           "over last 30min (5m bars)" in msg
+
+
+def test_held_annotation_direction_omitted_on_partial_window():
+    """Degraded 5m fetch (thin history / API gap): fewer than 6 closed bars ->
+    the direction field is omitted, never rendered from a partial window (a
+    short window reads as 'barely moved'). The PnL fields still render."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents import research as research_mod
+    from hermes_trader.agents.research import _build_user_message
+    trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
+                              entry_time=_t.time() - 40 * 60)
+    trk.peak_px = 6520.0
+    trk.last_mark_px = 6400.0
+    dsl_exit._active_positions["CHIP_long"] = trk
+    c5m = [{"t": i, "o": 6400, "h": 6400, "l": 6400, "c": 6400, "v": 1.0}
+           for i in range(3)]  # only 3 bars back -> 2 closed < 6
+    real_candles = research_mod.fetch_hl_candles
+    try:
+        research_mod.fetch_hl_candles = lambda *a, **k: c5m
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 6400, "composite_score": 0, "triggers": []},
+            {"last_close": 6400}, {"last_close": 6400}, {"last_close": 6400},
+            "N/A", "no news", 300.0,
+            [{"coin": "CHIP", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop("CHIP_long", None)
+        research_mod.fetch_hl_candles = real_candles
+    assert "now -1.5% vs entry, -1.8% vs best move)" in msg
+    assert "over last 30min" not in msg
 
 
 def test_parse_verdict_regex_fallback_midtext():
@@ -3467,9 +3597,11 @@ def test_build_user_message_indicator_block_full_snap():
     assert "RSI(14)=62.5" in msg
     assert "ADX(14)=28.0" in msg
     assert "EMA8 slope: rising" in msg
-    # held coin/side surfaced for dup/CLOSE detection, but NO dollar size
-    # (account notional must not influence the verdict).
-    assert "ETH long" in msg and "$120" not in msg
+    # BTC is NOT held -> candidate-scoped held block says so, and the held ETH
+    # must NOT leak into a foreign coin's prompt (2026-09-11 VVV review);
+    # NO dollar size either (account notional must not influence the verdict).
+    assert "Open position on BTC: none" in msg
+    assert "ETH" not in msg and "$120" not in msg
     assert "analysis only" in msg  # OFF mode message
 
 
