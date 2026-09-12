@@ -490,3 +490,67 @@ def test_shadow_mode_shadow_block_counterfactual_coexists(monkeypatch, caplog):
     # (Shadow accrues only when conf >= the LIVE bar.)
     assert len(rescued) == 1
     assert accruals == []
+
+
+# ── Mover exemption removed (2026-09-12, VVV −$18.81 max_loss) ───────────────
+# `structured_daily_mover` used to satisfy the `uptrend and not (...)` guard so
+# 24h-mover admits skipped the conf-vs-bar late-chase test entirely. The 28-trade
+# mover cohort 09-06→11 ran −$77.97 (−$2.78/trade vs the book's −$0.35). Movers
+# now hit the SAME dynamic bar; the mover admission still counts toward the final
+# structure requirement (a mover that passes the conf-vs-bar test is admitted via
+# structure, not forced through).
+
+def _mover_analysis(conf=0.75, **over):
+    a = _analysis(conf=conf, daily_mover_fired=True, slow_burn_count=2,
+                  composite_score=33.5)
+    a.update(over)
+    return a
+
+
+def test_mover_uptrend_only_now_hits_late_chase_test(monkeypatch):
+    # VVV 09-11 14:53 shape: daily mover, uptrend momentum, NO fresh impulse,
+    # conf 0.75, chronos aligned (1 signal → bar 0.80). Old code: admitted
+    # via structured_daily_mover, zero late-chase coverage. New: blocked.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=False,
+              bypass_late_trend_chase_shadow_mode=True,
+              mover_min_confidence=0.72, mover_min_composite=30.0)
+    reason = executor._runner_entry_block_reason(_mover_analysis(conf=0.75), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.80" in reason
+    assert "conf 0.75" in reason
+
+
+def test_mover_conf_at_or_above_bar_still_admitted_via_structure(monkeypatch):
+    # The exemption removal must not kill the branch: a mover with conf 0.82
+    # >= the 1-signal bar 0.80 (bypass ON) enters through the structure rung.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=True,
+              mover_min_confidence=0.72, mover_min_composite=30.0)
+    assert executor._runner_entry_block_reason(
+        _mover_analysis(conf=0.82), g) == ""
+
+
+def test_mover_without_uptrend_momentum_falls_through_unchanged(monkeypatch):
+    # Mover admit with uptrend_momentum NOT fired never took the late-chase
+    # path (uptrend gate) before or after the change: structure admission
+    # alone is still the admission rung. Regression guard — the fix must not
+    # have accidentally blocked the non-uptrend mover shape.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(mover_min_confidence=0.72, mover_min_composite=30.0)
+    a = _mover_analysis(conf=0.75, uptrend_momentum_fired=False)
+    assert executor._runner_entry_block_reason(a, g) == ""
+
+
+def test_mover_fresh_impulse_never_takes_late_chase_path(monkeypatch):
+    # A mover WITH fresh impulse keeps the fast path (byte-identical to the
+    # pre-change fresh-impulse behavior) and never consults corroboration.
+    calls = []
+    monkeypatch.setattr(
+        executor, "get_chronos_signal_sync",
+        lambda c, s: calls.append(1) or types.SimpleNamespace(
+            median_pct=None, error=None))
+    a = _mover_analysis(conf=0.75, composite_score=35,
+                        volume_spike_fired=True, breakout_fired=True)
+    assert executor._runner_entry_block_reason(a, _gate()) == ""
+    assert calls == []
