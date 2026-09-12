@@ -2897,13 +2897,16 @@ def test_build_user_message_omits_account_equity_and_notional():
 def test_build_user_message_annotates_held_age_and_peak():
     """Dead-bag review 2026-09-05: held coins carry age + best-move from the
     live DSL tracker so a forced close-check can answer 'is this going
-    anywhere?'. No dollar sizes (rule above still holds)."""
+    anywhere?'. 2026-09-11 VVV long: also carry CURRENT PnL ('now') so a
+    monotonically sinking position can't read as 'barely moved'. No dollar
+    sizes (rule above still holds)."""
     import time as _t
     from hermes_trader.agents import dsl_exit
     from hermes_trader.agents.research import _build_user_message
     trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
                               entry_time=_t.time() - 125 * 60)
     trk.peak_px = 6520.0  # +0.3% best move
+    trk.last_mark_px = 6400.0  # now -1.5% vs entry (a loser, not a flat bag)
     dsl_exit._active_positions["CHIP_long"] = trk
     try:
         perception = {"type": "perp", "mid": 6400, "composite_score": 0,
@@ -2916,9 +2919,72 @@ def test_build_user_message_annotates_held_age_and_peak():
         )
     finally:
         dsl_exit._active_positions.pop("CHIP_long", None)
-    assert "CHIP long (held 125min, best move since entry +0.3%)" in msg
+    assert "CHIP long (held 125min, best move since entry +0.3%, " \
+           "now -1.5% vs entry)" in msg
     # dollar sizes must still never leak into the prompt
     assert "$364" not in msg and "364.0" not in msg
+
+
+def test_held_annotation_now_falls_back_to_live_price():
+    """A1 fallback: a tracker with no last_mark_px (fresh, or just after a
+    restart before the first fast-exit tick) still surfaces CURRENT PnL via a
+    fresh get_hl_price() read — so the loser can't hide behind a missing
+    tick. Deterministic: monkeypatch the price read, no network."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents.research import _build_user_message
+    from hermes_trader.client import exchange
+    trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
+                              entry_time=_t.time() - 10 * 60)
+    trk.peak_px = 6520.0
+    trk.last_mark_px = None  # no tick yet -> must fall back to the price read
+    dsl_exit._active_positions["CHIP_long"] = trk
+    real = exchange.get_hl_price
+    try:
+        exchange.get_hl_price = lambda coin: 6400.0
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 6400, "composite_score": 0,
+                     "triggers": []},
+            {"last_close": 6400}, {"last_close": 6400}, {"last_close": 6400},
+            "N/A", "no news", 300.0,
+            [{"coin": "CHIP", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop("CHIP_long", None)
+        exchange.get_hl_price = real
+    assert "best move since entry +0.3%, now -1.5% vs entry" in msg
+
+
+def test_held_annotation_no_now_when_no_price_anywhere():
+    """Degraded: no tracker mark AND the price read fails -> the 'now' field
+    is simply omitted (age + best move still render), never a bogus number
+    or a raised error."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents.research import _build_user_message
+    from hermes_trader.client import exchange
+    trk = dsl_exit.DSLTracker(coin="CHIP", side="long", entry_px=6500.0,
+                              entry_time=_t.time() - 10 * 60)
+    trk.peak_px = 6520.0
+    trk.last_mark_px = None
+    dsl_exit._active_positions["CHIP_long"] = trk
+    real = exchange.get_hl_price
+    try:
+        def _boom(coin):
+            raise RuntimeError("no network")
+        exchange.get_hl_price = _boom
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 6500, "composite_score": 0,
+                     "triggers": []},
+            {"last_close": 6500}, {"last_close": 6500}, {"last_close": 6500},
+            "N/A", "no news", 300.0,
+            [{"coin": "CHIP", "side": "long", "size_usd": 364.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop("CHIP_long", None)
+        exchange.get_hl_price = real
+    assert "best move since entry +0.3%)" in msg
+    assert "now " not in msg
 
 
 def test_parse_verdict_regex_fallback_midtext():

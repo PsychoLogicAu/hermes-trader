@@ -675,7 +675,25 @@ def _build_user_message(
             e = float(trk.entry_px)
             pk = float(trk.peak_px or e)
             peak_pct = ((pk - e) / e * 100) if h_side == "long" else ((e - pk) / e * 100)
-            return f" (held {age_min}min, best move since entry {peak_pct:+.1f}%)"
+            # CURRENT PnL, not just the one-way peak. The peak ("best move")
+            # ratchets only in the favourable direction, so a monotonically
+            # sinking long shows "best move +0.2%" for the whole hold while the
+            # real PnL goes to −5% — 2026-09-11 VVV long: every scan read it as
+            # "barely moved" and the model never CLOSEd it. Surface the live
+            # mark so "best move" and "now" can't both look fine on a loser.
+            mark = getattr(trk, "last_mark_px", None)
+            if not mark or float(mark) <= 0:
+                try:
+                    from hermes_trader.client.exchange import get_hl_price
+                    mark = get_hl_price(h_coin)
+                except Exception:
+                    mark = 0.0
+            now = ""
+            if mark and float(mark) > 0:
+                m = float(mark)
+                now_pct = ((m - e) / e * 100) if h_side == "long" else ((e - m) / e * 100)
+                now = f", now {now_pct:+.1f}% vs entry"
+            return f" (held {age_min}min, best move since entry {peak_pct:+.1f}%{now})"
         except Exception:
             return ""
 
