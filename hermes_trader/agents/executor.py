@@ -2160,6 +2160,13 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     admission of late trend-only names and whale-only PASS upgrades. This gate
     keeps execution focused on fresh impulse setups: volume plus breakout/burst,
     backed by either 1h structure or a strong composite score.
+
+    Daily movers are NOT exempt from the late-chase check: the
+    `structured_daily_mover` admission only satisfies the final structure
+    requirement below. Movers that are uptrend-only (no fresh impulse) hit the
+    same conf-vs-bar dynamic test as any other uptrend candidate (2026-09-12,
+    VVV −$18.81 max_loss; the old exemption let the 28-trade mover cohort
+    (−$77.97, −$2.78/trade) in with zero gate coverage).
     """
     gate = config.get("runner_entry_gate") or {}
     if not bool(gate.get("enabled", False)):
@@ -2244,7 +2251,14 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 f"< {min_hip3_score:.0f})")
     if forced and whale and not fresh_impulse:
         return "runner_gate_blocked (whale-only forced override; no fresh breakout/burst)"
-    if uptrend and not (fresh_impulse or structured_daily_mover):
+    if uptrend and not fresh_impulse:
+        # 2026-09-12 (VVV −$18.81 max_loss): the `structured_daily_mover` term
+        # used to exempt 24h-mover admits from this late-chase test entirely —
+        # the blind spot behind the 28-trade mover cohort (−$77.97, 10W/28,
+        # −$2.78/trade vs the book's −$0.35, 2026-09-06→11 sweep). Movers now
+        # hit the SAME conf-vs-bar dynamic test; their structure admission
+        # (`structured_daily_mover`) still counts toward the final
+        # fresh-impulse-or-structure requirement below.
         # Dynamic confidence bar: independent-signal corroboration lowers the
         # late-chase bypass bar so a 0.78 LLM with two aligned signals can
         # enter what a bare 0.90 bar (never reached; LLM tops out ~0.78)
