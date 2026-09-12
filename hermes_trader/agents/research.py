@@ -665,6 +665,15 @@ def _build_user_message(
     # "is this going anywhere?" was unanswerable. Annotate each held coin
     # with its age and peak excursion from the live DSL tracker (NO dollar
     # sizes — that rule stands; test_build_user_message_omits_account_equity_and_notional).
+    # 30min direction window over CLOSED 5m candles: 6 bars = 30min. 5m is
+    # the granularity the DSL peak ratchet is built around (a wick inside one
+    # 5m candle is the shape that bit GRASS 2026-08-26); a 1h window is too
+    # coarse — on VVV 2026-09-11 a 3h bar window would have read "−3.5%"
+    # while the position was already at its full −5% stop inside the CURRENT
+    # bar. A 30min recovery off the low is exactly the "trending back in the
+    # right direction" tell a down-but-recovering close-check needs.
+    _HELD_DIR_WINDOW_BARS = 6
+
     def _held_annotation(h_coin: str, h_side: str) -> str:
         try:
             from hermes_trader.agents import dsl_exit as _dslx
@@ -675,21 +684,84 @@ def _build_user_message(
             e = float(trk.entry_px)
             pk = float(trk.peak_px or e)
             peak_pct = ((pk - e) / e * 100) if h_side == "long" else ((e - pk) / e * 100)
-            return f" (held {age_min}min, best move since entry {peak_pct:+.1f}%)"
+            # CURRENT PnL, not just the one-way peak. The peak ("best move")
+            # ratchets only in the favourable direction, so a monotonically
+            # sinking long shows "best move +0.2%" for the whole hold while the
+            # real PnL goes to −5% — 2026-09-11 VVV long: every scan read it as
+            # "barely moved" and the model never CLOSEd it. Surface the live
+            # mark so "best move" and "now" can't both look fine on a loser.
+            mark = getattr(trk, "last_mark_px", None)
+            if not mark or float(mark) <= 0:
+                try:
+                    from hermes_trader.client.exchange import get_hl_price
+                    mark = get_hl_price(h_coin)
+                except Exception:
+                    mark = 0.0
+            now = ""
+            if mark and float(mark) > 0:
+                m = float(mark)
+                now_pct = ((m - e) / e * 100) if h_side == "long" else ((e - m) / e * 100)
+                now = f", now {now_pct:+.1f}% vs entry"
+                # Pullback off the best move (how far below peak a long is —
+                # the retrace the DSL exit itself arms on).
+                peak_pull = ((m - pk) / e * 100) if h_side == "long" else ((pk - m) / e * 100)
+                now += f", {peak_pull:+.1f}% vs best move"
+                # Direction of travel over the last 30min from CLOSED 5m bars.
+                # fetch_hl_candles' last row is the still-forming candle (the
+                # fast-exit path exists precisely because of that), so drop it;
+                # require the full window or omit the field — a partial window
+                # would render as if the coin barely moved.
+                try:
+                    c5m = fetch_hl_candles(h_coin, "5m", _HELD_DIR_WINDOW_BARS + 1)
+                    c5m = c5m[:-1] if len(c5m) > 1 else []
+                    if len(c5m) >= _HELD_DIR_WINDOW_BARS:
+                        c0 = candle_val(c5m[-_HELD_DIR_WINDOW_BARS], "c")
+                        c1 = candle_val(c5m[-1], "c")
+                        if c0 and c1:
+                            now += (f", price {((c1 - c0) / c0 * 100):+.1f}% "
+                                    "over last 30min (5m bars)")
+                except Exception:
+                    pass
+            return f" (held {age_min}min, best move since entry {peak_pct:+.1f}%{now})"
         except Exception:
             return ""
 
-    position_block = (
-        f"Open positions (do not re-enter these; a CLOSE verdict applies ONLY to "
-        f"{coin} itself, never to any other listed position; CLOSE only if "
-        f"{coin}'s own structure flipped — for THIS coin also weigh the age and "
-        f"best-move annotation: a young bag that has barely moved from entry is "
-        f"going nowhere and should be CLOSED rather than nursed): "
-        + ", ".join(f"{p['coin']} {p['side']}{_held_annotation(p['coin'], p['side'])}"
-                    for p in open_positions)
-        if open_positions
-        else "Open positions: none"
-    )
+    # Scope the held-coin block to THE COIN BEING RESEARCHED (2026-09-11 VVV
+    # review): listing the whole book in every coin's prompt made the 4B model
+    # repeatedly try to CLOSE the held position BY BORROWING another coin's
+    # verdict — 13 foreign-coin CLOSE calls during the VVV hold, all nulled by
+    # the parse_verdict guard (research.py CLOSE guard) and all carrying the
+    # peak-only annotation ("+0.2% over 71 minutes, no adverse structure").
+    # The no-pyramid / no-re-entry protection does not depend on this: the
+    # execution gate blocks any re-entry on a held coin regardless of what the
+    # LLM sees (risk_gates "already holding"). A CLOSE verdict can only ever
+    # apply to the candidate coin itself, so only the candidate's own position
+    # state is shown.
+    _mine = [p for p in open_positions if p["coin"] == coin]
+    if _mine:
+        position_block = (
+            f"Open position on {coin} (you hold it — do not re-enter; a CLOSE "
+            f"verdict here exits YOUR {coin} position). Weigh the PnL "
+            f"annotation: 'best move' is the one-way peak since entry, 'now' "
+            f"is the live PnL vs entry and is the number that matters for a "
+            f"CLOSE call. CLOSE when 'now' is at or below entry AND there is "
+            f"no recovery — the 30min price field is flat or falling and the "
+            f"structure shows nothing back in the position's favour. A "
+            f"position that is down vs entry but RECOVERING (price rising over "
+            f"the last 30min / back toward its best move) is not a close "
+            f"candidate on PnL grounds. 'Barely moved' means no progress, it "
+            f"does not mean it is safe to keep: a young position that has made "
+            f"no progress in either direction should be CLOSED rather than "
+            f"nursed. Your own technicals for {coin} still matter as usual. "
+            + ", ".join(f"{p['coin']} {p['side']}{_held_annotation(p['coin'], p['side'])}"
+                        for p in _mine)
+        )
+    else:
+        position_block = (
+            f"Open position on {coin}: none (you do not hold {coin}; the "
+            f"account may hold OTHER positions — that is not your concern, "
+            f"you only judge {coin}'s own setup)"
+        )
 
     # Raw recent price action so the LLM can read candlestick/chart patterns
     # directly (shooting star, hammer, engulfing, flags) — the indicator blocks

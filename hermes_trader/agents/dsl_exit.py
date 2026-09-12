@@ -201,6 +201,14 @@ class DSLTracker:
         # entry, so every floor, stop, and PnL read ran off the wrong basis —
         # SKHY showed +6.44% ROE on a trade that realized -$0.29).
         self.size = 0.0
+        # Last mark price seen by check() (every fast-exit tick). Lets the
+        # research prompt show a held coin's CURRENT PnL, not just its one-way
+        # peak ("best move since entry"). 2026-09-11 VVV long: the annotation
+        # showed "best move +0.2%" for the whole 80min hold while the position
+        # sank to −5%, so every scan read it as "barely moved" and the model
+        # never CLOSEd it. None until the first check() tick (also after a
+        # restart, until the next tick rehydrates a live mark).
+        self.last_mark_px: Optional[float] = None
 
     def refresh_entry_basis(self, new_entry_px: float, new_size: float) -> None:
         """Adopt the exchange's average entryPx after a position ADD.
@@ -279,6 +287,11 @@ class DSLTracker:
         upct = self._unrealized_pct(mark_px)
         is_long = self.is_long()
         pol = self.policy
+
+        # Remember the live mark so the research prompt can show CURRENT PnL
+        # (see last_mark_px). Updated before any early-return branch so even a
+        # stale-flat/hard-timeout exit leaves the freshest mark behind.
+        self.last_mark_px = mark_px
 
         # Update peak (for longs: highest price seen; for shorts: lowest)
         peak_changed = False

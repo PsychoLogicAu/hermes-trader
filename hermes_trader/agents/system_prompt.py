@@ -45,7 +45,7 @@ def build_system_prompt(mode: str, win_rate: float, recent_trades: int) -> str:
         "- Composite trigger score (0–100) from technical triggers",
         "- Multi-tf indicators: 1h/4h/1d EMA8/21, RSI(14), ATR(14), funding rate",
         "- 1h structure signals: volumeBuildup1h, trendFlip1h, higherLows1h (accumulation patterns)",
-        "- Open positions (so you don't double-trade a coin you already hold)",
+        "- Whether you hold the CANDIDATE coin (and its PnL state) — other open positions are not your concern",
         "",
         "DECISION — output VALID JSON on the LAST line:",
         "{",
