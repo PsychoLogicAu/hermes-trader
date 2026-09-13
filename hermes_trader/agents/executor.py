@@ -2153,6 +2153,80 @@ def _sidestep_bearish_block_reason(analysis: Dict[str, Any], config: Dict[str, A
     return ""
 
 
+def _late_chase_tape_read():
+    """BTC trail24h tape read for the late-chase bypass tape sub-gate.
+
+    Module-level indirection over market_regime.btc_tape_activity (the SAME
+    cached 5m-candle read the quiet_tape gate consumes, 300s TTL) so tests
+    can monkeypatch it exactly like get_chronos_signal_sync. Returns
+    {"vol": %, "drift": %} or None on a data gap.
+    """
+    from hermes_trader.agents.market_regime import btc_tape_activity
+    try:
+        return btc_tape_activity()
+    except Exception:
+        return None
+
+
+def _late_chase_tape_gate(gate: Dict[str, Any], coin: str, side: str,
+                          conf: float, bar: float,
+                          suppresses: bool) -> Tuple[bool, str]:
+    """BTC-loudness meta-gate on the late-chase BYPASS (2026-09-13).
+
+    Evidence (.hermes/specs/late-chase-btc-tape-gate.md): the shadow bypass
+    cohort's P/L tracks BTC's tape — entries taken while BTC trail24h vol
+    < 1.5% netted +$109 (n=81) while vol >= 1.5% netted −$80 (n=70), and the
+    entire 09-10/09-11 drawdown (−$114, 12 max_loss stops) sat in the loud
+    bucket; signed drift < −1% was −$25 vs +$30 above +1%. So the bypass is
+    ALLOWED only when BTC is calm-or-not-falling:
+
+        allow = vol < late_chase_tape_vol_max_pct AND drift > late_chase_tape_drift_min_pct
+
+    (Opposite polarity to quiet_tape, which BLOCKS entries on a quiet tape —
+    this gate consumes the raw read, not that verdict.)
+
+    Only consulted when conf >= bar (a bypass candidate): with the master
+    flag off it is never called and behavior is byte-identical. Deny
+    suppresses the bypass even when `bypass_late_trend_chase: true` — the
+    late-chase block reason then stands, exactly as a sub-bar conf. A data
+    gap FAILS SAFE TO DENY for a live bypass (the extra evidence is missing;
+    unlike quiet_tape's gap-passes rule, here absence of evidence is not a
+    reason to release). Shadow mode never changes the outcome — it appends
+    `TAPE=allow|deny|gap(...)` to the caller's log line so the accrual
+    carries the verdict + raw reads for offline replay.
+
+    Returns (allowed, tape_note) — tape_note is "" when the gate is off.
+    """
+    if not bool(gate.get("late_chase_tape_gate", False)):
+        return True, ""
+    vol_max = float(gate.get("late_chase_tape_vol_max_pct", 1.5))
+    drift_min = float(gate.get("late_chase_tape_drift_min_pct", -1.0))
+    tape = _late_chase_tape_read()
+    if tape is None or tape.get("vol") is None or tape.get("drift") is None:
+        note = f" TAPE=gap(fail-safe deny, allow-band vol<{vol_max:.2f}, drift>{drift_min:.2f})"
+        if suppresses:
+            logger.warning(
+                f"[gate][TAPE] late_chase_bypass DENIED for {coin} "
+                f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but no "
+                f"BTC tape read — fail-safe deny (allow-band vol<{vol_max:.2f}, "
+                f"drift>{drift_min:.2f})")
+        return False, note
+    vol, drift = float(tape["vol"]), float(tape["drift"])
+    allow = vol < vol_max and drift > drift_min
+    reads = f"vol {vol:.2f}%, drift {drift:+.2f}%"
+    if allow:
+        return True, f" TAPE=allow({reads})"
+    note = (f" TAPE=deny({reads}, allow-band vol<{vol_max:.2f}, "
+            f"drift>{drift_min:.2f})")
+    if suppresses:
+        logger.warning(
+            f"[gate][TAPE] late_chase_bypass DENIED for {coin} "
+            f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but BTC tape "
+            f"{reads} outside allow-band (vol<{vol_max:.2f}, "
+            f"drift>{drift_min:.2f}) — blocked")
+    return False, note
+
+
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -2300,17 +2374,29 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # conf-vs-bar + coin distribution for replay before re-enabling.
         _bt = gate.get("bypass_late_trend_chase", False)
         _bs = bool(gate.get("bypass_late_trend_chase_shadow_mode", False))
+        tape_note = ""
         if conf >= bar:
             bypassed = bool(_bt)
+            # BTC-loudness meta-gate on the bypass (2026-09-13, spec
+            # .hermes/specs/late-chase-btc-tape-gate.md): consulted ONLY at
+            # bypass candidates (conf >= bar); master flag off ⇒ returns
+            # (True, "") with no fetch — byte-identical to before. A DENY
+            # suppresses even a live bypass; shadow mode never changes the
+            # outcome, it only annotates the accrual line with TAPE=verdict.
+            _allowed, tape_note = _late_chase_tape_gate(
+                gate, coin, side, conf, bar, suppresses=bypassed)
+            if bypassed and not _allowed:
+                bypassed = False
             if bypassed:
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
-                            f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
+                            f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
+                            f"{tape_note}")
             elif _bs:
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
                     f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
-                    f"{bar:.2f}{bar_note} — NOT bypassing (shadow mode), "
-                    f"live rule stands")
+                    f"{bar:.2f}{bar_note}{tape_note} — NOT bypassing (shadow "
+                    f"mode), live rule stands")
         else:
             bypassed = False
         if not bypassed:
