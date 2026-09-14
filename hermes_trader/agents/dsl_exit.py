@@ -729,7 +729,7 @@ def _policy_from_config() -> ExitPolicy:
 def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
                             policy: Optional[ExitPolicy] = None,
                             default_leverage: int = 1,
-                            queried_dexes: Optional[set] = None) -> None:
+                            queried_dexes: Optional[set] = None) -> List[Dict[str, Any]]:
     """Reconcile the tracker registry with the exchange's live position list.
 
     Synthesizes a tracker for any open position without one (entry_time =
@@ -737,6 +737,11 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
     longer open. When `queried_dexes` is given, a tracker is only dropped
     if its dex *successfully responded* this cycle — protecting trackers
     on timed-out dexes from being reset to fresh state next tick.
+
+    Returns the entry-context records of trackers dropped as stale (empty
+    list normally) so the caller can settle a possible exchange-side close
+    (SL/TP trigger fill) at detection time instead of waiting for the next
+    startup reconcile.
     """
     load_state()
     # Registry span under `_registry_lock` (RLock → the load_state() above and
@@ -748,6 +753,7 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
     with _registry_lock:
         live_keys = set()
         added = 0
+        _stale_close_records: List[Dict[str, Any]] = []
         for p in asset_positions or []:
             pos = p.get("position", {}) if isinstance(p, dict) else {}
             coin = pos.get("coin")
@@ -854,6 +860,18 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
         stale = [k for k in _active_positions
                  if k not in live_keys and _key_in_queried_scope(k)]
         for k in stale:
+            # Capture the entry context BEFORE deleting: an exchange-side
+            # SL/TP fill that the bot never routed through close_position_market
+            # arrives here, and without this snapshot nothing downstream can
+            # attribute a closing fill to it (no CLOSE row, no loss cooldown —
+            # ZETA 2026-09-13). The loop hands these to settle_stale_closes().
+            _t = _active_positions[k]
+            _stale_close_records.append({
+                "coin": _t.coin, "side": _t.side,
+                "entry_px": _t.entry_px, "size": abs(_t.size),
+                "leverage": int(getattr(_t, "leverage", 0) or 1),
+                "entry_time": _t.entry_time,
+            })
             del _active_positions[k]
             logger.info(f"[dsl] Dropped stale tracker {k} (no live exchange position)")
         skipped = [k for k in _active_positions
@@ -867,6 +885,7 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
 
         if added or stale:
             _save_state()
+        return _stale_close_records
 
 
 def check_all_positions(mids: Dict[str, float]) -> List[ExitVerdict]:

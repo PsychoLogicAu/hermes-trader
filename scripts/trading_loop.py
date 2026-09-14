@@ -127,6 +127,7 @@ from hermes_trader.client.hl_client import (fetch_account_state,
                                             resolve_user_address)
 from hermes_trader.positions_snapshot import write_snapshot
 from hermes_trader.session_log import append as log_event
+from hermes_trader.stale_close_settle import settle_stale_closes
 
 logger = logging.getLogger(__name__)
 
@@ -1083,9 +1084,19 @@ while True:
         # manual closes, externally-filled SLs), then market-close anything
         # whose dynamic floor was breached.
         try:
-            rehydrate_from_exchange(positions,
-                                    default_leverage=int(_cfg.get("leverage", 1) or 1),
-                                    queried_dexes=queried_dexes)
+            _stale_recs = rehydrate_from_exchange(
+                positions,
+                default_leverage=int(_cfg.get("leverage", 1) or 1),
+                queried_dexes=queried_dexes)
+            if _stale_recs:
+                # A tracker vanished from the exchange without going through
+                # close_position_market — usually an exchange-side SL/TP fill.
+                # Settle it NOW (CLOSE row + outcome store + loss cooldown)
+                # instead of leaving the ledger OPEN and re-entry unblocked
+                # until the next restart's reconcile (ZETA 2026-09-13).
+                settle_stale_closes(_stale_recs, memory=memory,
+                                    read_agent_config=read_agent_config,
+                                    log_event=log_event)
             # include_hip3=True so xyz:MU / vntl:* etc. get fresh mids each
             # cycle — without them, monitor_exits has no price for HIP-3
             # trackers and their peak/floor never advance (dashboard shows
