@@ -197,7 +197,44 @@ def _run_concurrent(fn):
 # (collection time) and would poison every later test that calls the real
 # gate. Capture the real gate now and restore it at module end (after phase 4),
 # so the global is whole again by the time any test_* function runs.
-_orig_runner_entry_block_reason = ex._runner_entry_block_reason
+# Snapshot EVERY global this module stubs, so they can all be restored at the
+# end of the file (after phase 4). Restoring only _runner_entry_block_reason
+# leaked _mr.detect_regime → "neutral" and ex.memory.loss_cooldown_remaining_min
+# → 0.0 into every later-imported test module: alphabetically that includes
+# test_atr_stop.py (loss-cooldown reentry test saw cooldowns never fire) and
+# test_cleanup.py (the three market_regime_gate tests saw a stubbed regime).
+# That was the "4 known failures" baseline — order-dependent pollution, not
+# broken assertions (they pass when run alone).
+_MISSING = object()
+_ORIG_STUBBED = {
+    (obj, name): getattr(obj, name, _MISSING)
+    for obj, name in [
+        (ex, "read_agent_config"),
+        (ex, "_runner_entry_block_reason"),
+        (ex.memory, "loss_cooldown_remaining_min"),
+        (ex.memory, "last_close_for"),
+        (ex.memory, "get_recent_trades"),
+        (ex.memory, "latest_trade_ts_by_coin"),
+        (ex.memory, "peak_daily_pnl"),
+        (ex, "resolve_user_address"),
+        (ex, "fetch_account_state"),
+        (ex, "_get_market_volume_24h"),
+        (ex, "get_max_leverage"),
+        (ex, "get_hl_price"),
+        (ex, "get_hl_atr"),
+        (ex, "min_entry_notional_usd"),
+        (ex, "entry_size_for_notional"),
+        (ex, "set_leverage"),
+        (ex, "place_hl_order"),
+        (ex, "place_hl_trigger_order"),
+        (ex, "cancel_open_orders_for_coin"),
+        (ex, "record_open"),
+        (ex, "record_close"),
+        (_mr, "detect_regime"),
+        (ex, "_attach_chronos_to_result"),
+        (ex, "get_chronos_signal_sync"),
+    ]
+}
 _install_mocks()
 
 print("== Phase 1: WITHOUT the execution lock (the race the lock fixes) ==")
@@ -278,10 +315,17 @@ check("gate: empty book with max_concurrent=1 allows an open",
 print()
 print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
-# Restore the real gate so later test modules see the real implementation.
-# (The script's own phases already ran above; this global was only needed
-# for THIS module's races.)
-ex._runner_entry_block_reason = _orig_runner_entry_block_reason
+# Restore every global this module stubbed so later test modules see the real
+# implementations. (The script's own phases already ran above; these globals
+# were only needed for THIS module's races.) Restoring them here is what keeps
+# pytest collection-order from leaking stubs into alphabetically-later modules.
+for (_obj, _name), _orig in _ORIG_STUBBED.items():
+    if _orig is _MISSING:
+        delattr(_obj, _name)
+    else:
+        setattr(_obj, _name, _orig)
+dsl_exit._active_positions.clear()
+_mr._regime_cache.clear()
 if FAIL:
     print("FAILED:", FAIL)
     sys.exit(1)
