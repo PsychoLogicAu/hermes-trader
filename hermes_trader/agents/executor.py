@@ -18,7 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.duel_store import effective_primary_model
-from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
+from hermes_trader.agents.chronos_signal import (
+    get_chronos_signal_sync,
+    resolve_min_conf_ratio as _chronos_resolve_min_conf_ratio,
+)
 from hermes_trader.agents.dsl_exit import (
     ExitPolicy,
     RetraceTier,
@@ -2047,9 +2050,10 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
 
     Signals (independent pipelines, NOT the LLM's own confidence):
       chronos_aligned — get_chronos_signal_sync median sign agrees with side
-                        (300s cache: a silent hit in steady state)
+                        (300s cache: a silent hit in steady state) AND clears
+                        the model's own confidence floor (deadband below).
       timesfm_aligned — get_timesfm_signal_sync median sign agrees with side
-                        (300s cache). COUNTED only when
+                        (300s cache), same deadband requirement. COUNTED only when
                         `late_chase_timesfm_vote` is true; while the flag is
                         off an aligned read instead logs a
                         [COUNTERFACTUAL] line so the additive vote accrues a
@@ -2066,6 +2070,16 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
                         0.10 over-releases (falls to +$1.68); the weaker
                         separate knob is what makes the AND shape binding.
 
+    Deadband (2026-09-14, REZ −$20.08 max_loss): a vote additionally requires
+    |median_pct| >= min_conf_ratio x spread_pct — the SAME confidence floor the
+    signal module uses to render its log flag. Before this, the gate tested raw
+    median sign while the log read `NEUTRAL (ratio 0.17 < 0.25)`: a forecast the
+    system itself declares "no opinion" (median inside its own p10-p90 band)
+    still dropped the bar 0.90 → 0.81 and admitted a composite-0 entry. A
+    NEUTRAL read now casts NO vote (fail-closed, like missing/counter-direction).
+    Floor is hot-read from chronos_signal.min_conf_ratio / timesfm_signal.min_conf_ratio
+    (default 0.25; explicit 0 disables the deadband = old sign-only behavior).
+
     A signal only votes when it is exactly True; missing/None/error/
     counter-direction counts as 0. Failures never raise (fail-closed: fewer
     votes, never a false allow).
@@ -2074,23 +2088,54 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
     drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
     if drop <= 0:
         return (None, (), ())
+
+    def _clears_deadband(sig, cfg: Dict[str, Any], label: str) -> bool:
+        """True when the signal's median is OUTSIDE its own uncertainty band.
+
+        Mirrors chronos_signal/timesfm_signal `_format_signal_log`: below the
+        floor that module logs NEUTRAL, so a vote here must not contradict it.
+        Fail-closed: missing median/spread or a garbage floor config means no
+        vote (except explicit 0 = deadband disabled, per resolve_min_conf_ratio).
+        """
+        try:
+            floor = _chronos_resolve_min_conf_ratio(cfg)
+            med = getattr(sig, "median_pct", None)
+            spread = getattr(sig, "spread_pct", None)
+            if med is None or not spread:
+                return False
+            ratio = abs(med) / spread
+            if ratio < floor:
+                logger.info(
+                    f"[executor] late-chase corroboration: {label} vote "
+                    f"suppressed — NEUTRAL (ratio {ratio:.2f} < {floor:.2f}); "
+                    "no-opinion read must not lower the bar")
+                return False
+            return True
+        except Exception as e:  # never let the deadband check raise
+            logger.debug(f"[executor] late-chase corroboration: {label} "
+                         f"deadband check failed (treating as no vote): {e}")
+            return False
+
     names: list = []
-    # Chronos alignment — median sign vs side; None median or error = no vote.
+    # Chronos alignment — median sign vs side AND outside its own band; None
+    # median, error, or a NEUTRAL (in-the-band) read = no vote.
     try:
         sig = get_chronos_signal_sync(analysis.get("coin") or "unknown", side)
         m = sig.median_pct if sig.median_pct is not None else None
         if not sig.error and m is not None:
             aligned = (m > 0) if side == "long" else (m < 0)
-            if aligned:
+            if aligned and _clears_deadband(
+                    sig, config.get("chronos_signal") or {}, "chronos"):
                 names.append("chronos_aligned")
     except Exception as e:
         logger.debug(f"[executor] late-chase corroboration: chronos read failed "
                      f"(non-fatal): {e}")
-    # TimesFM-3 alignment — median sign vs side. Counted into the bar only
-    # when `late_chase_timesfm_vote` is true; while the flag is off an
-    # aligned read lands in shadow_names so the caller can log the would-
-    # rescue counterfactual (sample accrual; the live bar is byte-identical
-    # either way).
+    # TimesFM-3 alignment — median sign vs side AND outside its own band.
+    # Counted into the bar only when `late_chase_timesfm_vote` is true; while
+    # the flag is off an aligned read lands in shadow_names so the caller can
+    # log the would-rescue counterfactual (sample accrual; the live bar is
+    # byte-identical either way). The deadband applies to BOTH paths — a
+    # NEUTRAL tf read neither votes nor accrues a rescue sample.
     shadow_names: list = []
     vote_target = names if bool(gate.get("late_chase_timesfm_vote", False)) else shadow_names
     if (config.get("timesfm_signal") or {}).get("enabled", False):
@@ -2100,7 +2145,8 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
             tm = tsig.median_pct if tsig.median_pct is not None else None
             if not tsig.error and tm is not None:
                 aligned = (tm > 0) if side == "long" else (tm < 0)
-                if aligned:
+                if aligned and _clears_deadband(
+                        tsig, config.get("timesfm_signal") or {}, "timesfm"):
                     vote_target.append("timesfm_aligned")
         except Exception as e:
             logger.debug(f"[executor] late-chase corroboration: timesfm read failed "

@@ -47,7 +47,8 @@ def _analysis(conf=0.82, **over):
 
 
 def _chronos_aligned(monkeypatch):
-    sig = types.SimpleNamespace(median_pct=0.2, error=None)
+    # spread_pct clears the vote deadband (0.2/0.5 = 0.4 >= 0.25).
+    sig = types.SimpleNamespace(median_pct=0.2, spread_pct=0.5, error=None)
     monkeypatch.setattr(executor, "get_chronos_signal_sync", lambda c, s: sig)
 
 
