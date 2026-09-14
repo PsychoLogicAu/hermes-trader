@@ -72,7 +72,10 @@ def _analysis(conf=0.78, **over):
 
 
 def _chronos(monkeypatch, aligned, error=None):
-    sig = types.SimpleNamespace(median_pct=0.2 if aligned else -0.2, error=error)
+    # spread_pct set so the confident-vote cases clear the ratio deadband
+    # (|0.2|/0.5 = 0.4 >= 0.25 floor). NEUTRAL suppression has its own tests.
+    sig = types.SimpleNamespace(median_pct=0.2 if aligned else -0.2,
+                                spread_pct=0.5, error=error)
     monkeypatch.setattr(executor, "get_chronos_signal_sync", lambda c, s: sig)
     return sig
 
@@ -135,10 +138,112 @@ def test_corroboration_none_when_key_absent(monkeypatch):
     assert calls == []
 
 
+# ── NEUTRAL (deadband) reads cast no vote (2026-09-14, REZ −$20.08) ──────────
+# The gate used to test raw median sign while chronos_signal's own log read
+# `NEUTRAL (ratio 0.17 < 0.25)`: a forecast the system declares no-opinion
+# (median inside its p10-p90 band) lowered the bar and admitted a composite-0
+# entry at conf 0.82. A NEUTRAL read must now count 0, fail-closed — and the
+# suppression must be visible in the log so the two components never disagree.
+
+def _chronos_ratio(monkeypatch, median_pct, spread_pct, error=None):
+    sig = types.SimpleNamespace(median_pct=median_pct, spread_pct=spread_pct,
+                                error=error)
+    monkeypatch.setattr(executor, "get_chronos_signal_sync", lambda c, s: sig)
+    return sig
+
+
+def test_neutral_chronos_casts_no_vote(monkeypatch):
+    # REZ 2026-09-13 22:46 shape: median +0.77%, ratio 0.17 < 0.25 → the log
+    # says NEUTRAL, so the vote must be suppressed.
+    _chronos_ratio(monkeypatch, 0.77, 0.77 / 0.17)
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    assert n == 0
+    assert names == ()
+    assert shadow == ()
+
+
+def test_neutral_chronos_keeps_fixed_bar_at_gate(monkeypatch):
+    # With the only vote suppressed, conf 0.82 faces the FIXED bar 0.90 — the
+    # exact REZ entry is now blocked (was admitted at the dynamic 0.81).
+    _chronos_ratio(monkeypatch, 0.77, 4.5)
+    reason = executor._runner_entry_block_reason(_analysis(conf=0.82), _gate())
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert "bar 0.90" in reason
+    assert "0 signals aligned: none" in reason
+
+
+def test_neutral_suppression_is_logged(monkeypatch, caplog):
+    _chronos_ratio(monkeypatch, 0.77, 4.5)
+    with caplog.at_level(logging.INFO, logger="hermes_trader.agents.executor"):
+        executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    suppressed = [r for r in caplog.records
+                  if "vote suppressed" in r.getMessage() and "chronos" in r.getMessage()]
+    assert len(suppressed) == 1
+    assert "NEUTRAL (ratio 0.17 < 0.25)" in suppressed[0].getMessage()
+
+
+def test_confident_chronos_still_votes(monkeypatch):
+    # Boundary: ratio exactly at the floor (0.25) is NOT neutral — votes as
+    # before, so a real continuation call still lowers the bar.
+    _chronos_ratio(monkeypatch, 1.0, 4.0)
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    assert n == 1
+    assert names == ("chronos_aligned",)
+
+
+def test_missing_spread_casts_no_vote(monkeypatch):
+    # Fail-closed: an old-shape signal without spread_pct has no basis for a
+    # directional claim → no vote (same as missing median).
+    _chronos_ratio(monkeypatch, 0.77, None)
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), _gate(), "long")
+    assert n == 0
+    assert names == ()
+
+
+def test_deadband_floor_zero_disables_check(monkeypatch):
+    # chronos_signal.min_conf_ratio: 0 disables the floor (documented knob
+    # semantics) → byte-identical old sign-only vote behavior.
+    _chronos_ratio(monkeypatch, 0.77, 4.5)
+    cfg = _gate()
+    cfg["chronos_signal"] = {"enabled": True, "min_conf_ratio": 0}
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), cfg, "long")
+    assert n == 1
+    assert names == ("chronos_aligned",)
+
+
+def test_deadband_floor_hot_read_per_call(monkeypatch):
+    # The floor is read from the config dict at call time (hot-reload), not
+    # captured: a tighter floor suppresses a vote the loose one counted.
+    _chronos_ratio(monkeypatch, 1.0, 4.0)  # ratio 0.25
+    loose = _gate()
+    loose["chronos_signal"] = {"enabled": True, "min_conf_ratio": 0.2}
+    assert executor._late_chase_corroboration(_analysis(), loose, "long")[0] == 1
+    tight = _gate()
+    tight["chronos_signal"] = {"enabled": True, "min_conf_ratio": 0.3}
+    assert executor._late_chase_corroboration(_analysis(), tight, "long")[0] == 0
+
+
+def test_neutral_timesfm_no_vote_and_no_shadow(monkeypatch):
+    # Shadow accrual is gated too: a NEUTRAL tf read neither votes (flag on)
+    # nor logs a would-rescue sample (flag off).
+    _chronos(monkeypatch, aligned=False)
+    from hermes_trader.agents import timesfm_signal
+    tsig = types.SimpleNamespace(median_pct=0.1, spread_pct=4.0, error=None)
+    monkeypatch.setattr(timesfm_signal, "get_timesfm_signal_sync",
+                        lambda c, s: tsig)
+    cfg_on = _gate_tf(late_chase_timesfm_vote=True)
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), cfg_on, "long")
+    assert (n, names, shadow) == (0, (), ())
+    cfg_off = _gate_tf()
+    n, names, shadow = executor._late_chase_corroboration(_analysis(), cfg_off, "long")
+    assert (n, names, shadow) == (0, (), ())
+
+
 # ── TimesFM additive vote (shadow by default) ─────────────────────────────────
 
 def _timesfm(monkeypatch, aligned, error=None, enabled=True):
-    sig = types.SimpleNamespace(median_pct=0.3 if aligned else -0.3, error=error)
+    sig = types.SimpleNamespace(median_pct=0.3 if aligned else -0.3,
+                                spread_pct=0.6, error=error)  # ratio 0.5 clears
     from hermes_trader.agents import timesfm_signal
     monkeypatch.setattr(timesfm_signal, "get_timesfm_signal_sync",
                         lambda c, s: sig)
@@ -554,3 +659,113 @@ def test_mover_fresh_impulse_never_takes_late_chase_path(monkeypatch):
                         volume_spike_fired=True, breakout_fired=True)
     assert executor._runner_entry_block_reason(a, _gate()) == ""
     assert calls == []
+
+
+# ── Composite-score floor on the bypass (2026-09-14, `late_chase_bypass_min_composite`) ──
+# Evidence: scratch/_late_chase_composite_cf.py — shadow cohort composite==0 netted
+# −$77.97 (n=15, 5 max_loss, negative every day traded) vs +$74.74 (n=133) for >0.
+# Semantics mirror the tape gate: consulted only at conf >= bar; floor <= 0/absent
+# ⇒ byte-identical to before; deny suppresses even a LIVE bypass.
+
+def test_composite_floor_absent_zero_score_bypasses_unchanged(monkeypatch):
+    # Key absent (pre-feature config): composite 0 still bypasses — the
+    # no-op guarantee for every existing config file.
+    _chronos(monkeypatch, aligned=True)
+    a = _analysis(conf=0.82)  # composite_score 0.0 in the default fixture
+    assert executor._runner_entry_block_reason(a, _gate()) == ""
+
+
+def test_composite_floor_zero_disables_check(monkeypatch):
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=0.0)
+    assert executor._runner_entry_block_reason(_analysis(conf=0.82), g) == ""
+
+
+def test_composite_floor_denies_zero_score(monkeypatch, caplog):
+    # Floor 1.0, composite 0: bypass denied even though conf clears the bar;
+    # standard late-chase block reason stands (parser-compatible) + loud line.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    denied = [r for r in caplog.records if "[gate][COMPOSITE]" in r.getMessage()]
+    assert len(denied) == 1
+    assert "DENIED" in denied[0].getMessage()
+    assert "SKR LONG" in denied[0].getMessage()
+
+
+def test_composite_floor_allows_positive_score(monkeypatch, caplog):
+    # Composite 5 >= floor 1: bypass proceeds; the live log line carries the
+    # COMPOSITE=allow annotation for the cohort join.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.INFO,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(
+            _analysis(conf=0.82, composite_score=5.0), g)
+    assert reason == ""
+    lines = [r for r in caplog.records if "late-trend chase bypassed" in r.getMessage()]
+    assert len(lines) == 1
+    assert "COMPOSITE=allow" in lines[0].getMessage()
+
+
+def test_composite_floor_missing_score_denies(monkeypatch):
+    # Fail-safe: analysis dict WITHOUT composite_score reads as 0 → deny side.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    a = _analysis(conf=0.82)
+    a.pop("composite_score")
+    reason = executor._runner_entry_block_reason(a, g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+
+
+def test_composite_floor_shadow_annotates_without_changing_outcome(monkeypatch, caplog):
+    # Shadow accrual (bypass off + shadow on): the WOULD HAVE BYPASSED line
+    # carries COMPOSITE=deny for the zero-score shape and COMPOSITE=allow for
+    # the positive one; in BOTH cases the trade is still blocked (shadow never
+    # changes the outcome).
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=False,
+              bypass_late_trend_chase_shadow_mode=True,
+              late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    accruals = [r for r in caplog.records
+                if "WOULD HAVE BYPASSED" in r.getMessage()]
+    assert len(accruals) == 1
+    assert "COMPOSITE=deny" in accruals[0].getMessage()
+
+
+def test_composite_floor_denied_even_with_tape_allow(monkeypatch, caplog):
+    # Interaction: tape gate ALLOWS (quiet BTC) but composite floor still
+    # denies — the two sub-gates are ANDed at the bypass point.
+    _chronos(monkeypatch, aligned=True)
+    monkeypatch.setattr(
+        executor, "_late_chase_tape_read",
+        lambda: {"vol": 0.7, "drift": -0.3})
+    g = _gate(late_chase_tape_gate=True, late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert any("[gate][COMPOSITE]" in r.getMessage() for r in caplog.records)
+
+
+def test_composite_floor_fresh_impulse_untouched(monkeypatch):
+    # The floor lives on the BYPASS path only: a fresh-impulse entry with
+    # composite 0 never reaches it (fresh impulse exits the late-chase branch
+    # before conf-vs-bar is consulted).
+    calls = []
+    monkeypatch.setattr(
+        executor, "get_chronos_signal_sync",
+        lambda c, s: calls.append(1) or types.SimpleNamespace(
+            median_pct=None, error=None))
+    a = _analysis(conf=0.72, composite_score=35.0,
+                  volume_spike_fired=True, breakout_fired=True,
+                  slow_burn_count=1)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    assert executor._runner_entry_block_reason(a, g) == ""

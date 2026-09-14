@@ -18,7 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.duel_store import effective_primary_model
-from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
+from hermes_trader.agents.chronos_signal import (
+    get_chronos_signal_sync,
+    resolve_min_conf_ratio as _chronos_resolve_min_conf_ratio,
+)
 from hermes_trader.agents.dsl_exit import (
     ExitPolicy,
     RetraceTier,
@@ -2047,9 +2050,10 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
 
     Signals (independent pipelines, NOT the LLM's own confidence):
       chronos_aligned — get_chronos_signal_sync median sign agrees with side
-                        (300s cache: a silent hit in steady state)
+                        (300s cache: a silent hit in steady state) AND clears
+                        the model's own confidence floor (deadband below).
       timesfm_aligned — get_timesfm_signal_sync median sign agrees with side
-                        (300s cache). COUNTED only when
+                        (300s cache), same deadband requirement. COUNTED only when
                         `late_chase_timesfm_vote` is true; while the flag is
                         off an aligned read instead logs a
                         [COUNTERFACTUAL] line so the additive vote accrues a
@@ -2066,6 +2070,16 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
                         0.10 over-releases (falls to +$1.68); the weaker
                         separate knob is what makes the AND shape binding.
 
+    Deadband (2026-09-14, REZ −$20.08 max_loss): a vote additionally requires
+    |median_pct| >= min_conf_ratio x spread_pct — the SAME confidence floor the
+    signal module uses to render its log flag. Before this, the gate tested raw
+    median sign while the log read `NEUTRAL (ratio 0.17 < 0.25)`: a forecast the
+    system itself declares "no opinion" (median inside its own p10-p90 band)
+    still dropped the bar 0.90 → 0.81 and admitted a composite-0 entry. A
+    NEUTRAL read now casts NO vote (fail-closed, like missing/counter-direction).
+    Floor is hot-read from chronos_signal.min_conf_ratio / timesfm_signal.min_conf_ratio
+    (default 0.25; explicit 0 disables the deadband = old sign-only behavior).
+
     A signal only votes when it is exactly True; missing/None/error/
     counter-direction counts as 0. Failures never raise (fail-closed: fewer
     votes, never a false allow).
@@ -2074,23 +2088,54 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
     drop = float(gate.get("late_chase_dynamic_per_signal_drop", 0.0))
     if drop <= 0:
         return (None, (), ())
+
+    def _clears_deadband(sig, cfg: Dict[str, Any], label: str) -> bool:
+        """True when the signal's median is OUTSIDE its own uncertainty band.
+
+        Mirrors chronos_signal/timesfm_signal `_format_signal_log`: below the
+        floor that module logs NEUTRAL, so a vote here must not contradict it.
+        Fail-closed: missing median/spread or a garbage floor config means no
+        vote (except explicit 0 = deadband disabled, per resolve_min_conf_ratio).
+        """
+        try:
+            floor = _chronos_resolve_min_conf_ratio(cfg)
+            med = getattr(sig, "median_pct", None)
+            spread = getattr(sig, "spread_pct", None)
+            if med is None or not spread:
+                return False
+            ratio = abs(med) / spread
+            if ratio < floor:
+                logger.info(
+                    f"[executor] late-chase corroboration: {label} vote "
+                    f"suppressed — NEUTRAL (ratio {ratio:.2f} < {floor:.2f}); "
+                    "no-opinion read must not lower the bar")
+                return False
+            return True
+        except Exception as e:  # never let the deadband check raise
+            logger.debug(f"[executor] late-chase corroboration: {label} "
+                         f"deadband check failed (treating as no vote): {e}")
+            return False
+
     names: list = []
-    # Chronos alignment — median sign vs side; None median or error = no vote.
+    # Chronos alignment — median sign vs side AND outside its own band; None
+    # median, error, or a NEUTRAL (in-the-band) read = no vote.
     try:
         sig = get_chronos_signal_sync(analysis.get("coin") or "unknown", side)
         m = sig.median_pct if sig.median_pct is not None else None
         if not sig.error and m is not None:
             aligned = (m > 0) if side == "long" else (m < 0)
-            if aligned:
+            if aligned and _clears_deadband(
+                    sig, config.get("chronos_signal") or {}, "chronos"):
                 names.append("chronos_aligned")
     except Exception as e:
         logger.debug(f"[executor] late-chase corroboration: chronos read failed "
                      f"(non-fatal): {e}")
-    # TimesFM-3 alignment — median sign vs side. Counted into the bar only
-    # when `late_chase_timesfm_vote` is true; while the flag is off an
-    # aligned read lands in shadow_names so the caller can log the would-
-    # rescue counterfactual (sample accrual; the live bar is byte-identical
-    # either way).
+    # TimesFM-3 alignment — median sign vs side AND outside its own band.
+    # Counted into the bar only when `late_chase_timesfm_vote` is true; while
+    # the flag is off an aligned read lands in shadow_names so the caller can
+    # log the would-rescue counterfactual (sample accrual; the live bar is
+    # byte-identical either way). The deadband applies to BOTH paths — a
+    # NEUTRAL tf read neither votes nor accrues a rescue sample.
     shadow_names: list = []
     vote_target = names if bool(gate.get("late_chase_timesfm_vote", False)) else shadow_names
     if (config.get("timesfm_signal") or {}).get("enabled", False):
@@ -2100,7 +2145,8 @@ def _late_chase_corroboration(analysis: Dict[str, Any], config: Dict[str, Any],
             tm = tsig.median_pct if tsig.median_pct is not None else None
             if not tsig.error and tm is not None:
                 aligned = (tm > 0) if side == "long" else (tm < 0)
-                if aligned:
+                if aligned and _clears_deadband(
+                        tsig, config.get("timesfm_signal") or {}, "timesfm"):
                     vote_target.append("timesfm_aligned")
         except Exception as e:
             logger.debug(f"[executor] late-chase corroboration: timesfm read failed "
@@ -2151,6 +2197,119 @@ def _sidestep_bearish_block_reason(analysis: Dict[str, Any], config: Dict[str, A
         return (f"sidestep_bearish_blocked ({analysis.get('coin')}: {why}, "
                 f"no uptrend — would buy a selloff, not a breakout)")
     return ""
+
+
+def _late_chase_tape_read():
+    """BTC trail24h tape read for the late-chase bypass tape sub-gate.
+
+    Module-level indirection over market_regime.btc_tape_activity (the SAME
+    cached 5m-candle read the quiet_tape gate consumes, 300s TTL) so tests
+    can monkeypatch it exactly like get_chronos_signal_sync. Returns
+    {"vol": %, "drift": %} or None on a data gap.
+    """
+    from hermes_trader.agents.market_regime import btc_tape_activity
+    try:
+        return btc_tape_activity()
+    except Exception:
+        return None
+
+
+def _late_chase_tape_gate(gate: Dict[str, Any], coin: str, side: str,
+                          conf: float, bar: float,
+                          suppresses: bool) -> Tuple[bool, str]:
+    """BTC-loudness meta-gate on the late-chase BYPASS (2026-09-13).
+
+    Evidence (.hermes/specs/late-chase-btc-tape-gate.md): the shadow bypass
+    cohort's P/L tracks BTC's tape — entries taken while BTC trail24h vol
+    < 1.5% netted +$109 (n=81) while vol >= 1.5% netted −$80 (n=70), and the
+    entire 09-10/09-11 drawdown (−$114, 12 max_loss stops) sat in the loud
+    bucket; signed drift < −1% was −$25 vs +$30 above +1%. So the bypass is
+    ALLOWED only when BTC is calm-or-not-falling:
+
+        allow = vol < late_chase_tape_vol_max_pct AND drift > late_chase_tape_drift_min_pct
+
+    (Opposite polarity to quiet_tape, which BLOCKS entries on a quiet tape —
+    this gate consumes the raw read, not that verdict.)
+
+    Only consulted when conf >= bar (a bypass candidate): with the master
+    flag off it is never called and behavior is byte-identical. Deny
+    suppresses the bypass even when `bypass_late_trend_chase: true` — the
+    late-chase block reason then stands, exactly as a sub-bar conf. A data
+    gap FAILS SAFE TO DENY for a live bypass (the extra evidence is missing;
+    unlike quiet_tape's gap-passes rule, here absence of evidence is not a
+    reason to release). Shadow mode never changes the outcome — it appends
+    `TAPE=allow|deny|gap(...)` to the caller's log line so the accrual
+    carries the verdict + raw reads for offline replay.
+
+    Returns (allowed, tape_note) — tape_note is "" when the gate is off.
+    """
+    if not bool(gate.get("late_chase_tape_gate", False)):
+        return True, ""
+    vol_max = float(gate.get("late_chase_tape_vol_max_pct", 1.5))
+    drift_min = float(gate.get("late_chase_tape_drift_min_pct", -1.0))
+    tape = _late_chase_tape_read()
+    if tape is None or tape.get("vol") is None or tape.get("drift") is None:
+        note = f" TAPE=gap(fail-safe deny, allow-band vol<{vol_max:.2f}, drift>{drift_min:.2f})"
+        if suppresses:
+            logger.warning(
+                f"[gate][TAPE] late_chase_bypass DENIED for {coin} "
+                f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but no "
+                f"BTC tape read — fail-safe deny (allow-band vol<{vol_max:.2f}, "
+                f"drift>{drift_min:.2f})")
+        return False, note
+    vol, drift = float(tape["vol"]), float(tape["drift"])
+    allow = vol < vol_max and drift > drift_min
+    reads = f"vol {vol:.2f}%, drift {drift:+.2f}%"
+    if allow:
+        return True, f" TAPE=allow({reads})"
+    note = (f" TAPE=deny({reads}, allow-band vol<{vol_max:.2f}, "
+            f"drift>{drift_min:.2f})")
+    if suppresses:
+        logger.warning(
+            f"[gate][TAPE] late_chase_bypass DENIED for {coin} "
+            f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but BTC tape "
+            f"{reads} outside allow-band (vol<{vol_max:.2f}, "
+            f"drift>{drift_min:.2f}) — blocked")
+    return False, note
+
+
+def _late_chase_composite_gate(gate: Dict[str, Any], coin: str, side: str,
+                               conf: float, bar: float, score: float,
+                               suppresses: bool) -> Tuple[bool, str]:
+    """Composite-score floor on the late-chase bypass (2026-09-14).
+
+    Counterfactual evidence (scratch/_late_chase_composite_cf.py, shadow cohort
+    09-05→09-13, n=582 scans / 148 executable): bypass admits with composite
+    score == 0 netted −$77.97 (n=15, 5 max_loss stops) and were negative on
+    EVERY day they traded, while composite > 0 netted +$74.74 (n=133). A
+    zero-composite late-chase admit means NO trigger fired at all — no
+    breakout, burst, mover, volume spike, slow burn: a bare LLM verdict
+    against a bar lowered by one forecast vote (REZ 09-13 22:46, −$20.08).
+
+    Semantics mirror `_late_chase_tape_gate`: consulted ONLY at bypass
+    candidates (conf >= bar); floor <= 0 or absent ⇒ (True, "") with no
+    behavior change (byte-identical to pre-feature). A deny suppresses even a
+    LIVE bypass (the standard late-chase block reason then stands, byte-
+    identical for parsers) and logs a loud [gate][COMPOSITE] DENIED line.
+    Shadow accrual lines carry COMPOSITE=allow|deny so the cohort keeps its
+    counterfactual record. Fail-safe: score is already `or 0` normalized by
+    the caller; a missing composite reads as 0 = deny side when the floor is
+    on (deliberate — the floor asks for positive evidence of setup).
+
+    Returns (allowed, comp_note); comp_note is "" when the floor is off.
+    """
+    floor = float(gate.get("late_chase_bypass_min_composite", 0.0) or 0.0)
+    if floor <= 0:
+        return True, ""
+    if score >= floor:
+        return True, f" COMPOSITE=allow(score {score:.1f})"
+    note = (f" COMPOSITE=deny(score {score:.1f} < floor {floor:.1f})")
+    if suppresses:
+        logger.warning(
+            f"[gate][COMPOSITE] late_chase_bypass DENIED for {coin} "
+            f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but composite "
+            f"score {score:.1f} < floor {floor:.1f} — blocked")
+    return False, note
 
 
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
@@ -2300,17 +2459,37 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # conf-vs-bar + coin distribution for replay before re-enabling.
         _bt = gate.get("bypass_late_trend_chase", False)
         _bs = bool(gate.get("bypass_late_trend_chase_shadow_mode", False))
+        tape_note = ""
         if conf >= bar:
             bypassed = bool(_bt)
+            # BTC-loudness meta-gate on the bypass (2026-09-13, spec
+            # .hermes/specs/late-chase-btc-tape-gate.md): consulted ONLY at
+            # bypass candidates (conf >= bar); master flag off ⇒ returns
+            # (True, "") with no fetch — byte-identical to before. A DENY
+            # suppresses even a live bypass; shadow mode never changes the
+            # outcome, it only annotates the accrual line with TAPE=verdict.
+            _allowed, tape_note = _late_chase_tape_gate(
+                gate, coin, side, conf, bar, suppresses=bypassed)
+            if bypassed and not _allowed:
+                bypassed = False
+            # Composite-score floor (2026-09-14): a zero-composite candidate
+            # has NO setup evidence at all — see helper docstring for the
+            # cohort numbers. Runs after the tape gate so both annotations
+            # land on shadow accruals; floor off ⇒ no-op, byte-identical.
+            _allowed_c, comp_note = _late_chase_composite_gate(
+                gate, coin, side, conf, bar, score, suppresses=bypassed)
+            if bypassed and not _allowed_c:
+                bypassed = False
             if bypassed:
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
-                            f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}")
+                            f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
+                            f"{tape_note}{comp_note}")
             elif _bs:
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
                     f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
-                    f"{bar:.2f}{bar_note} — NOT bypassing (shadow mode), "
-                    f"live rule stands")
+                    f"{bar:.2f}{bar_note}{tape_note}{comp_note} — NOT "
+                    f"bypassing (shadow mode), live rule stands")
         else:
             bypassed = False
         if not bypassed:
