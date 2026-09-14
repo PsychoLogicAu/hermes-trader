@@ -659,3 +659,113 @@ def test_mover_fresh_impulse_never_takes_late_chase_path(monkeypatch):
                         volume_spike_fired=True, breakout_fired=True)
     assert executor._runner_entry_block_reason(a, _gate()) == ""
     assert calls == []
+
+
+# ── Composite-score floor on the bypass (2026-09-14, `late_chase_bypass_min_composite`) ──
+# Evidence: scratch/_late_chase_composite_cf.py — shadow cohort composite==0 netted
+# −$77.97 (n=15, 5 max_loss, negative every day traded) vs +$74.74 (n=133) for >0.
+# Semantics mirror the tape gate: consulted only at conf >= bar; floor <= 0/absent
+# ⇒ byte-identical to before; deny suppresses even a LIVE bypass.
+
+def test_composite_floor_absent_zero_score_bypasses_unchanged(monkeypatch):
+    # Key absent (pre-feature config): composite 0 still bypasses — the
+    # no-op guarantee for every existing config file.
+    _chronos(monkeypatch, aligned=True)
+    a = _analysis(conf=0.82)  # composite_score 0.0 in the default fixture
+    assert executor._runner_entry_block_reason(a, _gate()) == ""
+
+
+def test_composite_floor_zero_disables_check(monkeypatch):
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=0.0)
+    assert executor._runner_entry_block_reason(_analysis(conf=0.82), g) == ""
+
+
+def test_composite_floor_denies_zero_score(monkeypatch, caplog):
+    # Floor 1.0, composite 0: bypass denied even though conf clears the bar;
+    # standard late-chase block reason stands (parser-compatible) + loud line.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    denied = [r for r in caplog.records if "[gate][COMPOSITE]" in r.getMessage()]
+    assert len(denied) == 1
+    assert "DENIED" in denied[0].getMessage()
+    assert "SKR LONG" in denied[0].getMessage()
+
+
+def test_composite_floor_allows_positive_score(monkeypatch, caplog):
+    # Composite 5 >= floor 1: bypass proceeds; the live log line carries the
+    # COMPOSITE=allow annotation for the cohort join.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.INFO,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(
+            _analysis(conf=0.82, composite_score=5.0), g)
+    assert reason == ""
+    lines = [r for r in caplog.records if "late-trend chase bypassed" in r.getMessage()]
+    assert len(lines) == 1
+    assert "COMPOSITE=allow" in lines[0].getMessage()
+
+
+def test_composite_floor_missing_score_denies(monkeypatch):
+    # Fail-safe: analysis dict WITHOUT composite_score reads as 0 → deny side.
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    a = _analysis(conf=0.82)
+    a.pop("composite_score")
+    reason = executor._runner_entry_block_reason(a, g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+
+
+def test_composite_floor_shadow_annotates_without_changing_outcome(monkeypatch, caplog):
+    # Shadow accrual (bypass off + shadow on): the WOULD HAVE BYPASSED line
+    # carries COMPOSITE=deny for the zero-score shape and COMPOSITE=allow for
+    # the positive one; in BOTH cases the trade is still blocked (shadow never
+    # changes the outcome).
+    _chronos(monkeypatch, aligned=True)
+    g = _gate(bypass_late_trend_chase=False,
+              bypass_late_trend_chase_shadow_mode=True,
+              late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    accruals = [r for r in caplog.records
+                if "WOULD HAVE BYPASSED" in r.getMessage()]
+    assert len(accruals) == 1
+    assert "COMPOSITE=deny" in accruals[0].getMessage()
+
+
+def test_composite_floor_denied_even_with_tape_allow(monkeypatch, caplog):
+    # Interaction: tape gate ALLOWS (quiet BTC) but composite floor still
+    # denies — the two sub-gates are ANDed at the bypass point.
+    _chronos(monkeypatch, aligned=True)
+    monkeypatch.setattr(
+        executor, "_late_chase_tape_read",
+        lambda: {"vol": 0.7, "drift": -0.3})
+    g = _gate(late_chase_tape_gate=True, late_chase_bypass_min_composite=1.0)
+    with caplog.at_level(logging.WARNING,
+                         logger="hermes_trader.agents.executor"):
+        reason = executor._runner_entry_block_reason(_analysis(conf=0.82), g)
+    assert reason.startswith("runner_gate_blocked (late trend-only chase")
+    assert any("[gate][COMPOSITE]" in r.getMessage() for r in caplog.records)
+
+
+def test_composite_floor_fresh_impulse_untouched(monkeypatch):
+    # The floor lives on the BYPASS path only: a fresh-impulse entry with
+    # composite 0 never reaches it (fresh impulse exits the late-chase branch
+    # before conf-vs-bar is consulted).
+    calls = []
+    monkeypatch.setattr(
+        executor, "get_chronos_signal_sync",
+        lambda c, s: calls.append(1) or types.SimpleNamespace(
+            median_pct=None, error=None))
+    a = _analysis(conf=0.72, composite_score=35.0,
+                  volume_spike_fired=True, breakout_fired=True,
+                  slow_burn_count=1)
+    g = _gate(late_chase_bypass_min_composite=1.0)
+    assert executor._runner_entry_block_reason(a, g) == ""

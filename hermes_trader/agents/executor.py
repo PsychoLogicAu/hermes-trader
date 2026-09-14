@@ -2273,6 +2273,45 @@ def _late_chase_tape_gate(gate: Dict[str, Any], coin: str, side: str,
     return False, note
 
 
+def _late_chase_composite_gate(gate: Dict[str, Any], coin: str, side: str,
+                               conf: float, bar: float, score: float,
+                               suppresses: bool) -> Tuple[bool, str]:
+    """Composite-score floor on the late-chase bypass (2026-09-14).
+
+    Counterfactual evidence (scratch/_late_chase_composite_cf.py, shadow cohort
+    09-05→09-13, n=582 scans / 148 executable): bypass admits with composite
+    score == 0 netted −$77.97 (n=15, 5 max_loss stops) and were negative on
+    EVERY day they traded, while composite > 0 netted +$74.74 (n=133). A
+    zero-composite late-chase admit means NO trigger fired at all — no
+    breakout, burst, mover, volume spike, slow burn: a bare LLM verdict
+    against a bar lowered by one forecast vote (REZ 09-13 22:46, −$20.08).
+
+    Semantics mirror `_late_chase_tape_gate`: consulted ONLY at bypass
+    candidates (conf >= bar); floor <= 0 or absent ⇒ (True, "") with no
+    behavior change (byte-identical to pre-feature). A deny suppresses even a
+    LIVE bypass (the standard late-chase block reason then stands, byte-
+    identical for parsers) and logs a loud [gate][COMPOSITE] DENIED line.
+    Shadow accrual lines carry COMPOSITE=allow|deny so the cohort keeps its
+    counterfactual record. Fail-safe: score is already `or 0` normalized by
+    the caller; a missing composite reads as 0 = deny side when the floor is
+    on (deliberate — the floor asks for positive evidence of setup).
+
+    Returns (allowed, comp_note); comp_note is "" when the floor is off.
+    """
+    floor = float(gate.get("late_chase_bypass_min_composite", 0.0) or 0.0)
+    if floor <= 0:
+        return True, ""
+    if score >= floor:
+        return True, f" COMPOSITE=allow(score {score:.1f})"
+    note = (f" COMPOSITE=deny(score {score:.1f} < floor {floor:.1f})")
+    if suppresses:
+        logger.warning(
+            f"[gate][COMPOSITE] late_chase_bypass DENIED for {coin} "
+            f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but composite "
+            f"score {score:.1f} < floor {floor:.1f} — blocked")
+    return False, note
+
+
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -2433,16 +2472,24 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 gate, coin, side, conf, bar, suppresses=bypassed)
             if bypassed and not _allowed:
                 bypassed = False
+            # Composite-score floor (2026-09-14): a zero-composite candidate
+            # has NO setup evidence at all — see helper docstring for the
+            # cohort numbers. Runs after the tape gate so both annotations
+            # land on shadow accruals; floor off ⇒ no-op, byte-identical.
+            _allowed_c, comp_note = _late_chase_composite_gate(
+                gate, coin, side, conf, bar, score, suppresses=bypassed)
+            if bypassed and not _allowed_c:
+                bypassed = False
             if bypassed:
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
                             f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
-                            f"{tape_note}")
+                            f"{tape_note}{comp_note}")
             elif _bs:
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
                     f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
-                    f"{bar:.2f}{bar_note}{tape_note} — NOT bypassing (shadow "
-                    f"mode), live rule stands")
+                    f"{bar:.2f}{bar_note}{tape_note}{comp_note} — NOT "
+                    f"bypassing (shadow mode), live rule stands")
         else:
             bypassed = False
         if not bypassed:
