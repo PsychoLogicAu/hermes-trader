@@ -731,6 +731,53 @@ def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
     return {"pass": False, "reason": reason}
 
 
+def tail_spread_comparator(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Log-only comparator: path-tail veto vs band-width veto (plan D4, 2026-09-15).
+
+    The armed chronos_tail_trigger_gate keys off the adverse QUANTILE PATH
+    (min q10 / max q90 over the first `window_steps` steps). The 2026-09 model
+    sweep (scratch/e2c_tail_vs_mean.py, 156k forecast-outcome pairs) found its
+    stop-out AUC is nearly matched by the forecast BAND WIDTH (spread_pct) — a
+    scalar requiring no path. This comparator records what each rule WOULD have
+    done per evaluated entry so accrual can decide whether the path-based veto
+    earns its complexity over a width-only veto.
+
+    CONTRACT: never blocks. Always returns pass=True; on enabled, carries a
+    `cmp` dict (tail_pct, spread_pct, tail_trip, spread_trip) for the executor
+    to log. Fail-safe: any missing input -> trips False; disabled (default) ->
+    plain {"pass": True}. Trip thresholds mirror the live tail gate by default
+    (window_steps/min_adv_path_pct); spread threshold from spread_pct_threshold.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    k = int(cfg.get("window_steps", 6) or 6)
+    x = float(cfg.get("min_adv_path_pct", 2.5) or 2.5)
+    s_thr = float(cfg.get("spread_pct_threshold", 4.0) or 4.0)
+    tail_pct = None
+    tail_trip = False
+    spread_trip = False
+    try:
+        path = (ctx.chronos_q10_path_pct if ctx.trade_side == "long"
+                else ctx.chronos_q90_path_pct)
+        if path and len(path) >= k > 0 and x > 0:
+            window = path[:k]
+            tail_pct = min(window) if ctx.trade_side == "long" else max(window)
+            tail_trip = tail_pct <= -x if ctx.trade_side == "long" else tail_pct >= x
+        spread = getattr(ctx, "chronos_spread_pct", None)
+        if spread is not None and s_thr > 0:
+            spread_trip = float(spread) >= s_thr
+    except Exception:
+        # A comparator bug must never touch execution.
+        return {"pass": True}
+    return {"pass": True, "cmp": {
+        "tail_pct": tail_pct,
+        "spread_pct": getattr(ctx, "chronos_spread_pct", None),
+        "tail_trip": tail_trip,
+        "spread_trip": spread_trip,
+    }}
+
+
 def timesfm_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """TimesFM direction-mismatch conviction gate (SHADOW-ONLY by construction).
 
@@ -1508,6 +1555,10 @@ def eval_all_gates(
     # is flipped. Passes when the warm cache has no per-step paths.
     results["chronos_tail_trigger"] = chronos_tail_trigger_gate(
         ctx, effective_config.get("chronos_tail_trigger_gate") or {})
+    # Log-only comparator (plan D4): path-tail vs band-width veto agreement.
+    # Structurally cannot block; disabled unless tail_spread_comparator.enabled.
+    results["tail_spread_cmp"] = tail_spread_comparator(
+        ctx, effective_config.get("tail_spread_comparator") or {})
     # Band counter-trend breach (GRASS shape): disabled by default in the
     # shadow-gate config block below; when enabled it runs in shadow_mode
     # (would-block marker) until the operator promotes it.

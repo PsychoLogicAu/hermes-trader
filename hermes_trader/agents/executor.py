@@ -1328,6 +1328,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_ct.get('reason')} — "
             f"NOT blocking (shadow mode)")
+    # Log-only comparator accrual (plan D4, 2026-09-15): per evaluated entry,
+    # what the PATH-tail veto vs the band-WIDTH veto would each have done. The
+    # 2026-09 sweep found near-equal stop-out AUC — accrue divergence counts
+    # (grep "[gate][CMP] tail_vs_spread") and settle path-vs-width with real
+    # outcomes before touching the armed gate. Never affects execution.
+    _tsc = gate_output["results"].get("tail_spread_cmp") or {}
+    if _tsc.get("cmp"):
+        _c = _tsc["cmp"]
+        logger.info(
+            f"[gate][CMP] tail_vs_spread {analysis['coin']} {trade_side.upper()}: "
+            f"tail_trip={_c['tail_trip']} (tail {_c['tail_pct'] if _c['tail_pct'] is not None else float('nan'):+.2f}%), "
+            f"spread_trip={_c['spread_trip']} (spread {(_c['spread_pct'] if _c['spread_pct'] is not None else float('nan')):.2f}%)")
 
     # Band counter-trend breach shadow gate: same would-block pattern. Fires
     # on the GRASS shape — a counter-trend bounce/dip entry extended beyond
