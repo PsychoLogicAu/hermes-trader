@@ -79,6 +79,12 @@ class CandidateForecast:
     median: Optional[List[float]] = None   # absolute price, len == horizon
     q10: Optional[List[float]] = None
     q90: Optional[List[float]] = None
+    # Full 9-quantile set in absolute price (len == horizon each), ordered by
+    # QUANTILE LEVEL ascending (index 4 == median). The selection mixture
+    # pools across candidates per quantile level (their get_best_pred math),
+    # so it needs more than the 3 headline levels. None when the adapter
+    # doesn't expose them or on any error path.
+    quantiles: Optional[Dict[str, List[float]]] = None
     horizon: int = 0
     inference_ms: float = 0.0
     error: Optional[str] = None
@@ -271,6 +277,14 @@ def preload_all(models: Optional[List[str]] = None, timeout_s: float = 120.0) ->
 
 
 # ── Per-adapter raw forecast (pure math; caller provides closes) ───────────────
+def _level_key(level: str) -> float:
+    """Sort key for quantile-level strings (canonical ascending)."""
+    try:
+        return float(level)
+    except (TypeError, ValueError):
+        return 10.0  # unknown level sorts last, never first
+
+
 def _forecast_raw(model: str, closes: List[float], horizon: int) -> Dict[str, Any]:
     """Run one adapter on a close-price list. Returns {median,q10,q90} in
     ABSOLUTE units (each len == horizon) or raises on any error."""
@@ -284,13 +298,14 @@ def _forecast_raw(model: str, closes: List[float], horizon: int) -> Dict[str, An
             raise RuntimeError(_load_errors.get("chronos", "unavailable"))
         import torch
         data = [np.asarray(closes, dtype=np.float32)]
+        levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         with torch.no_grad():
             quantile_forecast, _ = pipeline.predict_quantiles(
                 inputs=data, prediction_length=horizon,
-                quantile_levels=[0.1, 0.5, 0.9],
+                quantile_levels=levels,
             )
-        q = quantile_forecast[0][0, :horizon, :].cpu().numpy()  # (h, 3)
-        return {"median": q[:, 1].tolist(), "q10": q[:, 0].tolist(), "q90": q[:, 2].tolist()}
+        q = quantile_forecast[0][0, :horizon, :].cpu().numpy()  # (h, 9)
+        return {"quantiles": {lv: q[:, i].tolist() for i, lv in enumerate(levels)}}
 
     if model == "timesfm":
         forecaster = _ensure_loaded("timesfm")
@@ -303,13 +318,9 @@ def _forecast_raw(model: str, closes: List[float], horizon: int) -> Dict[str, An
             use_symmetric_averaging=False,
             make_positive=False,
         )
-        median = np.asarray(out.forecast, dtype=np.float64)[:horizon]
-        q = np.asarray(out.quantiles, dtype=np.float64)[:horizon]
-        # quantile order follows the checkpoint config (0.1..0.9, 3.0)
-        qlevels = [float(x) for x in forecaster.config.quantiles]
-        i10 = min(range(len(qlevels)), key=lambda i: abs(qlevels[i] - 0.1))
-        i90 = min(range(len(qlevels)), key=lambda i: abs(qlevels[i] - 0.9))
-        return {"median": median.tolist(), "q10": q[:, i10].tolist(), "q90": q[:, i90].tolist()}
+        q = np.asarray(out.quantiles, dtype=np.float64)[:horizon]  # (h, n_quantiles)
+        qlevels = [float(x) for x in forecaster.config.quantiles][: q.shape[1]]
+        return {"quantiles": {lv: q[:, i].tolist() for i, lv in enumerate(qlevels)}}
 
     if model == "tirex":
         m = _ensure_loaded("tirex")
@@ -325,12 +336,13 @@ def _forecast_raw(model: str, closes: List[float], horizon: int) -> Dict[str, An
         )
         q = np.asarray(quantile_forecast)[0, :horizon, :]  # (h, n_quantiles)
         nq = q.shape[-1]
-        if nq != 9:
-            # resolve by value like timesfm: fixed levels assumed 0.1..0.9
-            i10, i50, i90 = int(0.1 * nq) or 0, int(0.5 * nq), int(0.9 * nq)
-        else:
-            i10, i50, i90 = 0, 4, 8
-        return {"median": q[:, i50].tolist(), "q10": q[:, i10].tolist(), "q90": q[:, i90].tolist()}
+        # Quantile levels are not returned; assume the canonical 0.1..0.9 grid
+        # when the checkpoint emits 9, else evenly spaced interior levels.
+        levels = (
+            [round((i + 1) / (nq + 1), 4) for i in range(nq)] if nq != 9
+            else [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        )
+        return {"quantiles": {lv: q[:, i].tolist() for i, lv in enumerate(levels)}}
 
     if model == "moirai2":
         from hermes_trader.agents.moirai2_vendor import Moirai2Forecast
@@ -345,7 +357,9 @@ def _forecast_raw(model: str, closes: List[float], horizon: int) -> Dict[str, An
         )
         out = fc.predict([list(map(float, closes))])  # (1, 9, h)
         out = np.asarray(out)[0, :, :horizon]          # (9, h)
-        return {"median": out[4].tolist(), "q10": out[0].tolist(), "q90": out[8].tolist()}
+        levels = list(getattr(module, "quantile_levels", ())) or \
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        return {"quantiles": {lv: out[i].tolist() for i, lv in enumerate(levels[:out.shape[0]])}}
 
     raise ValueError(f"unknown model {model!r}")
 
@@ -393,11 +407,17 @@ def forecast(model: str, closes: List[float], horizon: int) -> CandidateForecast
         return sig
 
     out = result["out"]
+    quantiles: Dict[str, List[float]] = {}
+    for lv, vals in (out.get("quantiles") or {}).items():
+        if vals:
+            quantiles[str(lv)] = list(map(float, vals))
+    quantiles = {lv: quantiles[lv] for lv in sorted(quantiles, key=_level_key)}
     sig = CandidateForecast(
         model=model,
-        median=list(map(float, out["median"])),
-        q10=list(map(float, out["q10"])),
-        q90=list(map(float, out["q90"])),
+        median=quantiles.get("0.5"),
+        q10=quantiles.get("0.1"),
+        q90=quantiles.get("0.9"),
+        quantiles=quantiles or None,
         horizon=horizon,
         inference_ms=float(result.get("ms", 0.0)),
     )
