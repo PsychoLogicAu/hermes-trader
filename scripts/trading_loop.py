@@ -247,6 +247,18 @@ try:
         _tfm_preload(float(os.environ.get('HERMES_TIMESFM_PRELOAD_TIMEOUT_S', '180')))
 except Exception as e:
     logger.warning(f"[startup] timesfm preload skipped (lazy fallback): {e}")
+# MoiraiAgent expert-selection shadow: preload the candidate pool adapters
+# (TiRex + moirai-2 are the new loads; chronos/timesfm borrow their already-
+# loaded singletons) OFF the first-scan critical path. Bounded + lazy-fallback
+# like the meta prewarm. Skipped unless expert_select is enabled (ships
+# disabled); longer default timeout because the first-ever TiRex load also
+# downloads its ~284MB checkpoint into the hf-cache volume.
+try:
+    if startup_agent_config.get("expert_select", {}).get("enabled", False):
+        from hermes_trader.agents import expert_pool as _ep
+        _ep.preload_all(timeout_s=float(os.environ.get('HERMES_EXPERT_PRELOAD_TIMEOUT_S', '240')))
+except Exception as e:
+    logger.warning(f"[startup] expert-select preload skipped (lazy fallback): {e}")
 # The universe carries prevDayPx / dayNtlVlm / funding which DRIFT over the
 # day; fetched once here they'd freeze at loop-start for the whole process,
 # so mover-selection + volume-ranking would rank stale 24h windows (a coin
@@ -863,6 +875,22 @@ def _process_coin_run(perception, ctx):
 
         # All verdict→action routing lives in executor.route_verdict
         # (unit-tested) so no verdict can be silently dropped again.
+        # MoiraiAgent expert-selection shadow: fire the (heavy) selection
+        # compute OFF the exec hot path — 4 candidates × (live + CV) + one LLM
+        # call. The daemon thread warms the per-coin cache and logs the
+        # `[expert]` accrual line; the route_verdict / maybe_execute attaches
+        # read that cache (peek, never compute). Fire-and-forget; a disabled
+        # config or any failure is a no-op (worker self-guards). Firing here
+        # — not in the executor — so all 4 attach return paths + the PASS
+        # branch share one warmed cache, and the candidate-level (not
+        # perception-scan) cadence is preserved.
+        try:
+            from hermes_trader.agents import expert_select as _es
+            if (startup_agent_config.get("expert_select", {}) or {}).get("enabled", False) or \
+               (read_agent_config().get("expert_select", {}) or {}).get("enabled", False):
+                _es.get_expert_select_async(coin, analysis.get("side", "long"))
+        except Exception as _e:
+            logger.debug(f"[expert] async fire skipped for {coin}: {_e}")
         routed = route_verdict(analysis)
         action = routed["action"]
         result = routed["result"] or {}

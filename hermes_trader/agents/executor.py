@@ -379,6 +379,48 @@ def _attach_timesfm_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["timesfm_error"] = str(e)
 
 
+def _attach_expert_select_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact MoiraiAgent expert-selection shadow fields to a trade
+    result dict.
+
+    SHADOW ONLY (Salesforce MoiraiAgent expert-selection, ported 2026-09): a
+    pool of candidate forecasters (chronos/timesfm/tirex/moirai2) is
+    cross-validated on the history tail and an LLM picks the winner (or a
+    re-centered mixture); the final re-centered-mixture median is logged next
+    to the single-model forecasts so model SELECTION quality is measurable on
+    the identical 5m context. Never gates, never sizes, never enters the
+    verdict prompt. Cache-first — the sync attach reads the per-coin cache
+    only (never blocks the exec loop); a cold/absent entry yields the
+    disabled-equivalent None fields. Config-gated off by default
+    (expert_select.enabled: false). Wrapped in try/except so it never breaks
+    the trade path. Output shape:
+      expert_median_pct: float | null
+      expert_aligned: bool | null (True if median move agrees with side)
+      expert_selected_model: str | null (chronos/timesfm/tirex/moirai2/mixture)
+      expert_error: str | null
+    """
+    try:
+        from hermes_trader.agents.expert_select import peek_expert_select
+        sig = peek_expert_select(coin)
+        if sig is None or sig.median_pct is None:
+            result["expert_median_pct"] = None
+            result["expert_aligned"] = None
+            result["expert_selected_model"] = sig.selected_model if sig else None
+            result["expert_error"] = (sig.error if sig else "no cached selection")
+            return
+        result["expert_median_pct"] = round(sig.median_pct * 10) / 10
+        result["expert_aligned"] = (
+            (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+        )
+        result["expert_selected_model"] = sig.selected_model
+        result["expert_error"] = sig.error
+    except Exception as e:
+        result["expert_median_pct"] = None
+        result["expert_aligned"] = None
+        result["expert_selected_model"] = None
+        result["expert_error"] = str(e)
+
+
 def _attach_llm_context_to_result(result: Dict[str, Any], analysis: Dict[str, Any]) -> None:
     """Attach the LLM's own context to a trade result dict.
 
@@ -754,6 +796,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             }
             _attach_chronos_to_result(result, coin, side)
             _attach_timesfm_to_result(result, coin, side)
+            _attach_expert_select_to_result(result, coin, side)
             return result
 
     # Idempotency: don't double-execute
@@ -1509,6 +1552,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(result, coin, side)
         _attach_timesfm_to_result(result, coin, side)
+        _attach_expert_select_to_result(result, coin, side)
         return result
 
     if shadow_mode:
@@ -1522,6 +1566,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(_res, coin, _side)
         _attach_timesfm_to_result(_res, coin, _side)
+        _attach_expert_select_to_result(_res, coin, _side)
         return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
@@ -1779,6 +1824,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     }
     _attach_chronos_to_result(result, coin, trade_side)
     _attach_timesfm_to_result(result, coin, trade_side)
+    _attach_expert_select_to_result(result, coin, trade_side)
     return result
 
 
@@ -2039,6 +2085,28 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             _res["timesfm_aligned_if_long"] = None
             _res["timesfm_aligned_if_short"] = None
             _res["timesfm_error"] = str(e)
+        # MoiraiAgent expert-selection shadow, same PASS shape as chronos/
+        # timesfm (direction-agnostic: one re-centered-mixture median + both-
+        # side alignment flags — the selection is side-independent, so one
+        # cached read, never two). Cache-only; a cold entry is a no-op None
+        # field set. Separate try/except so a selection outage can never
+        # blank the chronos/timesfm fields above.
+        try:
+            from hermes_trader.agents.expert_select import peek_expert_select
+            esig = peek_expert_select(coin or "unknown")
+            em = esig.median_pct if (esig and esig.median_pct is not None) else None
+            _res["expert_median_pct"] = round(em * 10) / 10 if em is not None else None
+            _res["expert_aligned_if_long"] = bool(em is not None and em > 0)
+            _res["expert_aligned_if_short"] = bool(em is not None and em < 0)
+            _res["expert_selected_model"] = esig.selected_model if esig else None
+            if esig and esig.error:
+                _res["expert_error"] = esig.error
+        except Exception as e:
+            _res["expert_median_pct"] = None
+            _res["expert_aligned_if_long"] = None
+            _res["expert_aligned_if_short"] = None
+            _res["expert_selected_model"] = None
+            _res["expert_error"] = str(e)
         # The LLM's own conviction next to the forecast, so a no-action
         # PASS/VETO line shows what the model believed (not just why the
         # router abstained). Same field as the execute paths attach.
