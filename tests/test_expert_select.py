@@ -293,6 +293,25 @@ def test_mixture_no_candidates_raises(monkeypatch):
         es._mixture_and_recenter({}, "mixture", H)
 
 
+def test_cached_signal_carries_raw_candidate_medians(monkeypatch):
+    """Spec Task 1.1: the cache stores raw per-model median paths (absolute
+    price), not just selection + final fields — Phase-2's per-model
+    median-MAE join needs them without recomputing the pool."""
+    _patch_cfg(monkeypatch, _cfg_block())
+    _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
+    # The fake candidates are diverse → an LLM call would hit the network;
+    # stub it (the point of this test is the cached raw paths, not selection).
+    monkeypatch.setattr(es, "_select_with_llm",
+                        lambda prompt, names: ("mixture", "ok"))
+    sig = es._compute("X", "long")
+    assert sig.error is None
+    assert set(sig.candidate_medians) == {"chronos", "timesfm"}
+    last = 100.0 + 0.5 * 77
+    assert sig.candidate_medians["chronos"] == pytest.approx(
+        [last + 0.3 * (i + 1) for i in range(H)])
+    assert all(len(p) == H for p in sig.candidate_medians.values())
+
+
 # ── CV replay ───────────────────────────────────────────────────────────────
 def test_cv_mae_ranking_orders_models(monkeypatch):
     """CV replay: forecast the last H bars from the context ending H bars

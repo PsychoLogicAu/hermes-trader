@@ -158,6 +158,13 @@ class ExpertSelectSignal:
     error: Optional[str] = None
     # Per-candidate diagnostics (debug / accrual)
     candidates: Dict[str, str] = field(default_factory=dict)  # model -> ok|error
+    # Raw per-model LIVE median paths (absolute price, len == horizon) — the
+    # spec's "cache stores raw per-model median paths + CV metrics +
+    # selection". Without these, Phase-2 replay could only recompute
+    # tirex/moirai2 paths from candles; with them, the accrual alone is a
+    # complete record for the per-model median-MAE join. (CV preds live in
+    # the CV cache entry under "preds".)
+    candidate_medians: Dict[str, List[float]] = field(default_factory=dict)
 
 
 # ── Per-coin cache (TTL-based; stores the full signal, not just the value) ────
@@ -572,6 +579,8 @@ def _compute(coin: str, side: str) -> ExpertSelectSignal:
         q90_path_pct=pct(q90) if q90 else None,
         inference_ms=(time.time() - t0) * 1000,
         candidates={m: (s.error or "ok") for m, s in live.items()},
+        candidate_medians={m: list(s.median[:horizon])
+                           for m, s in live.items() if s.median},
         # A non-"ok" note (LLM parse-fail / endpoint error) is the diagnostic
         # that the selection degraded to mixture — record it. Only a clean
         # pick ("ok") or a pre-LLM "not diverse" skip is error-free.
