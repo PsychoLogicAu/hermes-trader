@@ -563,9 +563,10 @@ def test_select_llm_no_endpoint_degrades(monkeypatch):
 
 # ── fetch / timeout / caching (mirrors the chronos/timesfm tests) ───────────
 def _mk_sig(coin: str = "X", median_pct: float | None = None,
-            error: str | None = None, selected: str | None = "mixture"):
+            error: str | None = None, selected: str | None = "mixture",
+            side: str = "long"):
     return es.ExpertSelectSignal(
-        coin=coin, side="long", context_last=100.0, horizon=H,
+        coin=coin, side=side, context_last=100.0, horizon=H,
         selected_model=selected, diverse=False, median_pct=median_pct,
         spread_pct=2.0, error=error,
     )
@@ -640,13 +641,36 @@ def test_async_disabled_is_noop(monkeypatch):
 
 def test_async_enabled_computes_and_logs(monkeypatch, caplog):
     _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setattr(es, "_fetch",
-                        lambda coin, side: _mk_sig(coin=coin))
+    # Patch _compute (not _fetch): logging lives INSIDE _fetch now, so the
+    # real fetch must run to prove the async path logs one line per compute.
+    monkeypatch.setattr(es, "_compute",
+                        lambda coin, side: _mk_sig(coin=coin, side=side))
     import logging
     with caplog.at_level(logging.INFO, logger="hermes_trader.agents.expert_select"):
         es.get_expert_select_async("BTC", "long")
         time.sleep(0.05)
-    assert any("[expert] BTC (long)" in r.message for r in caplog.records)
+    lines = [r.message for r in caplog.records if "[expert] BTC (long)" in r.message]
+    assert len(lines) == 1
+
+
+def test_cache_hit_is_silent(monkeypatch, caplog):
+    """Spec: cache hits log nothing — the wrapper firing again inside the TTL
+    must not re-print the cached line (double counts polluted the mixture-
+    rate kill-signal)."""
+    _patch_cfg(monkeypatch, _cfg_block())
+    calls = []
+
+    def _compute_once(coin, side):
+        calls.append(coin)
+        return _mk_sig(coin=coin, side=side)
+
+    monkeypatch.setattr(es, "_compute", _compute_once)
+    import logging
+    with caplog.at_level(logging.INFO, logger="hermes_trader.agents.expert_select"):
+        es._fetch("BTC", "long")   # fresh compute → logs
+        es._fetch("BTC", "short")  # cache hit → silent, no recompute
+    assert len(calls) == 1
+    assert len([r for r in caplog.records if "[expert] BTC" in r.message]) == 1
 
 
 # ── pool config ─────────────────────────────────────────────────────────────

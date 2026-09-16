@@ -607,8 +607,10 @@ def get_expert_select_async(coin: str, side: str) -> None:
             if not cfg.get("enabled", False):
                 logger.debug(f"[expert] {coin}: signal disabled")
                 return
-            sig = _fetch(coin, side)
-            logger.info(_format_log(sig))
+            # _fetch logs once per real compute (cache hits silent — a log in
+            # this wrapper re-printed warm entries and inflated the mixture-
+            # rate counters, same bug chronos fixed by logging inside _fetch).
+            _fetch(coin, side)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[expert] {coin} worker failed: {e}")
 
@@ -658,11 +660,15 @@ def _fetch(coin: str, side: str) -> ExpertSelectSignal:
             coin=coin, side=side, context_last=0.0, horizon=_horizon(),
             error=f"timeout after {timeout_s:.0f}s",
         )
+        logger.info(_format_log(sig))  # a real (failed) compute — log once
         return sig  # never cached
 
     sig = result["signal"]
     if not sig.error:
         _cache_set(coin, sig)
+    # Log once per actual compute (cache misses only — cache hits returned
+    # above). Errors are NOT cached but ARE logged, so an outage is visible.
+    logger.info(_format_log(sig))
     return sig
 
 
