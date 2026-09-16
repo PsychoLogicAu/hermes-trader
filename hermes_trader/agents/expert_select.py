@@ -306,32 +306,33 @@ _MIXTURE_LEVELS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 def _mixture_and_recenter(live: Dict[str, Any], selected: str,
                           horizon: int) -> Dict[str, List[float]]:
-    """Pool per-quantile across candidates (re-computed 0.1..0.9), then shift
-    the whole distribution so its median matches the selected model's median.
+    """Pool the candidates exactly like their ``_get_mixture_pred``: stack
+    EVERY quantile feature of EVERY candidate (median + 0.1..0.9 — median is
+    itself one of their FORECAST_FEATURES) into a (n_cand × 10, h) matrix,
+    then take ONE ``np.quantile([0.1..0.9], axis=0)`` across that pooled
+    sample. NOT a per-level quantile across candidates — that was an earlier
+    (wrong) reading of "per-quantile pooling"; the concatenated stack is what
+    their code does and what we match. Then shift the whole distribution so
+    its median matches the selected model's median (their ``get_best_pred``).
     Returns {level: [h]} in absolute price."""
     models = [m for m in _pool() if live.get(m) and live[m].quantiles]
     if not models:
         raise ValueError("no candidate produced quantiles")
-    # Gather per-level paths as (n_cand, h) stacks (their _get_mixture_pred
-    # builds np.array([candidate_preds[m][key] for m in model_names]) — 2-D,
-    # candidates on axis 0 — then np.quantile(..., lv, axis=0): the empirical
-    # quantile across the candidate set, step-wise. A flat per-level
-    # concatenate (n_cand*h,) would collapse the per-step quantiles to
-    # scalars and kill every compute, so the 2-D shape is load-bearing.
-    per_level: Dict[float, List[List[float]]] = {lv: [] for lv in _MIXTURE_LEVELS}
+    rows: List[List[float]] = []
     for m in models:
         q = live[m].quantiles
+        med = q.get("0.5") or (list(live[m].median) if live[m].median else None)
+        if med is not None and len(med) >= horizon:
+            rows.append(list(med[:horizon]))          # their "median" feature
         for lv in _MIXTURE_LEVELS:
-            vals = q.get(f"{lv:.1f}") or q.get(str(lv)) or q.get("0.5")
-            if vals is None:
-                vals = live[m].median
+            vals = q.get(f"{lv:.1f}") or q.get(str(lv)) or med
             if vals is not None and len(vals) >= horizon:
-                per_level[lv].append(list(vals[:horizon]))
+                rows.append(list(vals[:horizon]))
+    if not rows:
+        raise ValueError("mixture median unavailable")
+    stacked = np.array(rows, dtype=float)              # (n_cand × 10, h)
     mixture: Dict[str, List[float]] = {}
-    for lv in _MIXTURE_LEVELS:
-        if not per_level[lv]:
-            continue
-        stacked = np.array(per_level[lv], dtype=float)  # (n_cand, h)
+    for i, lv in enumerate(_MIXTURE_LEVELS):
         mixture[f"{lv:.1f}"] = np.quantile(stacked, lv, axis=0).tolist()
     mix_med = mixture.get("0.5")
     if not mix_med:

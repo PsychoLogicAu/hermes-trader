@@ -228,11 +228,14 @@ def test_diversity_threshold_zero_forces_diverse(monkeypatch):
 
 # ── mixture pooling + re-centering (their get_best_pred math) ───────────────
 def test_mixture_pooling_matches_upstream_math(monkeypatch):
-    """Two candidates, medians last+i / last+1+i (step 1.0, 0-indexed): the
-    per-level mixture is the empirical quantile ACROSS candidates, step-wise —
-    with 2 candidates the 0.5 quantile of {last+i, last+1+i} is last+0.5+i.
-    (Upstream stacks (n_cand, h) and takes np.quantile(axis=0); a flat
-    per-level concat would collapse to scalars — this pins the 2-D shape.)"""
+    """Upstream `_get_mixture_pred` stacks EVERY quantile feature of every
+    candidate — median + 0.1..0.9 (median is itself one of their
+    FORECAST_FEATURES) — into a (n_cand × 10, h) matrix and takes ONE
+    np.quantile([0.1..0.9], axis=0) across that pooled sample. Two candidates
+    with medians last+1+i / last+2+i (both width-2 fans): the pooled q10/median/
+    q90 at step i are last+0.58+i / last+1.5+i / last+2.42+i (pinned below).
+    This is NOT a per-level quantile across candidates — that reading was an
+    error; the concatenated stack is what their code does."""
     monkeypatch.setattr(es, "_pool", lambda: ["chronos", "timesfm"])
     last = 100.0
     live = {
@@ -240,12 +243,10 @@ def test_mixture_pooling_matches_upstream_math(monkeypatch):
         "timesfm": _mk_candidate("timesfm", [last + 1.0], H, step=1.0),
     }
     mix = es._mixture_and_recenter(live, "mixture", H)
-    # 0.5 quantile of {last+1+i, last+2+i} (linear interp, 2 candidates)
     assert np.allclose(mix["0.5"], [last + 1.5 + i for i in range(H)])
-    # q10 levels {last+0.2+i, last+1.2+i}: 0.1 → last+0.3+i
-    # q90 levels {last+1.8+i, last+2.8+i}: 0.9 → last+2.7+i
-    assert np.allclose(mix["0.1"], [last + 0.3 + i for i in range(H)])
-    assert np.allclose(mix["0.9"], [last + 2.7 + i for i in range(H)])
+    # pooled empirical quantiles of the 20-row fan (median rows count twice):
+    assert np.allclose(mix["0.1"], [last + 0.58 + i for i in range(H)])
+    assert np.allclose(mix["0.9"], [last + 2.42 + i for i in range(H)])
 
 
 def test_recentering_winner_shifts_mixture_exactly(monkeypatch):
