@@ -379,6 +379,38 @@ def _attach_timesfm_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["timesfm_error"] = str(e)
 
 
+def _attach_tirex_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact TiRex 1.1 shadow fields to a trade result dict.
+
+    SHADOW ONLY (NX-AI TiRex 1.1, Sep 2026): logged next to the Chronos and
+    TimesFM fields so all three forecasters are directly comparable on the
+    identical 5m context. Never gates, never sizes. Chosen for shadow because
+    it was the best single in the 2026-09-16 MOE evaluation (median-MAE +
+    tail-AUC both axes; scratch/eval/moirai_eval/RESULTS.md) — candidate for
+    a drop-in chronos replacement. Cache-first sync read (the loop fire
+    warms it); config-gated off by default. Wrapped in try/except so it never
+    breaks the trade path. Output shape:
+      tirex_median_pct: float | null
+      tirex_aligned: bool | null (True if median move agrees with side)
+      tirex_error: str | null
+    """
+    try:
+        from hermes_trader.agents.tirex_signal import get_tirex_signal_sync
+        sig = get_tirex_signal_sync(coin, side)
+        result["tirex_median_pct"] = round(sig.median_pct * 10) / 10 if sig.median_pct is not None else None
+        if sig.median_pct is not None:
+            result["tirex_aligned"] = (
+                (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+            )
+        else:
+            result["tirex_aligned"] = None
+        result["tirex_error"] = sig.error
+    except Exception as e:
+        result["tirex_median_pct"] = None
+        result["tirex_aligned"] = None
+        result["tirex_error"] = str(e)
+
+
 def _attach_expert_select_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
     """Attach compact MoiraiAgent expert-selection shadow fields to a trade
     result dict.
@@ -796,6 +828,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             }
             _attach_chronos_to_result(result, coin, side)
             _attach_timesfm_to_result(result, coin, side)
+            _attach_tirex_to_result(result, coin, side)
             _attach_expert_select_to_result(result, coin, side)
             return result
 
@@ -1552,6 +1585,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(result, coin, side)
         _attach_timesfm_to_result(result, coin, side)
+        _attach_tirex_to_result(result, coin, side)
         _attach_expert_select_to_result(result, coin, side)
         return result
 
@@ -1566,6 +1600,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(_res, coin, _side)
         _attach_timesfm_to_result(_res, coin, _side)
+        _attach_tirex_to_result(_res, coin, _side)
         _attach_expert_select_to_result(_res, coin, _side)
         return _res
 
@@ -1824,6 +1859,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     }
     _attach_chronos_to_result(result, coin, trade_side)
     _attach_timesfm_to_result(result, coin, trade_side)
+    _attach_tirex_to_result(result, coin, trade_side)
     _attach_expert_select_to_result(result, coin, trade_side)
     return result
 
@@ -2085,6 +2121,24 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             _res["timesfm_aligned_if_long"] = None
             _res["timesfm_aligned_if_short"] = None
             _res["timesfm_error"] = str(e)
+        # TiRex 1.1 shadow read, same PASS shape (direction-agnostic: one
+        # median + both-side alignment flags). Separate try/except so a tirex
+        # outage can never blank the chronos/timesfm fields above. Disabled
+        # => error field only.
+        try:
+            from hermes_trader.agents.tirex_signal import get_tirex_signal_sync
+            x_sig = get_tirex_signal_sync(coin or "unknown", "long")
+            xm = x_sig.median_pct if x_sig.median_pct is not None else None
+            _res["tirex_median_pct"] = round(xm * 10) / 10 if xm is not None else None
+            _res["tirex_aligned_if_long"] = bool(xm is not None and xm > 0)
+            _res["tirex_aligned_if_short"] = bool(xm is not None and xm < 0)
+            if x_sig.error:
+                _res["tirex_error"] = x_sig.error
+        except Exception as e:
+            _res["tirex_median_pct"] = None
+            _res["tirex_aligned_if_long"] = None
+            _res["tirex_aligned_if_short"] = None
+            _res["tirex_error"] = str(e)
         # MoiraiAgent expert-selection shadow, same PASS shape as chronos/
         # timesfm (direction-agnostic: one re-centered-mixture median + both-
         # side alignment flags — the selection is side-independent, so one

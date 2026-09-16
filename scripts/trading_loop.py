@@ -259,6 +259,16 @@ try:
         _ep.preload_all(timeout_s=float(os.environ.get('HERMES_EXPERT_PRELOAD_TIMEOUT_S', '240')))
 except Exception as e:
     logger.warning(f"[startup] expert-select preload skipped (lazy fallback): {e}")
+# TiRex 1.1 shadow signal. Shares the ONE loaded model with expert_pool via
+# _ensure_loaded("tirex") — if expert_select preloaded first, this is a dict
+# hit. Bounded + lazy-fallback like the others; skipped unless tirex_signal
+# is enabled (ships disabled).
+try:
+    if startup_agent_config.get("tirex_signal", {}).get("enabled", False):
+        from hermes_trader.agents.tirex_signal import preload_model as _tx_preload
+        _tx_preload(float(os.environ.get('HERMES_TIREX_PRELOAD_TIMEOUT_S', '120')))
+except Exception as e:
+    logger.warning(f"[startup] tirex preload skipped (lazy fallback): {e}")
 # The universe carries prevDayPx / dayNtlVlm / funding which DRIFT over the
 # day; fetched once here they'd freeze at loop-start for the whole process,
 # so mover-selection + volume-ranking would rank stale 24h windows (a coin
@@ -891,6 +901,19 @@ def _process_coin_run(perception, ctx):
                 _es.get_expert_select_async(coin, analysis.get("side", "long"))
         except Exception as _e:
             logger.debug(f"[expert] async fire skipped for {coin}: {_e}")
+        # TiRex 1.1 shadow signal: fire-and-forget on a daemon thread so the
+        # `Trade result:` attaches and the PASS branch read a warm cache (the
+        # attach is a sync cache-first read; without this fire, the first
+        # call per coin per TTL would pay fetch+forecast on the hot path).
+        # Logs one `[tirex]` accrual line per real compute; disabled config
+        # or any failure is a no-op (worker self-guards).
+        try:
+            if (startup_agent_config.get("tirex_signal", {}) or {}).get("enabled", False) or \
+               (read_agent_config().get("tirex_signal", {}) or {}).get("enabled", False):
+                from hermes_trader.agents import tirex_signal as _tx
+                _tx.get_tirex_signal_async(coin, analysis.get("side", "long"))
+        except Exception as _e:
+            logger.debug(f"[tirex] async fire skipped for {coin}: {_e}")
         routed = route_verdict(analysis)
         action = routed["action"]
         result = routed["result"] or {}
