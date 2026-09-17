@@ -379,6 +379,80 @@ def _attach_timesfm_to_result(result: Dict[str, Any], coin: str, side: str) -> N
         result["timesfm_error"] = str(e)
 
 
+def _attach_tirex_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact TiRex 1.1 shadow fields to a trade result dict.
+
+    SHADOW ONLY (NX-AI TiRex 1.1, Sep 2026): logged next to the Chronos and
+    TimesFM fields so all three forecasters are directly comparable on the
+    identical 5m context. Never gates, never sizes. Chosen for shadow because
+    it was the best single in the 2026-09-16 MOE evaluation (median-MAE +
+    tail-AUC both axes; scratch/eval/moirai_eval/RESULTS.md) — candidate for
+    a drop-in chronos replacement. Cache-first sync read (the loop fire
+    warms it); config-gated off by default. Wrapped in try/except so it never
+    breaks the trade path. Output shape:
+      tirex_median_pct: float | null
+      tirex_aligned: bool | null (True if median move agrees with side)
+      tirex_error: str | null
+    """
+    try:
+        from hermes_trader.agents.tirex_signal import get_tirex_signal_sync
+        sig = get_tirex_signal_sync(coin, side)
+        result["tirex_median_pct"] = round(sig.median_pct * 10) / 10 if sig.median_pct is not None else None
+        if sig.median_pct is not None:
+            result["tirex_aligned"] = (
+                (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+            )
+        else:
+            result["tirex_aligned"] = None
+        result["tirex_error"] = sig.error
+    except Exception as e:
+        result["tirex_median_pct"] = None
+        result["tirex_aligned"] = None
+        result["tirex_error"] = str(e)
+
+
+def _attach_expert_select_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact MoiraiAgent expert-selection shadow fields to a trade
+    result dict.
+
+    SHADOW ONLY (Salesforce MoiraiAgent expert-selection, ported 2026-09): a
+    pool of candidate forecasters (chronos/timesfm/tirex/moirai2) is
+    cross-validated on the history tail and an LLM picks the winner (or a
+    re-centered mixture); the final re-centered-mixture median is logged next
+    to the single-model forecasts so model SELECTION quality is measurable on
+    the identical 5m context. Never gates, never sizes, never enters the
+    verdict prompt. Cache-first — the sync attach reads the per-coin cache
+    only (never blocks the exec loop); a cold/absent entry yields the
+    disabled-equivalent None fields. Config-gated off by default
+    (expert_select.enabled: false). Wrapped in try/except so it never breaks
+    the trade path. Output shape:
+      expert_median_pct: float | null
+      expert_aligned: bool | null (True if median move agrees with side)
+      expert_selected_model: str | null (chronos/timesfm/tirex/moirai2/mixture)
+      expert_error: str | null
+    """
+    try:
+        from hermes_trader.agents.expert_select import peek_expert_select
+        sig = peek_expert_select(coin)
+        if sig is None or sig.median_pct is None:
+            result["expert_median_pct"] = None
+            result["expert_aligned"] = None
+            result["expert_selected_model"] = sig.selected_model if sig else None
+            result["expert_error"] = (sig.error if sig else "no cached selection")
+            return
+        result["expert_median_pct"] = round(sig.median_pct * 10) / 10
+        result["expert_aligned"] = (
+            (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+        )
+        result["expert_selected_model"] = sig.selected_model
+        result["expert_error"] = sig.error
+    except Exception as e:
+        result["expert_median_pct"] = None
+        result["expert_aligned"] = None
+        result["expert_selected_model"] = None
+        result["expert_error"] = str(e)
+
+
 def _attach_llm_context_to_result(result: Dict[str, Any], analysis: Dict[str, Any]) -> None:
     """Attach the LLM's own context to a trade result dict.
 
@@ -754,6 +828,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             }
             _attach_chronos_to_result(result, coin, side)
             _attach_timesfm_to_result(result, coin, side)
+            _attach_tirex_to_result(result, coin, side)
+            _attach_expert_select_to_result(result, coin, side)
             return result
 
     # Idempotency: don't double-execute
@@ -1250,6 +1326,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _timesfm_med = _tsig.median_pct if _tsig else None
         except Exception as _te:
             logger.debug(f"[executor] timesfm gate-side read failed for {analysis['coin']}: {_te}")
+    # Gate-side TiRex 1.1 read for tirex_tail_trigger_gate: same warm sync
+    # pattern as chronos/timesfm above (shares the 300s per-coin cache with
+    # the loop fire + trade-result attach, so steady state is a dict read).
+    # Paths only — the tail gate needs the per-step adverse quantiles.
+    # Error/disabled -> None -> the gate has no opinion and passes.
+    _tirex_q10p = _tirex_q90p = None
+    if (config.get("tirex_signal") or {}).get("enabled", False):
+        try:
+            from hermes_trader.agents.tirex_signal import get_tirex_signal_sync as _txs
+            _txsig = _txs(analysis["coin"], trade_side)
+            _tirex_q10p = _txsig.q10_path_pct if _txsig else None
+            _tirex_q90p = _txsig.q90_path_pct if _txsig else None
+        except Exception as _xe:
+            logger.debug(f"[executor] tirex gate-side read failed for {analysis['coin']}: {_xe}")
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
     # LONG / SHORT / PASS / VETO, or None when the duelist is disabled /
     # failed. Fed to duelist_veto_gate — the explicit-VETO / opposite-side
@@ -1283,6 +1373,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         timesfm_q10_path_pct=_timesfm_q10p,
         timesfm_q90_path_pct=_timesfm_q90p,
         timesfm_median_pct=_timesfm_med,
+        tirex_q10_path_pct=_tirex_q10p,
+        tirex_q90_path_pct=_tirex_q90p,
         duelist_verdict=_duelist_verdict,
     )
 
@@ -1327,6 +1419,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_ct.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+    # TiRex tail-trigger mirror accrual (2026-09-17): same would-block line on
+    # the tirex adverse q-path so the chronos-vs-tirex either/or settles on
+    # live executed-cohort P/L (offline: tirex wins AUC, ties capture at
+    # X=2.5). Shadow while shadow_mode is true; can block if flipped.
+    _xt = gate_output["results"].get("tirex_tail_trigger") or {}
+    if _xt.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] tirex_tail_trigger WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_xt.get('reason')} — "
             f"NOT blocking (shadow mode)")
     # Log-only comparator accrual (plan D4, 2026-09-15): per evaluated entry,
     # what the PATH-tail veto vs the band-WIDTH veto would each have done. The
@@ -1509,6 +1613,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(result, coin, side)
         _attach_timesfm_to_result(result, coin, side)
+        _attach_tirex_to_result(result, coin, side)
+        _attach_expert_select_to_result(result, coin, side)
         return result
 
     if shadow_mode:
@@ -1522,6 +1628,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
         _attach_chronos_to_result(_res, coin, _side)
         _attach_timesfm_to_result(_res, coin, _side)
+        _attach_tirex_to_result(_res, coin, _side)
+        _attach_expert_select_to_result(_res, coin, _side)
         return _res
 
     if not os.environ.get("HYPERLIQUID_PRIVATE_KEY"):
@@ -1779,6 +1887,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     }
     _attach_chronos_to_result(result, coin, trade_side)
     _attach_timesfm_to_result(result, coin, trade_side)
+    _attach_tirex_to_result(result, coin, trade_side)
+    _attach_expert_select_to_result(result, coin, trade_side)
     return result
 
 
@@ -2039,6 +2149,46 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             _res["timesfm_aligned_if_long"] = None
             _res["timesfm_aligned_if_short"] = None
             _res["timesfm_error"] = str(e)
+        # TiRex 1.1 shadow read, same PASS shape (direction-agnostic: one
+        # median + both-side alignment flags). Separate try/except so a tirex
+        # outage can never blank the chronos/timesfm fields above. Disabled
+        # => error field only.
+        try:
+            from hermes_trader.agents.tirex_signal import get_tirex_signal_sync
+            x_sig = get_tirex_signal_sync(coin or "unknown", "long")
+            xm = x_sig.median_pct if x_sig.median_pct is not None else None
+            _res["tirex_median_pct"] = round(xm * 10) / 10 if xm is not None else None
+            _res["tirex_aligned_if_long"] = bool(xm is not None and xm > 0)
+            _res["tirex_aligned_if_short"] = bool(xm is not None and xm < 0)
+            if x_sig.error:
+                _res["tirex_error"] = x_sig.error
+        except Exception as e:
+            _res["tirex_median_pct"] = None
+            _res["tirex_aligned_if_long"] = None
+            _res["tirex_aligned_if_short"] = None
+            _res["tirex_error"] = str(e)
+        # MoiraiAgent expert-selection shadow, same PASS shape as chronos/
+        # timesfm (direction-agnostic: one re-centered-mixture median + both-
+        # side alignment flags — the selection is side-independent, so one
+        # cached read, never two). Cache-only; a cold entry is a no-op None
+        # field set. Separate try/except so a selection outage can never
+        # blank the chronos/timesfm fields above.
+        try:
+            from hermes_trader.agents.expert_select import peek_expert_select
+            esig = peek_expert_select(coin or "unknown")
+            em = esig.median_pct if (esig and esig.median_pct is not None) else None
+            _res["expert_median_pct"] = round(em * 10) / 10 if em is not None else None
+            _res["expert_aligned_if_long"] = bool(em is not None and em > 0)
+            _res["expert_aligned_if_short"] = bool(em is not None and em < 0)
+            _res["expert_selected_model"] = esig.selected_model if esig else None
+            if esig and esig.error:
+                _res["expert_error"] = esig.error
+        except Exception as e:
+            _res["expert_median_pct"] = None
+            _res["expert_aligned_if_long"] = None
+            _res["expert_aligned_if_short"] = None
+            _res["expert_selected_model"] = None
+            _res["expert_error"] = str(e)
         # The LLM's own conviction next to the forecast, so a no-action
         # PASS/VETO line shows what the model believed (not just why the
         # router abstained). Same field as the execute paths attach.

@@ -7,6 +7,14 @@ chronos-forecasting>=2.0,<3
 # non-commercial license — module ships disabled by default.
 timesfm[torch]==3.0.0
 
+# MoiraiAgent expert-selection shadow signal (pool: chronos/timesfm + these two):
+# jaxtyping is a no-op type-hint dep of the vendored moirai-2 modules (D3a-A);
+# tirex-ts is the TiRex 1.1 candidate (NXAI Community License weights).
+# Both run CPU-only in the container; the pool ships behind
+# expert_select.enabled: false.
+jaxtyping
+tirex-ts==1.3.0
+
 # Dashboard + operator console (python -m hermes_trader.server)
 fastapi>=0.141
 uvicorn>=0.52
