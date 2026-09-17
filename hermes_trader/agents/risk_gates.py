@@ -41,6 +41,8 @@ class GateContext:
         timesfm_q10_path_pct: Optional[List[float]] = None,
         timesfm_q90_path_pct: Optional[List[float]] = None,
         timesfm_median_pct: Optional[float] = None,
+        tirex_q10_path_pct: Optional[List[float]] = None,
+        tirex_q90_path_pct: Optional[List[float]] = None,
         duelist_verdict: Optional[str] = None,
     ):
         self.confidence = confidence
@@ -101,6 +103,15 @@ class GateContext:
         # the TimesFM signal. SHADOW-ONLY by construction: the gate always
         # passes; a data gap can never flag.
         self.timesfm_median_pct = timesfm_median_pct
+        # TiRex 1.1 per-step quantile paths, % vs last close (gate-side warm
+        # sync read from tirex_signal, same pattern as the chronos/timesfm
+        # paths above; None on error/disabled). Fed to
+        # tirex_tail_trigger_gate — chosen because in the 2026-09-16 MOE eval
+        # (n=2,688 prod-regime anchors) tirex's adverse quantile beat every
+        # other forecaster's at stop-out AUC on BOTH sides (long @3%: 0.898
+        # vs chronos 0.863; short: 0.821 vs 0.797; paired bootstrap p<0.001).
+        self.tirex_q10_path_pct = tirex_q10_path_pct
+        self.tirex_q90_path_pct = tirex_q90_path_pct
         # The A/B duelist's verdict at entry (LONG / SHORT / PASS / VETO / None),
         # carried from research.py's `duelist_at_entry` snapshot via
         # maybe_execute. None = the duelist is disabled or failed — the
@@ -728,6 +739,69 @@ def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
               f"{min_composite:.0f})")
     if bool(cfg.get("shadow_mode", True)):
         return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
+def tirex_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """TiRex tail-trigger conviction gate (shadow-capable; same shape as
+    ``chronos_tail_trigger_gate``).
+
+    Why a tirex mirror: the 2026-09-16 MOE evaluation (n=2,688 prod-regime
+    anchors, scratch/eval/moirai_eval/) found TiRex's adverse quantile path to
+    be the best stop-out judge of all four forecasters on BOTH sides — long
+    tail-AUC 0.898 @3% vs chronos 0.863 / timesfm 0.840 / moirai2 0.860, short
+    0.821 vs 0.797 / 0.775 / 0.721 — with the tirex−chronos gap significant
+    under paired bootstrap (ΔAUC +0.030 @2%, +0.034 @3%, p<0.001).
+
+    But at the gate's OPERATING POINT (trip threshold X=2.5) the two are
+    exactly tied on capture (both 40.7% of @2.5% stop-outs; McNemar-discordant
+    pairs 8 vs 8 — each catches what the other misses). AUC ranks distributions;
+    a gate trips once. So this gate ships as an ACCRUAL MIRROR first: same
+    rule, same escape bar, its own would-block marker, so live logs can answer
+    "either/or or both" with executed-cohort P/L instead of offline ranking.
+
+    Rule (identical semantics to chronos_tail_trigger_gate): when the ADVERSE
+    quantile of the cached tirex path (q10 for longs, q90 for shorts) breaches
+    ``-min_adv_path_pct`` at ANY of the first ``window_steps`` steps, veto
+    unless the entry clears the elevated-conviction bar (conf >= min_conf OR
+    composite >= min_composite).
+
+    SHADOW MODE: with ``shadow_mode`` true (default) the gate structurally
+    returns pass=True and carries a ``shadow_would_block`` marker + join vars;
+    it cannot alter execution until the operator flips shadow_mode in
+    .agent-config.json.
+
+    Fail-safes (no-opinion pass): disabled; paths missing/short (cold cache,
+    model down, error signal); tail not breached. A data gap can never block.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    k = int(cfg.get("window_steps", 6) or 6)
+    x = float(cfg.get("min_adv_path_pct", 2.5) or 2.5)
+    if k <= 0 or x <= 0:
+        return {"pass": True}
+    path = (ctx.tirex_q10_path_pct if ctx.trade_side == "long"
+            else ctx.tirex_q90_path_pct)
+    if not path or len(path) < k:
+        return {"pass": True}
+    window = path[:k]
+    tail = min(window) if ctx.trade_side == "long" else max(window)
+    breached = tail <= -x if ctx.trade_side == "long" else tail >= x
+    if not breached:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+        return {"pass": True}
+    reason = (f"tirex_tail_trigger ({ctx.trade_side} entry, adverse q-path "
+              f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
+              f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
+              f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
+              f"{min_composite:.0f})")
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True,
+                "tail_pct": tail, "window_steps": k}
     return {"pass": False, "reason": reason}
 
 
@@ -1588,6 +1662,12 @@ def eval_all_gates(
         ctx, effective_config.get("timesfm_mismatch_gate") or {})
     results["timesfm_tail_trigger"] = timesfm_tail_trigger_gate(
         ctx, effective_config.get("timesfm_tail_trigger_gate") or {})
+    # TiRex tail-trigger mirror (2026-09-17): accrual-first twin of the armed
+    # chronos gate — best stop-out AUC of all four forecasters offline, but
+    # capture-tied with chronos at the live operating point (see gate
+    # docstring), so it shadows until executed-cohort evidence picks either.
+    results["tirex_tail_trigger"] = tirex_tail_trigger_gate(
+        ctx, effective_config.get("tirex_tail_trigger_gate") or {})
     # Quiet broad-tape entry gate (2026-09-10, WATCHLIST §B.17): blocks a new
     # entry when BTC's trailing-24h vol AND |drift| are both below the sweep-
     # chosen thresholds (2.5/2.0). The bleed-day broad-tape was the quietest

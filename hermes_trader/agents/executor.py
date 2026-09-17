@@ -1326,6 +1326,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _timesfm_med = _tsig.median_pct if _tsig else None
         except Exception as _te:
             logger.debug(f"[executor] timesfm gate-side read failed for {analysis['coin']}: {_te}")
+    # Gate-side TiRex 1.1 read for tirex_tail_trigger_gate: same warm sync
+    # pattern as chronos/timesfm above (shares the 300s per-coin cache with
+    # the loop fire + trade-result attach, so steady state is a dict read).
+    # Paths only — the tail gate needs the per-step adverse quantiles.
+    # Error/disabled -> None -> the gate has no opinion and passes.
+    _tirex_q10p = _tirex_q90p = None
+    if (config.get("tirex_signal") or {}).get("enabled", False):
+        try:
+            from hermes_trader.agents.tirex_signal import get_tirex_signal_sync as _txs
+            _txsig = _txs(analysis["coin"], trade_side)
+            _tirex_q10p = _txsig.q10_path_pct if _txsig else None
+            _tirex_q90p = _txsig.q90_path_pct if _txsig else None
+        except Exception as _xe:
+            logger.debug(f"[executor] tirex gate-side read failed for {analysis['coin']}: {_xe}")
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
     # LONG / SHORT / PASS / VETO, or None when the duelist is disabled /
     # failed. Fed to duelist_veto_gate — the explicit-VETO / opposite-side
@@ -1359,6 +1373,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         timesfm_q10_path_pct=_timesfm_q10p,
         timesfm_q90_path_pct=_timesfm_q90p,
         timesfm_median_pct=_timesfm_med,
+        tirex_q10_path_pct=_tirex_q10p,
+        tirex_q90_path_pct=_tirex_q90p,
         duelist_verdict=_duelist_verdict,
     )
 
@@ -1403,6 +1419,18 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_ct.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+    # TiRex tail-trigger mirror accrual (2026-09-17): same would-block line on
+    # the tirex adverse q-path so the chronos-vs-tirex either/or settles on
+    # live executed-cohort P/L (offline: tirex wins AUC, ties capture at
+    # X=2.5). Shadow while shadow_mode is true; can block if flipped.
+    _xt = gate_output["results"].get("tirex_tail_trigger") or {}
+    if _xt.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] tirex_tail_trigger WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_xt.get('reason')} — "
             f"NOT blocking (shadow mode)")
     # Log-only comparator accrual (plan D4, 2026-09-15): per evaluated entry,
     # what the PATH-tail veto vs the band-WIDTH veto would each have done. The
