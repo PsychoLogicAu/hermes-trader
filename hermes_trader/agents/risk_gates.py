@@ -912,21 +912,25 @@ def timesfm_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
 
 
 def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
-    """TimesFM tail-trigger conviction gate (SHADOW-ONLY by construction).
+    """TimesFM tail-trigger conviction gate (shadow-capable; promoted from
+    shadow-only accrual 2026-09-17 per WATCHLIST §C.9).
 
     The per-forecaster mirror of ``chronos_tail_trigger_gate`` on the
     TimesFM-3 signal: when the ADVERSE quantile of the cached TimesFM path
     (q10 for longs, q90 for shorts — read via the same getattr pattern as
     ``forecast_agreement_veto_gate``) breaches the threshold at any of the
-    first ``window_steps`` steps, the entry is ACCRUED as a would-block
-    unless it clears the elevated-conviction escape bar (conf >= min_conf
-    (0.90) OR composite >= min_composite (60)).
+    first ``window_steps`` steps, the entry is vetoed unless it clears the
+    elevated-conviction escape bar (conf >= min_conf (0.90) OR composite >=
+    min_composite (60)).
 
-    SHADOW-ONLY BY CONSTRUCTION: no ``shadow_mode`` key and no code path
-    that returns pass=False — always pass: True; ``shadow_would_block``
-    plus the join variables ride along when the shape fires, and the
-    executor logs the accrual line. ``enabled`` (default True) controls
-    whether the gate runs/accrues, never whether it can block.
+    SHADOW-CAPABLE: with ``shadow_mode`` true (DEFAULT — accrual posture)
+    the gate structurally returns pass=True and carries a
+    ``shadow_would_block`` marker the executor logs; with ``shadow_mode``
+    false it returns pass=False on its shape, exactly like the armed chronos
+    gate. Promotion evidence (C.9 replay + re-time counterfactual, 2026-09-17):
+    19 executed would-blocks net −$48.98, both split-halves negative, no
+    single trade >50% of |net|; ~75% of savings survive re-timing
+    (scratch/_timesfm_tail_retime_cf.py).
 
     Code defaults follow the timesfm sub-key of forecast_agreement_veto
     (the sweep-selected timesfm window from the 2026-09-02 two-model
@@ -935,7 +939,7 @@ def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
 
     Fail-safes (pass, no marker, no raise): disabled; path missing or
     shorter than the window (cold cache / disabled / error / pre-change
-    signal); tail not breached. A data gap can never flag.
+    signal); tail not breached. A data gap can never flag or block.
     """
     cfg = gate_cfg or {}
     if not bool(cfg.get("enabled", True)):
@@ -962,13 +966,15 @@ def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
               f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
               f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
               f"{min_composite:.0f})")
-    return {
-        "pass": True,
-        "reason": reason,
-        "shadow_would_block": True,
-        "tail_pct": tail,
-        "window_steps": k,
-    }
+    if bool(cfg.get("shadow_mode", True)):
+        return {
+            "pass": True,
+            "reason": reason,
+            "shadow_would_block": True,
+            "tail_pct": tail,
+            "window_steps": k,
+        }
+    return {"pass": False, "reason": reason}
 
 
 def forecast_agreement_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
@@ -1653,11 +1659,11 @@ def eval_all_gates(
     results["forecast_agreement_veto"] = forecast_agreement_veto_gate(
         ctx, effective_config.get("forecast_agreement_veto_gate") or {})
     # TimesFM mirror legs (per-forecaster counterfactuals — timesfm-alone;
-    # the AND leg is forecast_agreement_veto above). SHADOW-ONLY by
-    # construction: both gates are structurally pass-only (no shadow_mode
-    # key, no pass: False path) — the executor logs the would-block accrual
-    # lines. enabled (default True) controls accrual only. A data gap
-    # (missing median / q-paths) can never flag.
+    # the AND leg is forecast_agreement_veto above). timesfm_mismatch stays
+    # shadow-only by construction (pass-only code path). timesfm_tail_trigger
+    # is shadow-CAPABLE since the 2026-09-17 C.9 promotion: accrual posture by
+    # default, armed live via shadow_mode:false in config. enabled controls
+    # whether each runs. A data gap (missing median / q-paths) can never flag.
     results["timesfm_mismatch"] = timesfm_mismatch_gate(
         ctx, effective_config.get("timesfm_mismatch_gate") or {})
     results["timesfm_tail_trigger"] = timesfm_tail_trigger_gate(

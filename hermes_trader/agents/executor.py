@@ -1501,11 +1501,13 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
 
     # TimesFM mirror-leg shadow accruals: the timesfm-alone per-forecaster
     # counterfactuals (the AND leg is the forecast_agreement_veto line
-    # below). Both gates are SHADOW-ONLY BY CONSTRUCTION — there is no
-    # shadow_mode key and no code path that blocks; enabled (default True)
-    # only controls whether they accrue these lines. The anchored strings
-    # below ('timesfm_mismatch WOULD HAVE BLOCKED' / 'timesfm_tail_trigger
-    # WOULD HAVE BLOCKED') are the counterfactual join keys.
+    # below). mismatch stays SHADOW-ONLY by construction. tail_trigger is
+    # shadow-CAPABLE (C.9 promotion 2026-09-17): while its config keeps
+    # shadow_mode true (or absent) these accrual lines are the counterfactual;
+    # once armed live it blocks via gate_results instead and this line goes
+    # quiet for it. The anchored strings below ('timesfm_mismatch WOULD HAVE
+    # BLOCKED' / 'timesfm_tail_trigger WOULD HAVE BLOCKED') are the
+    # counterfactual join keys.
     _cm2 = gate_output["results"].get("timesfm_mismatch") or {}
     if _cm2.get("shadow_would_block"):
         logger.warning(f"[gate][SHADOW] timesfm_mismatch WOULD HAVE BLOCKED {analysis['coin']} {trade_side.upper()} (conf {analysis['confidence']:.2f}, composite {analysis.get('composite_score', 0):.1f}): {_cm2.get('reason')} — NOT blocking (shadow-only)")

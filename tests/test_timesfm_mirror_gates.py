@@ -1,20 +1,23 @@
 """P10: TimesFM mirror gates — the timesfm-alone per-forecaster counterfactual
 legs (chronos-alone is already live; the AND leg is forecast_agreement_veto).
 
-Two new gates, both SHADOW-ONLY BY CONSTRUCTION:
+Two new gates, both shadow-posture by default:
 
   * ``timesfm_mismatch_gate``    — mirror of ``chronos_mismatch_gate`` on the
-    TimesFM **median** (``ctx.timesfm_median_pct``).
+    TimesFM **median** (``ctx.timesfm_median_pct``). Still SHADOW-ONLY BY
+    CONSTRUCTION (no shadow_mode key, no pass:False path).
   * ``timesfm_tail_trigger_gate`` — mirror of ``chronos_tail_trigger_gate`` on
     the TimesFM **adverse q-path** (min q10 / max q90 over the first
-    ``window_steps``).
+    ``window_steps``). SHADOW-CAPABLE since the 2026-09-17 C.9 promotion:
+    ``shadow_mode:false`` in config arms it (pass:False on shape); the default
+    stays accrual (pass True + marker).
 
-Unlike the chronos pair there is NO ``shadow_mode`` config key and NO code
-path that returns ``pass: False`` — each gate is a pure GateContext function
-(no log calls in-gate) that ALWAYS returns ``pass: True``; when its blocking
-condition would hold it instead carries ``shadow_would_block`` plus the join
-variables, and the EXECUTOR logs the loud accrual line. ``enabled`` (default
-True) only controls whether the always-passing gate runs/accrues.
+The mismatch leg has NO ``shadow_mode`` config key and NO code path that
+returns ``pass: False`` — it is a pure GateContext function (no log calls
+in-gate) that ALWAYS returns ``pass: True``; when its blocking condition would
+hold it instead carries ``shadow_would_block`` plus the join variables, and the
+EXECUTOR logs the loud accrual line. ``enabled`` (default True) only controls
+whether the always-passing gate runs/accrues.
 
 These tests pin:
   (a) shape-fire   -> pass True + shadow_would_block True + the join vars;
@@ -312,15 +315,64 @@ def test_tail_adverse_but_high_composite_no_marker():
 
 
 # ===========================================================================
+# (d2) LIVE mode (shadow_mode False) — the 2026-09-17 C.9 promotion path
+# ===========================================================================
+
+
+def test_tail_live_mode_blocks_on_shape():
+    cfg = dict(TT_CFG, shadow_mode=False)
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP), cfg)
+    assert r["pass"] is False
+    assert "timesfm_tail_trigger" in r["reason"]
+    assert "shadow_would_block" not in r
+
+
+def test_tail_live_mode_short_blocks_on_shape():
+    cfg = dict(TT_CFG, shadow_mode=False)
+    r = timesfm_tail_trigger_gate(
+        _ctx("short", 0.70, 30.0, tq90=SHORT_Q90_DEEP), cfg)
+    assert r["pass"] is False
+
+
+def test_tail_live_mode_escape_bar_still_passes():
+    cfg = dict(TT_CFG, shadow_mode=False)
+    assert timesfm_tail_trigger_gate(
+        _ctx("long", 0.95, 30.0, tq10=LONG_Q10_DEEP), cfg)["pass"] is True
+    assert timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 80.0, tq10=LONG_Q10_DEEP), cfg)["pass"] is True
+
+
+def test_tail_live_mode_no_shape_and_missing_data_pass():
+    """Live mode must never block WITHOUT its shape — a data gap passes."""
+    cfg = dict(TT_CFG, shadow_mode=False)
+    assert timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_SHALLOW), cfg)["pass"] is True
+    assert timesfm_tail_trigger_gate(_ctx("long", 0.70, 30.0), cfg)["pass"] is True
+    assert timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP[:5]), cfg)["pass"] is True
+
+
+def test_tail_default_config_stays_shadow():
+    """No shadow_mode key (the shipped default) = accrual posture: pass True
+    + marker. The gate only blocks when config EXPLICITLY sets it false."""
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP), {})
+    assert r["pass"] is True and r.get("shadow_would_block") is True
+
+
+# ===========================================================================
 # (e) THE STRUCTURAL GUARANTEE: pass is NEVER False, anywhere on the grid
 # ===========================================================================
 
 
 def test_never_returns_pass_false_across_full_grid():
-    """Shadow-only is an INVARIANT: iterate both gates over a grid of sides,
-    signal values, conviction extremes, disabled, and None signals, and assert
-    ``result['pass'] is True`` in EVERY case. A single pass: False would fail
-    the suite — pinning that the pass: False branch is never written."""
+    """Shadow-posture INVARIANT: iterate both gates over a grid of sides,
+    signal values, conviction extremes, disabled, and None signals — none of
+    the grid cfgs sets ``shadow_mode=False`` (the live posture added 2026-09-17
+    for C.9) — and assert ``result['pass'] is True`` in EVERY case. Accrual
+    configs can never block; only an explicit shadow_mode:false can, and that
+    path is pinned separately in (d2)."""
     sides = ["long", "short"]
     medians = [None, -5.0, -2.0, -0.5, -0.49, 0.0, 0.5, 0.51, 2.0, 5.0]
     confs = [0.0, 0.5, 0.89, 0.90, 0.95, 1.0]
