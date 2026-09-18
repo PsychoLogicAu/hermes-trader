@@ -77,11 +77,11 @@ class GateContext:
         # has no opinion and passes.
         self.chronos_median_pct = chronos_median_pct
         # Chronos-2 p10-p90 spread, % vs last close (same warm sync read as
-        # the median above). Fed ONLY to the ratio-aware deadband
-        # COUNTERFACTUAL in chronos_mismatch_gate — it never gates live
-        # execution, it just records that a ratio-aware deadband would have
-        # rescued a fixed-deadband block (HEMI replay, 2026-08-30).
-        # None = no spread (error signal) → counterfactual is inert.
+        # the median above). Fed to tail_spread_comparator (log-only, plan D4:
+        # band-width veto vs quantile-path veto accrual). The ratio-aware
+        # deadband counterfactual that also consumed it was removed 2026-09-18
+        # (§C.1 die ruling). None = no spread (error signal) → consumers
+        # have no opinion.
         self.chronos_spread_pct = chronos_spread_pct
         # Per-step Chronos-2 quantile paths, % vs last close (same sync read;
         # None on error signals / old shapes). Fed to
@@ -573,53 +573,6 @@ def _cfg(config: Dict[str, Any], key: str, default: Any) -> Any:
     return config[camel] if camel in config else default
 
 
-def _chronos_ratio_deadband_rescue(
-    ctx: GateContext, fixed_deadband: float, gate_cfg: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    """Counterfactual: would a ratio-aware deadband have rescued this block?
-
-    The live fixed-deadband rule treats |median| beyond `min_abs_median_pct`
-    as a directional claim. The HEMI replay (2026-08-30) showed a median that
-    sits inside the model's own p10-p90 band is noise, not a claim — so the
-    ratio-aware deadband is `max(fixed, min_conf_ratio * spread)`. Because it
-    is ALWAYS >= the fixed deadband, it can only widen the no-opinion zone: it
-    rescues blocks, it never creates them. This is the sample we accrue before
-    ever flipping the live rule to ratio-aware.
-
-    Called only on the block path (where the fixed rule has already rejected
-    the entry, so `abs(med) >= fixed_deadband` holds — asserted defensively
-    below). Returns None when the spread is unavailable or the ratio floor
-    does not actually widen the no-opinion zone past |median| (i.e. no rescue
-    to report).
-    """
-    med = ctx.chronos_median_pct
-    spread = ctx.chronos_spread_pct
-    if med is None or spread is None or spread <= 0:
-        return None
-    if abs(med) < fixed_deadband:
-        # Invariant of the block path — a median inside the fixed deadband
-        # never reaches the block, so no rescue to report.
-        return None
-    # Same knob semantics as chronos_signal.resolve_min_conf_ratio: absent ->
-    # 0.25, explicit 0 -> 0 (counterfactual inert: ratio_deadband collapses
-    # back to the fixed one, so no rescue can ever register).
-    try:
-        ratio = max(0.0, float(gate_cfg.get("min_conf_ratio", 0.25)))
-    except (TypeError, ValueError):
-        ratio = 0.25
-    ratio_deadband = max(fixed_deadband, ratio * spread)
-    if abs(med) < ratio_deadband:
-        return {
-            "would_pass": True,
-            "fixed_deadband_pct": fixed_deadband,
-            "ratio_deadband_pct": round(ratio_deadband, 4),
-            "min_conf_ratio": ratio,
-            "spread_pct": spread,
-            "median_pct": med,
-        }
-    return None
-
-
 def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Chronos direction-mismatch conviction gate (SHADOW by default).
 
@@ -638,14 +591,10 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
     Fail-safe: no forecast (cold cache, model not loaded, in_prompt off) or a
     directionally-neutral forecast (within the deadband) = no opinion = pass.
 
-    COUNTERFACTUAL (log-only, never gates): on the block path we also ask what
-    a ratio-aware deadband `max(min_abs_median_pct, min_conf_ratio * spread)`
-    would have done. It is always wider than the fixed deadband, so it only
-    rescues, never adds — a pure over-block sample (HEMI replay, 2026-08-30).
-    When it would have rescued, the result carries a `counterfactual_rescue`
-    marker the executor logs so we can count them against P/L before deciding
-    whether to promote the live rule to ratio-aware. `min_conf_ratio` (default
-    0.25) lives in this gate's config block.
+    The ratio-aware deadband counterfactual that once accrued here was REMOVED
+    2026-09-18 (WATCHLIST §C.1 die ruling: 84 accruals joined at 53.2% win,
+    net −$74.76 — the fixed deadband was doing real work). The live rule is
+    unchanged: fixed `min_abs_median_pct` only.
     """
     cfg = gate_cfg or {}
     if not bool(cfg.get("enabled", True)):
@@ -668,13 +617,6 @@ def chronos_mismatch_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateRes
               f"conf {ctx.confidence:.2f} < {min_conf:.2f}, "
               f"composite {ctx.composite_score:.1f} < {min_composite:.0f})")
     result: GateResult = {"reason": reason}
-    # Log-only counterfactual (never changes the pass/fail below): a
-    # ratio-aware deadband is always wider than the fixed one, so it can only
-    # rescue a block the fixed rule made — accrue the sample for the
-    # fixed-vs-ratio decision.
-    cf = _chronos_ratio_deadband_rescue(ctx, deadband, cfg)
-    if cf is not None:
-        result["counterfactual_rescue"] = cf
     if bool(cfg.get("shadow_mode", True)):
         result["pass"] = True
         result["shadow_would_block"] = True

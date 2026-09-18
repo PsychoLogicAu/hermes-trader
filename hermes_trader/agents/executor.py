@@ -1293,9 +1293,10 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     try:
         _csig = get_chronos_signal_sync(analysis["coin"], trade_side)
         _chronos_med = _csig.median_pct if _csig else None
-        # p10-p90 spread, % vs last close — same sync read. Fed ONLY to the
-        # ratio-aware deadband counterfactual in chronos_mismatch_gate (it
-        # logs, never gates). Absent on error signals → counterfactual inert.
+        # p10-p90 spread, % vs last close — same sync read. Fed to the
+        # tail_spread_comparator (log-only, plan D4). The ratio-aware deadband
+        # counterfactual that also consumed this was removed 2026-09-18 (§C.1
+        # die ruling); the field itself stays for the comparator.
         _chronos_spread = _csig.spread_pct if _csig else None
         # Per-step quantile paths for the tail-trigger gate; absent on error
         # signals or pre-change signals — the gate then passes.
@@ -1392,22 +1393,6 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_cm.get('reason')} — "
             f"NOT blocking (shadow mode)")
-    # Log-only counterfactual sample: the fixed 0.5% deadband blocked this
-    # entry, but a ratio-aware deadband (min_conf_ratio x the p10-p90 spread,
-    # always wider than the fixed one) would have rescued it — i.e. the model
-    # was inside its own uncertainty band, not making a directional claim.
-    # Never affects execution. Accrue the count, then join against P/L on the
-    # blocked/missed trades before deciding whether to promote the live rule
-    # to ratio-aware (HEMI replay, 2026-08-30).
-    _cf = _cm.get("counterfactual_rescue")
-    if _cf:
-        logger.warning(
-            f"[gate][COUNTERFACTUAL] chronos_mismatch fixed-deadband block "
-            f"RESCUED by ratio-aware deadband for {analysis['coin']} "
-            f"{trade_side.upper()}: median {_cf['median_pct']:+.2f}% inside "
-            f"band {_cf['spread_pct']:.1f}% (|med| < {_cf['ratio_deadband_pct']:.2f}% "
-            f"= max({_cf['fixed_deadband_pct']:.2f}%, {_cf['min_conf_ratio']:.2f} x "
-            f"spread)) — fixed rule stands, ratio rule would have passed")
 
     # Tail-trigger shadow: same would-block pattern, keys off the adverse
     # quantile PATH (validated K=6/X=3.0 in the 2026-08-28 60-flag replay —
