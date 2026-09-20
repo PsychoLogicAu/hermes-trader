@@ -737,6 +737,14 @@ def _build_user_message(
     # bar. A 30min recovery off the low is exactly the "trending back in the
     # right direction" tell a down-but-recovering close-check needs.
     _HELD_DIR_WINDOW_BARS = 6
+    # RECOVERING flag window (ADA 2026-09-19): the close-check saw "best move
+    # +0.2%, now +0.2%" and called a dead bag while price was climbing off a
+    # −1.3% low — the one-way peak ratchet HID the dip, and the model closed a
+    # green recovering position that ran +1.1% after. Compute the trough from
+    # 5m closes over 2h (typical hold is 30–100min), truncated at entry when
+    # the hold is shorter, and surface it explicitly so "never ran" has to
+    # fight a RECOVERING token instead of a ratcheted number.
+    _HELD_RECOVERY_WINDOW_BARS = 24
 
     def _held_annotation(h_coin: str, h_side: str) -> str:
         try:
@@ -776,7 +784,9 @@ def _build_user_message(
                 # require the full window or omit the field — a partial window
                 # would render as if the coin barely moved.
                 try:
-                    c5m = fetch_hl_candles(h_coin, "5m", _HELD_DIR_WINDOW_BARS + 1)
+                    _n = max(_HELD_DIR_WINDOW_BARS,
+                             _HELD_RECOVERY_WINDOW_BARS) + 1
+                    c5m = fetch_hl_candles(h_coin, "5m", _n)
                     c5m = c5m[:-1] if len(c5m) > 1 else []
                     if len(c5m) >= _HELD_DIR_WINDOW_BARS:
                         c0 = candle_val(c5m[-_HELD_DIR_WINDOW_BARS], "c")
@@ -784,6 +794,31 @@ def _build_user_message(
                         if c0 and c1:
                             now += (f", price {((c1 - c0) / c0 * 100):+.1f}% "
                                     "over last 30min (5m bars)")
+                    # RECOVERING flag: trough of the CLOSED 5m closes vs entry,
+                    # truncated at entry time so a pre-entry dip can't inflate
+                    # it. Fires when the position has clawed back at least
+                    # max(0.5%, half the dip) off that trough — deliberately
+                    # above the ±0.3% fee-noise band.
+                    try:
+                        bars_in_hold = max(2, age_min // 5)
+                        window = c5m[-min(len(c5m),
+                                          _HELD_RECOVERY_WINDOW_BARS,
+                                          bars_in_hold):]
+                        pcts = []
+                        for _c in window:
+                            cv = candle_val(_c, "c")
+                            if cv:
+                                pcts.append(((cv - e) / e * 100)
+                                            if h_side == "long"
+                                            else ((e - cv) / e * 100))
+                        if len(pcts) >= 2:
+                            trough_pct = min(pcts)
+                            recovery = now_pct - trough_pct
+                            if recovery >= max(0.5, 0.5 * abs(min(trough_pct, 0.0))):
+                                now += (f", RECOVERING +{recovery:.1f}% off the "
+                                        f"{trough_pct:+.1f}% low")
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             return f" (held {age_min}min, best move since entry {peak_pct:+.1f}%{now})"
@@ -806,14 +841,18 @@ def _build_user_message(
         position_block = (
             f"Open position on {coin} (you hold it — do not re-enter; a CLOSE "
             f"verdict here exits YOUR {coin} position). Weigh the PnL "
-            f"annotation: 'best move' is the one-way peak since entry, 'now' "
-            f"is the live PnL vs entry and is the number that matters for a "
-            f"CLOSE call. CLOSE when 'now' is at or below entry AND there is "
-            f"no recovery — the 30min price field is flat or falling and the "
-            f"structure shows nothing back in the position's favour. A "
-            f"position that is down vs entry but RECOVERING (price rising over "
-            f"the last 30min / back toward its best move) is not a close "
-            f"candidate on PnL grounds. 'Barely moved' means no progress, it "
+            f"annotation: 'best move' is the one-way peak since entry and it "
+            f"HIDES dips — a position can show a small best move after a deep "
+            f"recovery; 'now' is the live PnL vs entry and is the number that "
+            f"matters for a CLOSE call. CLOSE on PnL grounds requires BOTH: "
+            f"'now' at or below entry AND no recovery — the 30min price field "
+            f"flat or falling, no RECOVERING flag, and the structure shows "
+            f"nothing back in the position's favour. A position flagged "
+            f"RECOVERING (climbing off its recent low toward/beyond entry) is "
+            f"NOT a close candidate on PnL grounds even if 'best move' looks "
+            f"small — and a position with 'now' above entry is not a loser; "
+            f"do not close a green, recovering position by relabelling it a "
+            f"dead bag. 'Barely moved' means no progress, it "
             f"does not mean it is safe to keep: a young position that has made "
             f"no progress in either direction should be CLOSED rather than "
             f"nursed. Your own technicals for {coin} still matter as usual. "

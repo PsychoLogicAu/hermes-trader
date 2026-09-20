@@ -3063,11 +3063,11 @@ def test_held_position_block_instruction_anchors_close_on_now():
     end = msg.find("VVV long (held")  # instruction ends, annotation begins
     block = msg[start:end]
     assert "is the number that matters for a CLOSE call" in block
-    # the recovery asymmetry (the A2 wording fix — 'now <= entry' alone must
-    # no longer be an unconditional CLOSE trigger)
-    assert "AND there is" in block
+    # the recovery asymmetry (the A2 wording fix; ADA 2026-09-19 hardening:
+    # BOTH conditions required, RECOVERING flag named as an explicit veto)
+    assert "CLOSE on PnL grounds requires BOTH" in block
     assert "RECOVERING" in block
-    assert "not a close candidate on PnL grounds" in block
+    assert "NOT a close candidate on PnL grounds" in block
     assert "no progress, it does not mean it is safe to keep" in block
     # The old self-defeating 'young bag that has barely moved ... going nowhere'
     # framing must be gone.
@@ -3142,6 +3142,84 @@ def test_held_annotation_direction_omitted_on_partial_window():
         research_mod.fetch_hl_candles = real_candles
     assert "now -1.5% vs entry, -1.8% vs best move)" in msg
     assert "over last 30min" not in msg
+
+
+def _held_msg_with_closes(coin, side, entry, peak, mark, age_min, closes):
+    """Helper: render the held annotation for a synthetic tracker + 5m close
+    series (last row = still-forming candle, always excluded by the code)."""
+    import time as _t
+    from hermes_trader.agents import dsl_exit
+    from hermes_trader.agents import research as research_mod
+    from hermes_trader.agents.research import _build_user_message
+    trk = dsl_exit.DSLTracker(coin=coin, side=side, entry_px=entry,
+                              entry_time=_t.time() - age_min * 60)
+    trk.peak_px = peak
+    trk.last_mark_px = mark
+    dsl_exit._active_positions[f"{coin}_{side}"] = trk
+    c5m = [{"t": i, "o": c, "h": c, "l": c, "c": c, "v": 1.0}
+           for i, c in enumerate(closes)]
+    real_candles = research_mod.fetch_hl_candles
+    try:
+        research_mod.fetch_hl_candles = lambda *a, **k: c5m
+        mid = closes[-1]
+        msg = _build_user_message(
+            coin, {"type": "perp", "mid": mid, "composite_score": 0,
+                   "triggers": []},
+            {"last_close": mid}, {"last_close": mid}, {"last_close": mid},
+            "N/A", "no news", 300.0,
+            [{"coin": coin, "side": side, "size_usd": 33.0}], "LIVE",
+        )
+    finally:
+        dsl_exit._active_positions.pop(f"{coin}_{side}", None)
+        research_mod.fetch_hl_candles = real_candles
+    return msg
+
+
+def test_held_annotation_recovering_flag_on_v_recovery():
+    """ADA 2026-09-19 shape: long entered 0.22807, sank to a −1.3% low, now
+    back +0.2% above entry with 'best move' still +0.2%. The old annotation
+    read as a dead bag and the model CLOSED a green recovering position that
+    ran +1.1% after. The trough must surface as an explicit RECOVERING flag."""
+    entry = 0.22807
+    closes = [0.22640, 0.22590, 0.22550, 0.22530, 0.22513, 0.22540,
+              0.22580, 0.22610, 0.22660, 0.22700, 0.22740, 0.22780,
+              0.22819, 0.22812, 0.22850] + [0.22860]  # last = forming
+    msg = _held_msg_with_closes("ADA", "long", entry, peak=0.22853,
+                                mark=0.22853, age_min=65, closes=closes)
+    assert "RECOVERING +1.5% off the -1.3% low" in msg
+
+
+def test_held_annotation_no_recovering_flag_while_sinking():
+    """Negative control (ZEC 2026-09-17 class): a sinking long must NOT get
+    the RECOVERING flag — it stays CLOSE-eligible. Trough == newest close, so
+    recovery is 0."""
+    entry = 1388.1
+    closes = [1385.0, 1382.0, 1379.0, 1375.0, 1370.0, 1364.0, 1358.0,
+              1354.8] + [1354.0]  # last = forming
+    msg = _held_msg_with_closes("ZEC", "long", entry, peak=1390.0,
+                                mark=1354.8, age_min=51, closes=closes)
+    assert "RECOVERING +" not in msg  # the instruction text mentions the flag
+    assert "now -2.4% vs entry" in msg
+
+
+def test_held_annotation_recovering_flag_short_side():
+    """Short mirror: short entered 100.0, price spiked to a +1.5% adverse
+    high (trough −1.5% in side-adjusted terms), now back to −0.3% in favor."""
+    closes = [100.80, 101.10, 101.30, 101.45, 101.50, 101.30, 101.00,
+              100.70, 100.50, 100.40, 100.30] + [100.28]  # last = forming
+    msg = _held_msg_with_closes("XYZ", "short", 100.0, peak=99.70,
+                                mark=100.30, age_min=60, closes=closes)
+    assert "RECOVERING +1.2% off the -1.5% low" in msg
+
+
+def test_held_annotation_recovering_flag_suppressed_on_flat_noise():
+    """Noise floor: a flat bag wobbling ±0.2% around entry must NOT get the
+    flag (recovery threshold max(0.5%, half the dip) sits above fee noise)."""
+    closes = [100.05, 99.95, 100.10, 99.90, 100.00, 100.08, 99.92,
+              100.02] + [100.03]  # last = forming
+    msg = _held_msg_with_closes("FLAT", "long", 100.0, peak=100.20,
+                                mark=100.10, age_min=60, closes=closes)
+    assert "RECOVERING +" not in msg  # the instruction text mentions the flag
 
 
 def test_parse_verdict_regex_fallback_midtext():
