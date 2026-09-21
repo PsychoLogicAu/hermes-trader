@@ -254,7 +254,7 @@ All hot-read. README "Configuration" has the concise version.
 - `max_loss_pct` (3.5) + `max_loss_roe_pct` (18) — hard stop, whichever binds first (ROE cap = `pct / leverage` in spot terms; at 10x, 18% ROE = 1.8% spot).
 - `protect_pct` (1.5) + `retrace_threshold` (0.30) — trail tightness. **Low = scalp (bank fast); high = trend-ride (let it run).** `phase2_tiers` = profit-scaled retrace ladder.
 - `stale_flat_timeout_minutes` — flatten a position that never reaches `protect_pct` within this window.
-- `regime_aware {enabled, trend_ride{…}}` — when `detect_regime()=='up'`, swap to looser trend-ride params (scalp chop / ride trends). Default OFF.
+- `regime_aware {enabled, scope, trend_ride{…}}` — when `detect_regime()=='up'`, swap to looser trend-ride params (scalp chop / ride trends). Default OFF. `scope` (B.27 knob): absent/`"all"` = every regime-up trade; `"late_chase"` = only entries admitted via the late-chase bypass (tagged at open; policy is fixed per-position at entry — mid-life flips don't touch open trades). Unknown scope fails safe to scalp.
 
 ### `atr_risk_sizing` `{enabled, risk_per_trade_pct}`
 Equal-risk (Turtle-N): notional = `risk_per_trade_pct × equity / stop_width`. Overrides flat `equity_fraction` — volatile coins get smaller size, tight-stop coins bigger (capped by `max_trade_notional_usd`).

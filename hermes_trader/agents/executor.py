@@ -210,18 +210,42 @@ def _conviction_multiplier(confidence: float, tiers: List[tuple]) -> float:
     return tiers[-1][1]
 
 
-def select_exit_params(dsl_config: Dict[str, Any], regime: str) -> tuple:
+def select_exit_params(dsl_config: Dict[str, Any], regime: str,
+                       entry_class: Optional[str] = None) -> tuple:
     """Regime-aware exit selection. The base dsl_config is the SCALP config
     (bank fast — +EV in chop/down per the controlled backtest: scalp +$1536/63%
     vs trend-ride -$757/47%). When regime=='up' (sustained up-trend) and
     regime_aware is enabled, LOOSEN to trend-ride params so we RIDE the rippers
     (trend-ride is +EV in trends — that's where it was originally validated).
+
+    `regime_aware.scope` narrows WHICH regime-up trades get trend_ride
+    (B.27 scope knob, 2026-09-21): absent / "" / "all" = every regime-up trade
+    (original behavior); "late_chase" = ONLY entries that entered via the
+    late-chase bypass (`entry_class == "late_chase"`, tagged at open by
+    _runner_entry_block_reason). Rationale: the scope A/B replay showed the
+    blocked-late-chase cohort is a genuinely good trend_ride population while
+    regime-up-WIDE trend_ride is tail-carried (top-5 = 172% of net, win
+    76%→61%). An unrecognised scope value fails SAFE to scalp. `enabled`
+    remains the master switch: off ⇒ scalp for everyone, scope irrelevant.
     Returns (protect_pct, retrace_threshold, phase2_tiers_raw, label)."""
     base_protect = dsl_config.get("protect_pct", 1.5)
     base_retrace = dsl_config.get("retrace_threshold", 0.30)
     base_tiers = dsl_config.get("phase2_tiers")
     ra = dsl_config.get("regime_aware") or {}
     if ra.get("enabled", False) and regime == "up":
+        scope = str(ra.get("scope", "") or "all").strip().lower()
+        if scope == "late_chase":
+            if entry_class != "late_chase":
+                return (base_protect, base_retrace, base_tiers, "scalp")
+            tr = ra.get("trend_ride") or {}
+            return (float(tr.get("protect_pct", 3.0)),
+                    float(tr.get("retrace_threshold", 0.55)),
+                    tr.get("phase2_tiers", base_tiers),
+                    "trend_ride(up-regime,late_chase)")
+        elif scope not in ("", "all"):
+            logger.warning(f"[executor] regime_aware.scope={scope!r} unrecognised "
+                           f"— failing safe to scalp")
+            return (base_protect, base_retrace, base_tiers, "scalp")
         tr = ra.get("trend_ride") or {}
         return (float(tr.get("protect_pct", 3.0)),
                 float(tr.get("retrace_threshold", 0.55)),
@@ -1701,7 +1725,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _regime = detect_regime(analysis["coin"])
     except Exception as _re_e:
         logger.debug(f"[executor] regime lookup failed (non-fatal): {_re_e}")
-    _ex_protect, _ex_retrace, _tiers_raw, _ex_label = select_exit_params(dsl_config, _regime)
+    _ex_protect, _ex_retrace, _tiers_raw, _ex_label = select_exit_params(
+        dsl_config, _regime, entry_class=analysis.get("_entry_class"))
     # phase2_tiers is optional in config; when present it OVERRIDES the class
     # default ladder so profit-locking tightness is tunable without code edits.
     _tiers = [RetraceTier(**t) for t in _tiers_raw] if _tiers_raw else None
@@ -2699,6 +2724,12 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
                             f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
                             f"{tape_note}{comp_note}")
+                # B.27 scope-knob tag (2026-09-21): this entry got in via the
+                # late-chase bypass — carried on the analysis dict so the open
+                # path can hand it to select_exit_params(entry_class=...). Only
+                # set when the bypass is LIVE (shadow accruals never tag);
+                # harmless extra key if no regime_aware.scope is configured.
+                analysis["_entry_class"] = "late_chase"
             elif _bs:
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
