@@ -2461,6 +2461,72 @@ def _late_chase_composite_gate(gate: Dict[str, Any], coin: str, side: str,
     return False, note
 
 
+# B.27 shadow accrual (2026-09-21): per-coin throttle for the volume-accumulation
+# probe so a repeatedly-blocked coin can't spend candleSnapshot weight every scan.
+_LC_VA_LAST: Dict[str, float] = {}
+_LC_VA_LOCK = threading.Lock()
+
+
+def _late_chase_volume_accrual(gate: Dict[str, Any], coin: str, side: str,
+                               conf: float, bar: float) -> None:
+    """Log-only volume-accumulation accrual on late-chase BLOCKS (B.27 shadow).
+
+    Replay finding (.hermes/WATCHLIST.md §B.27): the late-chase blocked cohort's
+    runway is NOT entry-limited — at volume-accumulation release points a median
+    +5–6% 24h run typically remains — but the scalp exit forfeits it, and only
+    ~18% of strict-threshold releases chase an exhausted move. The candidate
+    admission rule (never live here): vol_last / mean(prior 96 finalized 5m
+    volumes) >= `late_chase_va_ratio_min` counts as fresh-impulse-equivalent,
+    PAIRED with the dormant dsl_exit trend_ride policy as the exit.
+
+    This function NEVER changes the block/pass decision — it is called only on
+    the block path and logs one `[gate][SHADOW] late_chase_volume_accumulation
+    WOULD RELEASE ...` line when the ratio clears the floor, so the admit cohort
+    accrues forward data for the promote/die call (offline mirror joins scalp-
+    vs-trend_ride deltas from candles; nothing is simulated live). Flag off /
+    key absent => no fetch, byte-identical behavior. Throttled per coin
+    (`late_chase_va_per_coin_cooldown_min`, default 30) — the scan re-researches
+    the same blocked coin every few minutes and candleSnapshot weight is shared
+    with the live scanner. Any error fails closed: no line, block unchanged.
+    """
+    if not bool(gate.get("late_chase_volume_shadow", False)):
+        return
+    ratio_min = float(gate.get("late_chase_va_ratio_min", 5.0) or 0.0)
+    if ratio_min <= 0:
+        return
+    cooldown_s = float(gate.get("late_chase_va_per_coin_cooldown_min", 30) or 30) * 60.0
+    now = time.time()
+    with _LC_VA_LOCK:
+        if now - _LC_VA_LAST.get(coin, 0.0) < cooldown_s:
+            return
+        # Reserve before the fetch (single-flight; on error the throttle still
+        # applies — a coin whose candles fail shouldn't retry every scan).
+        _LC_VA_LAST[coin] = now
+    try:
+        # 98 bars => >=97 finalized after dropping the still-forming candle.
+        candles = fetch_hl_candles(coin, "5m", 98)
+        if not candles or len(candles) < 97:
+            return
+        vols = [float(c["v"]) for c in candles[:-1]]  # finalized only
+        if len(vols) < 97:
+            return
+        window, cur = vols[-97:-1], vols[-1]
+        mean = sum(window) / len(window)
+        if mean <= 0:
+            return
+        ratio = cur / mean
+        if ratio < ratio_min:
+            return
+        logger.warning(
+            f"[gate][SHADOW] late_chase_volume_accumulation WOULD RELEASE "
+            f"{coin} {side.upper()}: vol_ratio {ratio:.1f}x >= {ratio_min:.1f}x "
+            f"(96-bar accumulation floor) conf {conf:.2f} < bar {bar:.2f} — "
+            f"NOT releasing (shadow accrual, B.27); live rule stands")
+    except Exception as e:  # never let the accrual raise into the gate path
+        logger.debug(f"[executor] late-chase volume-accumulation accrual "
+                     f"failed for {coin}: {e}")
+
+
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -2663,6 +2729,9 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                     f"{max(bar - tf_drop, min_conf):.2f} "
                     f"({'+'.join(corr_shadow)}) — live rule stands, vote-on "
                     f"rule would have passed")
+            # B.27 shadow accrual (log-only; flag off => no-op, byte-identical):
+            # volume-accumulation WOULD-RELEASE line for the promote/die cohort.
+            _late_chase_volume_accrual(gate, coin, side, conf, bar)
             return (f"runner_gate_blocked (late trend-only chase; no fresh "
                     f"breakout/burst, conf {conf:.2f}, bar {bar:.2f}){bar_note}")
     else:
