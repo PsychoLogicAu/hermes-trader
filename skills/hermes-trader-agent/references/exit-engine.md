@@ -33,10 +33,16 @@ validating on ONE up-trend day — it rides rippers but bleeds in chop, the domi
 regime. Caveat: scalp can amputate the fat-tail winners the edge depends on —
 `tp_scale_fraction` lets a runner ride (below).
 
-- **`regime_aware {enabled, trend_ride{…}}`** (default OFF): when
+- **`regime_aware {enabled, scope, trend_ride{…}}`** (default OFF): when
   `detect_regime()=='up'`, swaps to looser trend-ride params (scalp chop / ride
   trends). Backtested BELOW always-scalp in the chop sample → gated off; enable
   only once a sustained-trend sample validates it (restart to load code, then flip).
+  `scope` (B.27, 2026-09-21): `"late_chase"` restricts trend_ride to entries that got
+  in via the late-chase bypass (`analysis["_entry_class"]`, set only on a LIVE bypass;
+  absent/`"all"` = book-wide as before; unknown value fails safe to scalp). The policy
+  is chosen ONCE at open and lives on the tracker — flipping scope mid-life never
+  re-tunes an open position. Scope A/B (§B.27): late-chase+up is the good trend_ride
+  population; regime-up-wide is tail-carried (top-5 = 172% of net).
 - **Hard timeout / stale-flat:** `hard_timeout_minutes` (1800); and
   `stale_flat_timeout_minutes` (480) flattens a position that never reaches
   `protect_pct`.

@@ -210,18 +210,42 @@ def _conviction_multiplier(confidence: float, tiers: List[tuple]) -> float:
     return tiers[-1][1]
 
 
-def select_exit_params(dsl_config: Dict[str, Any], regime: str) -> tuple:
+def select_exit_params(dsl_config: Dict[str, Any], regime: str,
+                       entry_class: Optional[str] = None) -> tuple:
     """Regime-aware exit selection. The base dsl_config is the SCALP config
     (bank fast — +EV in chop/down per the controlled backtest: scalp +$1536/63%
     vs trend-ride -$757/47%). When regime=='up' (sustained up-trend) and
     regime_aware is enabled, LOOSEN to trend-ride params so we RIDE the rippers
     (trend-ride is +EV in trends — that's where it was originally validated).
+
+    `regime_aware.scope` narrows WHICH regime-up trades get trend_ride
+    (B.27 scope knob, 2026-09-21): absent / "" / "all" = every regime-up trade
+    (original behavior); "late_chase" = ONLY entries that entered via the
+    late-chase bypass (`entry_class == "late_chase"`, tagged at open by
+    _runner_entry_block_reason). Rationale: the scope A/B replay showed the
+    blocked-late-chase cohort is a genuinely good trend_ride population while
+    regime-up-WIDE trend_ride is tail-carried (top-5 = 172% of net, win
+    76%→61%). An unrecognised scope value fails SAFE to scalp. `enabled`
+    remains the master switch: off ⇒ scalp for everyone, scope irrelevant.
     Returns (protect_pct, retrace_threshold, phase2_tiers_raw, label)."""
     base_protect = dsl_config.get("protect_pct", 1.5)
     base_retrace = dsl_config.get("retrace_threshold", 0.30)
     base_tiers = dsl_config.get("phase2_tiers")
     ra = dsl_config.get("regime_aware") or {}
     if ra.get("enabled", False) and regime == "up":
+        scope = str(ra.get("scope", "") or "all").strip().lower()
+        if scope == "late_chase":
+            if entry_class != "late_chase":
+                return (base_protect, base_retrace, base_tiers, "scalp")
+            tr = ra.get("trend_ride") or {}
+            return (float(tr.get("protect_pct", 3.0)),
+                    float(tr.get("retrace_threshold", 0.55)),
+                    tr.get("phase2_tiers", base_tiers),
+                    "trend_ride(up-regime,late_chase)")
+        elif scope not in ("", "all"):
+            logger.warning(f"[executor] regime_aware.scope={scope!r} unrecognised "
+                           f"— failing safe to scalp")
+            return (base_protect, base_retrace, base_tiers, "scalp")
         tr = ra.get("trend_ride") or {}
         return (float(tr.get("protect_pct", 3.0)),
                 float(tr.get("retrace_threshold", 0.55)),
@@ -1701,7 +1725,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _regime = detect_regime(analysis["coin"])
     except Exception as _re_e:
         logger.debug(f"[executor] regime lookup failed (non-fatal): {_re_e}")
-    _ex_protect, _ex_retrace, _tiers_raw, _ex_label = select_exit_params(dsl_config, _regime)
+    _ex_protect, _ex_retrace, _tiers_raw, _ex_label = select_exit_params(
+        dsl_config, _regime, entry_class=analysis.get("_entry_class"))
     # phase2_tiers is optional in config; when present it OVERRIDES the class
     # default ladder so profit-locking tightness is tunable without code edits.
     _tiers = [RetraceTier(**t) for t in _tiers_raw] if _tiers_raw else None
@@ -2461,6 +2486,72 @@ def _late_chase_composite_gate(gate: Dict[str, Any], coin: str, side: str,
     return False, note
 
 
+# B.27 shadow accrual (2026-09-21): per-coin throttle for the volume-accumulation
+# probe so a repeatedly-blocked coin can't spend candleSnapshot weight every scan.
+_LC_VA_LAST: Dict[str, float] = {}
+_LC_VA_LOCK = threading.Lock()
+
+
+def _late_chase_volume_accrual(gate: Dict[str, Any], coin: str, side: str,
+                               conf: float, bar: float) -> None:
+    """Log-only volume-accumulation accrual on late-chase BLOCKS (B.27 shadow).
+
+    Replay finding (.hermes/WATCHLIST.md §B.27): the late-chase blocked cohort's
+    runway is NOT entry-limited — at volume-accumulation release points a median
+    +5–6% 24h run typically remains — but the scalp exit forfeits it, and only
+    ~18% of strict-threshold releases chase an exhausted move. The candidate
+    admission rule (never live here): vol_last / mean(prior 96 finalized 5m
+    volumes) >= `late_chase_va_ratio_min` counts as fresh-impulse-equivalent,
+    PAIRED with the dormant dsl_exit trend_ride policy as the exit.
+
+    This function NEVER changes the block/pass decision — it is called only on
+    the block path and logs one `[gate][SHADOW] late_chase_volume_accumulation
+    WOULD RELEASE ...` line when the ratio clears the floor, so the admit cohort
+    accrues forward data for the promote/die call (offline mirror joins scalp-
+    vs-trend_ride deltas from candles; nothing is simulated live). Flag off /
+    key absent => no fetch, byte-identical behavior. Throttled per coin
+    (`late_chase_va_per_coin_cooldown_min`, default 30) — the scan re-researches
+    the same blocked coin every few minutes and candleSnapshot weight is shared
+    with the live scanner. Any error fails closed: no line, block unchanged.
+    """
+    if not bool(gate.get("late_chase_volume_shadow", False)):
+        return
+    ratio_min = float(gate.get("late_chase_va_ratio_min", 5.0) or 0.0)
+    if ratio_min <= 0:
+        return
+    cooldown_s = float(gate.get("late_chase_va_per_coin_cooldown_min", 30) or 30) * 60.0
+    now = time.time()
+    with _LC_VA_LOCK:
+        if now - _LC_VA_LAST.get(coin, 0.0) < cooldown_s:
+            return
+        # Reserve before the fetch (single-flight; on error the throttle still
+        # applies — a coin whose candles fail shouldn't retry every scan).
+        _LC_VA_LAST[coin] = now
+    try:
+        # 98 bars => >=97 finalized after dropping the still-forming candle.
+        candles = fetch_hl_candles(coin, "5m", 98)
+        if not candles or len(candles) < 97:
+            return
+        vols = [float(c["v"]) for c in candles[:-1]]  # finalized only
+        if len(vols) < 97:
+            return
+        window, cur = vols[-97:-1], vols[-1]
+        mean = sum(window) / len(window)
+        if mean <= 0:
+            return
+        ratio = cur / mean
+        if ratio < ratio_min:
+            return
+        logger.warning(
+            f"[gate][SHADOW] late_chase_volume_accumulation WOULD RELEASE "
+            f"{coin} {side.upper()}: vol_ratio {ratio:.1f}x >= {ratio_min:.1f}x "
+            f"(96-bar accumulation floor) conf {conf:.2f} < bar {bar:.2f} — "
+            f"NOT releasing (shadow accrual, B.27); live rule stands")
+    except Exception as e:  # never let the accrual raise into the gate path
+        logger.debug(f"[executor] late-chase volume-accumulation accrual "
+                     f"failed for {coin}: {e}")
+
+
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -2633,6 +2724,12 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
                             f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
                             f"{tape_note}{comp_note}")
+                # B.27 scope-knob tag (2026-09-21): this entry got in via the
+                # late-chase bypass — carried on the analysis dict so the open
+                # path can hand it to select_exit_params(entry_class=...). Only
+                # set when the bypass is LIVE (shadow accruals never tag);
+                # harmless extra key if no regime_aware.scope is configured.
+                analysis["_entry_class"] = "late_chase"
             elif _bs:
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
@@ -2663,6 +2760,9 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                     f"{max(bar - tf_drop, min_conf):.2f} "
                     f"({'+'.join(corr_shadow)}) — live rule stands, vote-on "
                     f"rule would have passed")
+            # B.27 shadow accrual (log-only; flag off => no-op, byte-identical):
+            # volume-accumulation WOULD-RELEASE line for the promote/die cohort.
+            _late_chase_volume_accrual(gate, coin, side, conf, bar)
             return (f"runner_gate_blocked (late trend-only chase; no fresh "
                     f"breakout/burst, conf {conf:.2f}, bar {bar:.2f}){bar_note}")
     else:
