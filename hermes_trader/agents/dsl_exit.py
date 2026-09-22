@@ -738,10 +738,17 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
     if its dex *successfully responded* this cycle — protecting trackers
     on timed-out dexes from being reset to fresh state next tick.
 
-    Returns the entry-context records of trackers dropped as stale (empty
-    list normally) so the caller can settle a possible exchange-side close
-    (SL/TP trigger fill) at detection time instead of waiting for the next
-    startup reconcile.
+    Returns reconciliation records for the caller to settle at detection time
+    (empty list normally), each tagged with a ``kind``:
+
+    - ``"stale_close"`` — entry-context of a tracker dropped entirely (the
+      position vanished from the exchange without going through
+      close_position_market; usually an SL/TP trigger fill). Settled by
+      ``settle_stale_closes``.
+    - ``"scale_out"`` — a live position whose size SHRANK while the tracker
+      stayed alive (exchange-side TP scale-out fill). Carries
+      ``size_delta/old_size/new_size`` instead of ``size``. Settled by
+      ``settle_scale_outs``.
     """
     load_state()
     # Registry span under `_registry_lock` (RLock → the load_state() above and
@@ -831,6 +838,23 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
                         f"floors now run off the true basis")
                 elif live_sz < t.size * 0.995:
                     # partial close / TP scale-out — size shrinks, basis unchanged
+                    # Capture the delta BEFORE overwriting so the caller can book
+                    # the banked half (exchange-side TP trigger fills run with no
+                    # bot code; without this the SCALE_OUT never reaches the
+                    # ledger and the final CLOSE books only the remainder —
+                    # TAO 2026-09-21: +$0.44 booked, ~+$0.54 invisible).
+                    _stale_close_records.append({
+                        "kind": "scale_out",
+                        "coin": t.coin, "side": t.side,
+                        "entry_px": t.entry_px,
+                        "size_delta": abs(t.size) - live_sz,
+                        "old_size": abs(t.size), "new_size": live_sz,
+                        "leverage": int(getattr(t, "leverage", 0) or 1),
+                        "entry_time": t.entry_time,
+                    })
+                    logger.info(
+                        f"[dsl] {key} size shrink {abs(t.size):g} -> {live_sz:g} "
+                        f"(partial close / TP scale-out) — booking candidate")
                     t.size = live_sz
                     added += 1
             if key not in _active_positions:
@@ -867,6 +891,7 @@ def rehydrate_from_exchange(asset_positions: Iterable[Dict[str, Any]],
             # ZETA 2026-09-13). The loop hands these to settle_stale_closes().
             _t = _active_positions[k]
             _stale_close_records.append({
+                "kind": "stale_close",
                 "coin": _t.coin, "side": _t.side,
                 "entry_px": _t.entry_px, "size": abs(_t.size),
                 "leverage": int(getattr(_t, "leverage", 0) or 1),
