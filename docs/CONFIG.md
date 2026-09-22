@@ -33,7 +33,9 @@ Scan native HL perps (BTC, ETH, SOL, etc.). Hot-reloaded — takes effect on the
 next cycle (filter is applied per-scan, not at startup).
 
 ### `enable_hip3` (bool, default `false`)
-Scan HIP-3 tokenized-equity / commodity perps (`xyz:NVDA`, `km:USOIL`, etc.). Adds ~8 HTTP POSTs per scan. **Requires loop restart to take effect**.
+Scan HIP-3 tokenized-equity / commodity perps (`xyz:NVDA`, `km:USOIL`, etc.). Adds ~8 HTTP POSTs per scan. **Requires loop restart to take effect.**
+
+When re-enabling, also set `runner_entry_gate.min_hip3_composite` (execution floor, long-side) and `hip3_scan_prefilter` (`{enabled, shadow_mode}`) — the prefilter drops HIP-3 scan candidates below that same floor *before* paying an LLM research cycle; without it, every sub-floor mover burns a full research run just to die at the executor gate (measured: 2,176 such cycles in the Aug–Sep window). See `docs/ARCHITECTURE.md` → "hip3_scan_prefilter".
 
 ---
 
