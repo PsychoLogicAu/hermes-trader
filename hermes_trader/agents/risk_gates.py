@@ -416,7 +416,8 @@ def equity_risk_cap(ctx: GateContext, max_total_notional_pct: float) -> GateResu
 
 def market_regime_gate(ctx: GateContext, counter_regime_min_conf: float = 0.7,
                        block_counter_trend_bypass: bool = False,
-                       crowded_with_min_conf: float = 0.0) -> GateResult:
+                       crowded_with_min_conf: float = 0.0,
+                       no_composite_escape: bool = False) -> GateResult:
     """Block counter-regime trades unless conviction OR own-coin signal clears the bar.
 
       - aligned with regime → pass
@@ -449,6 +450,13 @@ def market_regime_gate(ctx: GateContext, counter_regime_min_conf: float = 0.7,
     The bypass triggers are preserved on both sides — those are explicit
     "the regime proxy is stale" signals and we never want to hard-block on
     a clear individual setup, just enforce regime discipline by default.
+
+    `no_composite_escape` (config `counter_regime_no_composite_escape`, C.6
+    hard bar, live ON since 2026-09-21): for genuinely counter-TREND trades the
+    composite-score escape is CLOSED — only confidence clears the gate. The
+    cohort it was built from (n=14, net −$54.83) entered through the score hatch
+    on fresh-breakout hype scans; every block logs a loud
+    `[gate][COUNTER-TREND-BLOCK]` WARNING for the forward counterfactual review.
     """
     from hermes_trader.agents.market_regime import detect_regime
     regime = detect_regime(ctx.coin)
@@ -525,8 +533,23 @@ def market_regime_gate(ctx: GateContext, counter_regime_min_conf: float = 0.7,
     base["counter_trend"] = not aligned
     if ctx.confidence >= effective_min_conf:
         return {"pass": True, "via": "confidence", **base}
-    if ctx.composite_score >= effective_min_score:
-        return {"pass": True, "via": "composite", **base}
+    # C.6 hard bar (config `counter_regime_no_composite_escape`, default False):
+    # for trades genuinely fighting the TREND regime (up/down and not aligned)
+    # the composite-score escape is closed — conviction (conf vs
+    # effective_min_conf) or nothing. Rationale (.hermes/WATCHLIST.md §C.6 cohort
+    # 2026-09-21, n=14 net −$54.83): the fresh breakout/burst trio auto-clears
+    # composite ≥ 50, so hype scans walked the door the regime gate was built to
+    # guard (MET 09-07 comp 89.5 → −$19.53). Scoped to trend disagreement only —
+    # a neutral-regime against-FUNDING trade keeps its score hatch (the cohort
+    # is all regime up/down counter-trend). Aligned/neutral trades returned
+    # earlier and are UNAFFECTED; the flag never touches the confidence path.
+    # Loud WARNING below so the blocked cohort is greppable for the forward
+    # counterfactual check.
+    trend_counter = base["counter_trend"] and regime in ("up", "down")
+    hard_bar = no_composite_escape and trend_counter
+    if not hard_bar:
+        if ctx.composite_score >= effective_min_score:
+            return {"pass": True, "via": "composite", **base}
     # Binary-trigger bypass: a strong own-coin signal (momentum_burst / slow_burn
     # / whale) normally overrides the slow macro-regime call. `block_counter_trend_bypass`
     # (config, default False, reversible) DISABLES this bypass here — i.e. for trades
@@ -544,16 +567,28 @@ def market_regime_gate(ctx: GateContext, counter_regime_min_conf: float = 0.7,
         return {"pass": True, "via": f"trigger:{trig}", **base}
 
     blocked_via = "blocked_bypass" if block_counter_trend_bypass else "blocked"
-    return {
+    escapes = f"conf >= {effective_min_conf:.2f}" + (
+        "" if hard_bar else f" or score >= {effective_min_score:.0f}")
+    result = {
         "pass": False,
         "via": blocked_via,
         **base,
         "reason": (f"counter-regime {ctx.trade_side} vs {regime} trend "
-                   f"(funding={funding_regime}) — need conf >= {effective_min_conf:.2f} "
-                   f"or score >= {effective_min_score:.0f}"
-                   f"{'' if block_counter_trend_bypass else ' or own-coin signal'}, "
+                   f"(funding={funding_regime}) — need {escapes}"
+                   f"{'' if (block_counter_trend_bypass or hard_bar) else ' or own-coin signal'}, "
                    f"have conf {ctx.confidence:.2f}, score {ctx.composite_score:.0f}"),
     }
+    # LOUD, greppable line for the C.6 forward counterfactual: every trade this
+    # gate blocks is one that WOULD have traded pre-hard-bar. The review recipe
+    # (.hermes/WATCHLIST.md §C.6) prices these from the log — keep the tag and
+    # field order stable: [gate][COUNTER-TREND-BLOCK] COIN side conf X score Y
+    # regime R funding F bar B composite_escape ON|OFF.
+    logger.warning(
+        f"[gate][COUNTER-TREND-BLOCK] {ctx.coin} {ctx.trade_side} "
+        f"conf {ctx.confidence:.2f} score {ctx.composite_score:.1f} "
+        f"regime {regime} funding {funding_regime} bar {effective_min_conf:.2f} "
+        f"composite_escape {'OFF' if hard_bar else 'ON'}")
+    return result
 
 
 def news_blackout_gate(ctx: GateContext) -> GateResult:
@@ -1564,6 +1599,8 @@ def eval_all_gates(
         ctx, _cfg(effective_config, "counter_regime_min_conf", 0.7),
         bool(_cfg(effective_config, "block_counter_trend_bypass", False)),
         float(_cfg(effective_config, "crowded_with_min_conf", 0.0) or 0.0),
+        no_composite_escape=bool(
+            _cfg(effective_config, "counter_regime_no_composite_escape", False)),
     )
     results["news"] = news_blackout_gate(ctx)
     # Shadow by default (see gate docstring): structurally passes and logs a

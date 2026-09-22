@@ -88,6 +88,10 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         "max_total_notional_pct": 1.0,      # total notional as % of equity
         # Regime discipline — counter-trend bar (0.70-0.80 calibrated from 2026-06-06 bleed)
         "counter_regime_min_conf": 0.7,
+        # C.6 hard bar: when True, counter-TREND trades cannot use the composite-score
+        # escape (conf vs counter_regime_min_conf or nothing). Aligned/neutral trades
+        # unaffected. Default False = historical behaviour; live config sets it True.
+        "counter_regime_no_composite_escape": False,
         # Daily giveback lock — once day peaks, no new entries if PnL retraces > halt_pct
         "daily_giveback_halt_pct": 0.0,
         "daily_giveback_min_peak_usd": 20.0,
