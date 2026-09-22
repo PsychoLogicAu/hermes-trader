@@ -52,6 +52,31 @@ def _get_data_gaps() -> int:
     with _data_gap_lock:
         return _data_gap_count
 
+
+# HIP-3 prefilter drop counter (same lock pattern as data gaps — the scan
+# fans out across threads). Per-coin drop lines are DEBUG (invisible at the
+# prod log level), so this aggregate on the INFO scan summary is the ONLY
+# production visibility into how much research the prefilter saved.
+_prefilter_lock = threading.Lock()
+_prefilter_drop_count = 0
+
+
+def _reset_prefilter_drops() -> None:
+    global _prefilter_drop_count
+    with _prefilter_lock:
+        _prefilter_drop_count = 0
+
+
+def _note_prefilter_drop() -> None:
+    global _prefilter_drop_count
+    with _prefilter_lock:
+        _prefilter_drop_count += 1
+
+
+def _get_prefilter_drops() -> int:
+    with _prefilter_lock:
+        return _prefilter_drop_count
+
 # ── Candle cache (module-level, shared across ticks) ──────────────────────────
 
 _candle_cache: Dict[str, Dict[str, Any]] = {}
@@ -373,6 +398,7 @@ def _scan_single_market(
                     f"{float((config.get('runner_entry_gate') or {}).get('min_hip3_composite', 50.0)):.0f} "
                     f"— letting through to research (shadow accrual)")
             else:
+                _note_prefilter_drop()
                 logger.debug(
                     f"[scan] hip3_scan_prefilter dropped {market['coin']} "
                     f"composite {score:.1f} pre-research")
@@ -469,6 +495,7 @@ def scan_once(
     """
     started = time.time()
     _reset_data_gaps()
+    _reset_prefilter_drops()
     cfg = config or get_config()
     min_score = cfg["scan"]["minCompositeScore"] if min_score == 20 else min_score
     workers = parallel_workers or cfg["scan"].get("parallelWorkers", 32)
@@ -744,7 +771,10 @@ def scan_once(
     # ── Step 4: Sort by composite score descending ──────────────────────
     elapsed = (time.time() - started) * 1000
     data_gaps = _get_data_gaps()
-    logger.info(f"[scan] scanned {len(markets)} markets, {len(results)} triggers in {elapsed:.0f}ms ({errors} errors, {data_gaps} data-gaps)")
+    pf_drops = _get_prefilter_drops()
+    logger.info(f"[scan] scanned {len(markets)} markets, {len(results)} triggers in {elapsed:.0f}ms "
+                f"({errors} errors, {data_gaps} data-gaps"
+                + (f", hip3-prefilter saved {pf_drops} research" if pf_drops else "") + ")")
     if data_gaps > 0 and len(markets) > 0 and data_gaps / len(markets) > 0.25:
         # >25% of the universe unreadable this scan = a degraded data feed, not a
         # quiet market. Surface loudly so a silent miss-the-move window is visible.

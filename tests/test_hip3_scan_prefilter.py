@@ -155,6 +155,17 @@ def test_scan_hip3_low_score_dropped_when_enabled(monkeypatch):
     assert res is None
 
 
+def test_scan_drop_increments_prefilter_counter(monkeypatch):
+    """Production visibility: the drop bumps the per-scan counter surfaced on
+    the scan summary line (per-coin DEBUG lines are invisible at prod level)."""
+    before = perception._get_prefilter_drops()
+    _scan(monkeypatch, _HIP3_MARKET, _cfg({"enabled": True}))
+    assert perception._get_prefilter_drops() == before + 1
+    # non-drops must NOT bump it
+    _scan(monkeypatch, _CRYPTO_MARKET, _cfg({"enabled": True}))
+    assert perception._get_prefilter_drops() == before + 1
+
+
 def test_scan_hip3_surfaced_when_feature_off(monkeypatch):
     """Feature off (the merge no-op): identical input still surfaces via the
     daily-mover bypass — pre-change behavior byte-identical."""
