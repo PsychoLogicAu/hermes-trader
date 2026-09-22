@@ -95,6 +95,48 @@ def _fetch_candles_sync(
     return None
 
 
+# ── HIP-3 pre-research composite pre-filter ──────────────────────────────────
+
+def _hip3_prefilter_verdict(score: float, hits: List[Any], market: Dict[str, Any],
+                            config: Dict[str, Any]) -> Tuple[bool, bool]:
+    """Decide whether a HIP-3 candidate dies at the executor's composite floor.
+
+    Pure — no logging, no I/O (decision-function purity rule). Returns
+    ``(drop, shadow)``:
+      * ``drop=True, shadow=False`` — hard-drop this candidate pre-research;
+      * ``drop=True, shadow=True``  — would drop; caller logs the accrual and
+        lets it through (shadow counterfactual);
+      * ``drop=False``              — no opinion (not HIP-3, feature off, or
+        short lane open).
+
+    Rationale (2026-09-22): while HIP-3 was on, the executor's long-side floor
+    ``runner_entry_gate.min_hip3_composite`` sat AFTER full LLM research — 2,176
+    research cycles completed and then died there (observed composite p50 25 /
+    p90 38 / p99 43 vs bar 50; only 2/1908 blocks were at/over 50). Pre-applying
+    the same rule in perception stops paying research for doomed candidates.
+
+    The bar is read from the SAME key the executor uses, so scan and gate can
+    never disagree. Fail-safe: no ``dex`` on the market or feature off ⇒ no-op.
+
+    Short lane preserved: the executor's floor only guards LONGS (the short
+    branch returns before it), so a candidate with a fired down-side surfacing
+    trigger (downtrendMomentum / bearishReversalCandle) is NOT dropped — it can
+    still reach research and be judged SHORT without ever facing the floor.
+    """
+    if not market.get("dex"):
+        return (False, False)
+    pf = config.get("hip3_scan_prefilter") or {}
+    if not bool(pf.get("enabled", False)):
+        return (False, False)
+    bar = float((config.get("runner_entry_gate") or {}).get("min_hip3_composite", 50.0))
+    short_lane = any(
+        h["name"] in ("downtrendMomentum", "bearishReversalCandle") and h.get("fired")
+        for h in hits)
+    if score >= bar or short_lane:
+        return (False, False)
+    return (True, bool(pf.get("shadow_mode", False)))
+
+
 # ── Scan single market (returns result or (False, error)) ────────────────────
 
 def _scan_single_market(
@@ -316,6 +358,25 @@ def _scan_single_market(
             return (True, None)
 
         score = trigger_mod.composite_score(hits, _score_weights)
+        # HIP-3 pre-research drop (2026-09-22): apply the executor's long-side
+        # composite floor HERE so doomed candidates never pay a research cycle
+        # (measured: 2,176 full research runs ended at that one gate). Short
+        # lane + shadow mode + fail-safes in the verdict helper. Runs BEFORE
+        # every surfacing bypass — daily-mover/trend-bypass admits were exactly
+        # the population that died downstream (composite p50 25 vs bar).
+        _pf_drop, _pf_shadow = _hip3_prefilter_verdict(score, hits, market, config)
+        if _pf_drop:
+            if _pf_shadow:
+                logger.warning(
+                    f"[gate][SHADOW] hip3_scan_prefilter WOULD DROP {market['coin']} "
+                    f"composite {score:.1f} < bar "
+                    f"{float((config.get('runner_entry_gate') or {}).get('min_hip3_composite', 50.0)):.0f} "
+                    f"— letting through to research (shadow accrual)")
+            else:
+                logger.debug(
+                    f"[scan] hip3_scan_prefilter dropped {market['coin']} "
+                    f"composite {score:.1f} pre-research")
+                return (True, None)
         # A confirmed momentum burst is always surfaced — a large, fast move is
         # exactly the signal the composite gate must never filter out.
         burst_fired = any(h["name"] == "momentumBurst" and h["fired"] for h in hits)

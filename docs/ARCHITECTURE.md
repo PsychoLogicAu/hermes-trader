@@ -257,7 +257,24 @@ and execute these markets end-to-end:
 | `client/hl_client.fetch_all_mids(include_hip3=True)` | Adds one HTTP POST per HIP-3 dex (~8 total) so colon-namespaced mids are populated in the scanner. |
 | `client/exchange.Info / Exchange(perp_dexs=[""] + hip3)` | Teaches the HL SDK to resolve colon names at order placement. **CRITICAL: the empty string `""` must be prepended** — the SDK treats the list as exclusive. Pass only HIP-3 dexes and BTC/ETH start raising `KeyError` at `update_leverage` / `order`. |
 | `client/hl_client.fetch_account_state(user, include_hip3=True)` | Queries each HIP-3 dex's `clearinghouseState` in addition to main, sums `equity` + `total_ntl`, concatenates `asset_positions` (prefixing bare HIP-3 coin names with `<dex>:`), and exposes a per-dex breakdown under `dex_equity`. `available` stays main-only (see "Per-dex equity aggregation" below). |
-| `agents/perception.scan_once` | Splits the candle-fetch budget into a crypto bucket + a HIP-3 bucket (`HERMES_MAX_MARKETS_HIP3`, default 25 of the 60-slot total) so tokenized-equity markets get sorted independently and aren't crowded out by BTC/ETH/SOL volume. |
+| `agents/perception.scan_once` | Splits the candle-fetch budget into a crypto bucket + a HIP-3 bucket (`HERMES_MAX_MARKETS_HIP3`, default 25 of the 60-slot total) so tokenized-equity markets get sorted independently and aren't crowded out by BTC/ETH/SOL volume. When `hip3_scan_prefilter.enabled`, also pre-applies the executor's long-side composite floor (`runner_entry_gate.min_hip3_composite`) inside the scan, so HIP-3 candidates that could never clear it are dropped **before** paying an LLM research cycle (see below). |
+
+### `hip3_scan_prefilter` `{enabled, shadow_mode}` (added 2026-09-22)
+
+HIP-3's execution floor (`runner_entry_gate.min_hip3_composite`, long-side only)
+historically sat AFTER full research: with HIP-3 on Aug–Sep, **2,176 research
+cycles completed and then died at that single gate** (observed composite p50 25
+/ p90 38 / p99 43 vs bar 50 — only 2/1908 blocks reached the bar). This block
+re-applies the *same* rule in `perception._scan_single_market`, right after the
+composite is computed and before any surfacing bypass, so a doomed candidate is
+dropped at scan time. Fail-safes: non-HIP-3 markets (no `dex`) never affected;
+feature key absent/off ⇒ byte-identical no-op; a fired down-side trigger
+(`downtrendMomentum` / `bearishReversalCandle`) skips the prefilter because the
+executor floor only guards LONGS — the short lane stays open. The bar is read
+from the executor's own key so scan and gate can never disagree.
+`shadow_mode: true` keeps dropping nothing and accrues
+`[gate][SHADOW] hip3_scan_prefilter WOULD DROP …` lines instead. Hot-read per
+scan; tests in `tests/test_hip3_scan_prefilter.py`.
 
 ### Asset-class routing
 
