@@ -1417,6 +1417,19 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     ai_t0 = time.monotonic()
     ai_text, primary_server_ms = _call_ai(system_prompt, user_message)
     primary_ms = int((time.monotonic() - ai_t0) * 1000)
+    # Per-call LLM duration, ALWAYS logged (2026-09-22). Until now wall/server
+    # times only surfaced on the [duel] line — with the duelist off the cycle
+    # budget question ("is research_max_workers worth raising?") had no
+    # per-call numbers in trader.log. Wall = queue + inference; server =
+    # llama.cpp timings (queue-free) — the gap is server-side queue wait,
+    # which is exactly what parallelising the research loop converts into
+    # throughput. Sits adjacent to httpx's "HTTP Request: POST ... 200 OK"
+    # line for the same call (same [COIN] prefix from log_context).
+    _srv_s = f", {primary_server_ms}ms server" if primary_server_ms is not None else ""
+    logger.info(
+        f"[research] LLM call completed in {primary_ms}ms wall{_srv_s} "
+        f"(prompt ~{len(user_message)} chars)"
+    )
     # `held_coins` = the live open book (same `open_positions` fed to the
     # prompt), so a CLOSE on a coin we don't hold is deterministically
     # downgraded to PASS at parse time — the xyz:HOOD 2026-09-04 misread.
