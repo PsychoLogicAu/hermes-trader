@@ -223,6 +223,11 @@ def settle_stale_closes(stale_recs: List[Dict[str, Any]], *,
     """
     if not stale_recs:
         return []
+    # Scale-out records (live position, size shrink) ride the same list from
+    # rehydrate_from_exchange but are settled by settle_scale_outs below.
+    stale_recs = [r for r in stale_recs if r.get("kind", "stale_close") != "scale_out"]
+    if not stale_recs:
+        return []
     try:
         if fetch_fills is None:
             if resolve_user_address is None:
@@ -298,5 +303,188 @@ def settle_stale_closes(stale_recs: List[Dict[str, Any]], *,
         return settled
     except Exception as e:  # absolute last line of defence — never break the loop
         logger.warning(f"[stale-settle] unexpected failure (non-fatal): "
+                       f"{type(e).__name__}: {e}")
+        return []
+
+
+# ── Scale-out settlement (exchange-side TP half) ─────────────────────────────
+# The TP scale-out trigger placed at entry (`tp_scale_fraction`, default 0.5)
+# fills on the exchange with NO bot code running. rehydrate_from_exchange now
+# reports the size shrink as a kind="scale_out" record; this function books it
+# as a SCALE_OUT ledger event + outcome-store close so the banked half is no
+# longer invisible (pre-fix: 39 CLOSE rows booked on ~half their OPEN's
+# notional — every TP-scaled winner under-reported, bias systematically
+# DOWNWARD on net P/L since the TP half is a winner by construction).
+#
+# Fill attribution mirrors settle_stale_closes but keyed on SIZE (the shrink
+# delta) rather than "position gone": direction matches the closing side, size
+# within 5% of the delta, timestamp between entry and detection. Exchange
+# closedPnl wins when present; a single unattributable fill is booked at its
+# px; no fill found → estimate at the caller's current mid with
+# source="tp_scale_out_est" (the shrink is always detected within one loop
+# cycle, so mid error is bounded). Multiple candidate fills → skip (ambiguous;
+# the position is still tracked and the final CLOSE keeps the remainder —
+# worst case we under-report exactly like before the fix, never double-book:
+# SCALE_OUT is not a CLOSE, so no reconciler can match it against an OPEN).
+
+SCALE_OUT_SIZE_TOL = 0.05
+# Absolute floor on the size-match window: coin sizes carry float noise
+# (0.12 - 0.06 = 0.060000000000000005) far above pure-epsilon comparisons.
+SCALE_OUT_SIZE_EPS = 1e-6
+
+
+def _compute_scale_out(rec: Dict[str, Any], fills: List[Dict[str, Any]],
+                       est_px: Optional[float]) -> Optional[Dict[str, Any]]:
+    """Build one SCALE_OUT record from the shrink record + candidate fills/mid.
+
+    Returns None when nothing trustworthy can be attributed.
+    """
+    entry_px = float(rec["entry_px"])
+    side = str(rec["side"])
+    lev = int(rec.get("leverage") or 1) or 1
+    delta = abs(float(rec.get("size_delta") or 0))
+    if entry_px <= 0 or delta <= 0:
+        return None
+
+    want_dir = _close_direction(side)
+    open_floor_ms = int(float(rec.get("entry_time") or 0) * 1000) - 1000
+    now_ms = int(time.time() * 1000)
+    size_tol = max(SCALE_OUT_SIZE_TOL * delta, SCALE_OUT_SIZE_EPS)
+    cands = [f for f in fills
+             if f.get("coin") == rec["coin"] and f.get("dir") == want_dir
+             and open_floor_ms < int(f.get("time") or 0) <= now_ms + 60_000
+             and abs(abs(float(f.get("sz") or 0)) - delta) <= size_tol]
+
+    exit_px: Optional[float] = None
+    net_usd: Optional[float] = None
+    fee_usd: Optional[float] = None
+    fill_ts_ms: Optional[int] = None
+    source = "tp_scale_out"
+
+    if len(cands) == 1:
+        f = cands[0]
+        exit_px = float(f["px"])
+        fill_ts_ms = int(f.get("time") or 0) or None
+        cpnl = _closed_pnl(f)
+        fees_pct = FEES_PCT_PER_SIDE * 2 * lev
+        notional = delta * entry_px
+        spot_pct = ((exit_px - entry_px) if side == "long"
+                    else (entry_px - exit_px)) / entry_px * 100.0
+        fee_usd = round(notional * (fees_pct / max(lev, 1)) / 100.0, 4)
+        # Exchange-reported closedPnl is authoritative when present; otherwise
+        # the same gross-minus-estimate-fees formula as every other close path.
+        net_usd = round(cpnl, 4) if cpnl is not None else \
+            round(notional * spot_pct / 100.0 - fee_usd, 4)
+    elif not cands and est_px and est_px > 0:
+        # No fill attributable (fills feed unavailable/rotated) — estimate at
+        # the current mid. Detected within one loop cycle of the fill, so the
+        # error is the intra-cycle drift; flagged in `source` for auditors.
+        exit_px = float(est_px)
+        fees_pct = FEES_PCT_PER_SIDE * 2 * lev
+        notional = delta * entry_px
+        spot_pct = ((exit_px - entry_px) if side == "long"
+                    else (entry_px - exit_px)) / entry_px * 100.0
+        fee_usd = round(notional * (fees_pct / max(lev, 1)) / 100.0, 4)
+        net_usd = round(notional * spot_pct / 100.0 - fee_usd, 4)
+        source = "tp_scale_out_est"
+    else:
+        logger.warning(
+            f"[scale-out] {rec['coin']}_{side} shrink {rec.get('old_size')} -> "
+            f"{rec.get('new_size')}: {len(cands)} candidate fills — ambiguous, "
+            f"skipping (under-report as pre-fix behaviour, never double-book)")
+        return None
+
+    spot_pct = ((exit_px - entry_px) if side == "long"
+                else (entry_px - exit_px)) / entry_px * 100.0
+    fees_pct = FEES_PCT_PER_SIDE * 2 * lev
+    entry_time_s = float(rec.get("entry_time") or 0)
+    ts_for_hold = fill_ts_ms or int(time.time() * 1000)
+    return {
+        "coin": str(rec["coin"]), "side": side,
+        "entry_px": entry_px, "exit_px": round(exit_px, 8),
+        "size_coin": delta,
+        "notional_usd": round(delta * entry_px, 4),
+        "realized_pnl_pct": round(spot_pct * lev - fees_pct, 4),
+        "realized_pnl_usd": net_usd,
+        "spot_pct": round(spot_pct, 4),
+        "leverage": lev,
+        "fee_usd": fee_usd,
+        "hold_minutes": (round((ts_for_hold / 1000.0 - entry_time_s) / 60.0, 1)
+                         if entry_time_s > 0 else None),
+        "fill_ts_ms": fill_ts_ms,
+        "source": source,
+    }
+
+
+def settle_scale_outs(scale_recs: List[Dict[str, Any]], *,
+                      fetch_fills: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+                      resolve_user_address=None,
+                      mids: Optional[Dict[str, float]] = None,
+                      log_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+                      now_ms: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Book SCALE_OUT events for exchange-side TP fills detected as size shrinks.
+
+    ``scale_recs``: kind="scale_out" entries from rehydrate_from_exchange —
+    each {coin, side, entry_px, size_delta, old_size, new_size, leverage,
+    entry_time}. Mirrors settle_stale_closes' fail-safe contract: any error is
+    logged, the caller's loop never sees an exception. Ledger-only by design
+    (the outcome store stays one-row-per-TRADE) and no loss cooldown arms —
+    a TP half is a realized WIN by construction (trigger at +1 ATR); arming
+    anti-revenge on a winner would be wrong.
+    """
+    scale_recs = [r for r in (scale_recs or [])
+                  if r.get("kind") == "scale_out"]
+    if not scale_recs:
+        return []
+    try:
+        from hermes_trader.ledger import record_scale_out
+        fills: List[Dict[str, Any]] = []
+        if fetch_fills is not None:
+            try:
+                fills = fetch_fills() or []
+            except Exception as e:
+                logger.warning(f"[scale-out] userFills fetch failed ({e}); "
+                               f"falling back to mid-price estimates")
+        else:
+            try:
+                if resolve_user_address is None:
+                    from hermes_trader.client.hl_client import resolve_user_address \
+                        as _rua  # type: ignore[no-redef]
+                    resolve_user_address = _rua
+                fills = _fetch_user_fills(resolve_user_address)
+            except Exception as e:
+                logger.warning(f"[scale-out] userFills fetch failed ({e}); "
+                               f"falling back to mid-price estimates")
+        settled: List[Dict[str, Any]] = []
+        for rec in scale_recs:
+            est_px = (mids or {}).get(str(rec["coin"]))
+            computed = _compute_scale_out(rec, fills, est_px)
+            if not computed:
+                continue
+            # LEDGER ONLY — deliberately NOT memory.record_close. The outcome
+            # store is the per-TRADE realized source (duel_store._model_stats /
+            # pnl_deep_dive / signal_backtest iterate it as one row per trade);
+            # a half-row there would double-count TP-scaled trades in win-rate
+            # and halve avg_pnl. The SCALE_OUT ledger event is the complete
+            # record; net P/L = sum(CLOSE) + sum(SCALE_OUT).
+            try:
+                record_scale_out(**computed)
+            except Exception as e:
+                logger.warning(f"[scale-out] ledger append failed for "
+                               f"{computed['coin']}: {e}")
+                continue
+            logger.warning(
+                f"[scale-out] booked SCALE_OUT {computed['coin']}_{computed['side']}: "
+                f"{computed['size_coin']:g} @ {computed['exit_px']} "
+                f"({computed['realized_pnl_usd']:+.4f} USDC, {computed['source']})")
+            if log_event is not None:
+                try:
+                    log_event({"event": "scale_out_settled", **computed})
+                except Exception:
+                    pass
+            settled.append(computed)
+        return settled
+    except Exception as e:  # last line of defence — never break the loop
+        logger.warning(f"[scale-out] unexpected failure (non-fatal): "
                        f"{type(e).__name__}: {e}")
         return []

@@ -82,6 +82,60 @@ def record_open(
     })
 
 
+def record_scale_out(
+    coin: str,
+    side: str,
+    entry_px: float,
+    exit_px: float,
+    size_coin: float,
+    notional_usd: float,
+    realized_pnl_pct: float,
+    realized_pnl_usd: float,
+    spot_pct: float,
+    leverage: int,
+    fee_usd: float | None = None,
+    hold_minutes: float | None = None,
+    fill_ts_ms: int | None = None,
+    source: str = "tp_scale_out",
+) -> None:
+    """Record a partial (scale-out) close — the TP half taken server-side.
+
+    The exchange-side TP trigger (`tp_scale_fraction`, executor entry bracket)
+    fills WITHOUT any bot code running; the DSL tracker only notices the size
+    shrink one rehydrate cycle later. Before 2026-09-22 that banked half never
+    reached the ledger at all: the final CLOSE row books P/L on the *remaining*
+    size only (close_position_market reads current exchange szi), so every
+    TP-scaled winner was under-reported by roughly one half (39 such rows in
+    the pre-fix ledger — TAO 2026-09-21 booked +$0.44 with ~+$0.54 invisible).
+
+    Deliberately NOT a CLOSE event: the OPEN↔CLOSE stack pairing in
+    `_reconcile_ledger_closes` (and every ledger analysis script) must keep
+    seeing exactly one CLOSE per OPEN, so this rides as its own event type.
+    Consumers summing net P/L should add SCALE_OUT.realized_pnl_usd to the
+    CLOSE sum.
+    """
+    rec = {
+        "coin": coin,
+        "side": side,
+        "entry_px": entry_px,
+        "exit_px": exit_px,
+        "size_coin": size_coin,
+        "notional_usd": notional_usd,
+        "realized_pnl_pct": realized_pnl_pct,
+        "realized_pnl_usd": realized_pnl_usd,
+        "spot_pct": spot_pct,
+        "leverage": leverage,
+        "fee_usd": fee_usd,
+        "hold_minutes": hold_minutes,
+        "source": source,
+    }
+    if fill_ts_ms:
+        rec["fill_ts_ms"] = fill_ts_ms
+        rec["fill_ts_iso"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(fill_ts_ms / 1000))
+    _append_event("SCALE_OUT", rec)
+
+
 def record_close(
     coin: str,
     side: str,

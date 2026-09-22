@@ -127,7 +127,7 @@ from hermes_trader.client.hl_client import (fetch_account_state,
                                             resolve_user_address)
 from hermes_trader.positions_snapshot import write_snapshot
 from hermes_trader.session_log import append as log_event
-from hermes_trader.stale_close_settle import settle_stale_closes
+from hermes_trader.stale_close_settle import settle_scale_outs, settle_stale_closes
 
 logger = logging.getLogger(__name__)
 
@@ -1139,6 +1139,10 @@ while True:
                 positions,
                 default_leverage=int(_cfg.get("leverage", 1) or 1),
                 queried_dexes=queried_dexes)
+            # Two record kinds ride back (see rehydrate_from_exchange): whole
+            # trackers dropped as stale, and live-position size SHRINKS.
+            _scale_recs = [r for r in _stale_recs if r.get("kind") == "scale_out"]
+            _stale_recs = [r for r in _stale_recs if r.get("kind") != "scale_out"]
             if _stale_recs:
                 # A tracker vanished from the exchange without going through
                 # close_position_market — usually an exchange-side SL/TP fill.
@@ -1153,6 +1157,13 @@ while True:
             # trackers and their peak/floor never advance (dashboard shows
             # "no DSL" indefinitely and DSL stop never fires on HIP-3).
             mids = get_all_hl_mids(include_hip3=True)
+            if _scale_recs:
+                # Exchange-side TP scale-out half booked NOW as a SCALE_OUT
+                # ledger event (the final CLOSE only books the remainder —
+                # TAO 2026-09-21 under-reported by its banked half). Mids are
+                # the fallback estimate when no single fill attributes.
+                settle_scale_outs(_scale_recs, mids=mids,
+                                  log_event=log_event)
             exits = monitor_exits(mids)
             for ex in exits:
                 coin = ex["coin"]
