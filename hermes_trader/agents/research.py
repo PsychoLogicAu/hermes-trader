@@ -441,7 +441,7 @@ def _build_user_message(
     funding_rate: str,
     news: str,
     equity: float,
-    open_positions: List[Dict[str, Any]],
+    open_positions: List[Dict[str, Any]] | None,
     mode: str,
     dex_equity: Dict[str, float] | None = None,
     recent_candles: List[Candle] | None = None,
@@ -836,7 +836,30 @@ def _build_user_message(
     # LLM sees (risk_gates "already holding"). A CLOSE verdict can only ever
     # apply to the candidate coin itself, so only the candidate's own position
     # state is shown.
-    _mine = [p for p in open_positions if p["coin"] == coin]
+    # Book-slot context (Option A, 2026-09-23): the close-check's dominant
+    # stated rationale is "free the capital for stronger setups" — but a
+    # ledger reconstruction (49 ai_close exits) showed 33 of them fired at
+    # 1/5 slots used and EVERY one of the last 12 closed the ONLY open
+    # position. The scarcity claim was unfalsifiable from the prompt, so the
+    # model recited it as boilerplate. Surface `slots used / max_concurrent`
+    # as a bare fact (NO steering text, NO dollar figures — slots ride on
+    # the max_concurrent entry gate and are not an exposure figure like
+    # equity/notional, which stay banned). The model weighs it itself.
+    # open_positions is None when the account-state fetch failed -> omit
+    # (rendering "0 of N free" on a flaky read would fake scarcity info).
+    def _slots_note() -> str:
+        if open_positions is None:
+            return ""
+        try:
+            cap = int(read_agent_config().get("max_concurrent", 3))
+        except Exception:
+            cap = 0
+        used = len(open_positions)
+        if cap <= 0:
+            return ""
+        return f" (book slots: {used} of {cap} in use)"
+
+    _mine = [p for p in (open_positions or []) if p["coin"] == coin]
     if _mine:
         position_block = (
             f"Open position on {coin} (you hold it — do not re-enter; a CLOSE "
@@ -858,12 +881,14 @@ def _build_user_message(
             f"nursed. Your own technicals for {coin} still matter as usual. "
             + ", ".join(f"{p['coin']} {p['side']}{_held_annotation(p['coin'], p['side'])}"
                         for p in _mine)
+            + _slots_note()
         )
     else:
         position_block = (
             f"Open position on {coin}: none (you do not hold {coin}; the "
             f"account may hold OTHER positions — that is not your concern, "
             f"you only judge {coin}'s own setup)"
+            + _slots_note()
         )
 
     # Raw recent price action so the LLM can read candlestick/chart patterns
