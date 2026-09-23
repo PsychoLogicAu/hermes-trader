@@ -2935,6 +2935,81 @@ def test_build_user_message_annotates_held_age_and_peak():
     assert "$364" not in msg and "364.0" not in msg
 
 
+def test_build_user_message_renders_book_slot_context():
+    """Option A (2026-09-23): every research prompt carries `book slots: used
+    of max_concurrent` as a bare fact — the close-check's 'free the capital'
+    rationale was unfalsifiable when 33/49 ai_closes fired at 1/5 slots.
+    Rendered for BOTH branches (held candidate and not-held candidate); the
+    count covers the whole book even though only the candidate's own position
+    is listed. NO steering text, NO dollar figures (equity/notional ban still
+    holds). max_concurrent hot-read from read_agent_config."""
+    from hermes_trader.agents import research as research_mod
+    from hermes_trader.agents.research import _build_user_message
+    real_cfg = research_mod.read_agent_config
+    try:
+        research_mod.read_agent_config = lambda: {"max_concurrent": 5}
+        snap = {"last_close": 100}
+        book = [{"coin": "CHIP", "side": "long", "size_usd": 364.0},
+                {"coin": "ETH", "side": "short", "size_usd": 120.0}]
+        # candidate NOT held: note still renders with the full-book count
+        msg = _build_user_message(
+            "xyz:MU", {"type": "perp", "mid": 100, "composite_score": 10,
+                       "triggers": []},
+            snap, snap, snap, "N/A", "no news", 300.0, book, "LIVE")
+        assert "(book slots: 2 of 5 in use)" in msg
+        # candidate held: note appends after the held annotation block
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 100, "composite_score": 0,
+                     "triggers": []},
+            snap, snap, snap, "N/A", "no news", 300.0, book, "LIVE")
+        assert "(book slots: 2 of 5 in use)" in msg
+        # no dollars ride along with the count
+        assert "$364" not in msg and "364.0" not in msg and "$120" not in msg
+    finally:
+        research_mod.read_agent_config = real_cfg
+
+
+def test_build_user_message_omits_slot_context_on_degraded_reads():
+    """Degraded reads never fake slot info: a failed account-state fetch
+    (open_positions=None) renders NO slots line — '0 of 5 free' on a flaky
+    read would be a fabricated fact. max_concurrent<=0 also renders nothing
+    (no cap configured = no meaningful denominator). _slots_note's own
+    config read is try/except-guarded so it can never add a NEW failure
+    point to the prompt build."""
+    from hermes_trader.agents import research as research_mod
+    from hermes_trader.agents.research import _build_user_message
+    snap = {"last_close": 100}
+    real_cfg = research_mod.read_agent_config
+    try:
+        # account-state fetch failed -> open_positions None -> no slots line
+        research_mod.read_agent_config = lambda: {"max_concurrent": 5}
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 100, "composite_score": 0,
+                     "triggers": []},
+            snap, snap, snap, "N/A", "no news", 300.0, None, "LIVE")
+        assert "book slots" not in msg
+
+        # cap explicitly disabled (<=0) -> no denominator, omit the note
+        research_mod.read_agent_config = lambda: {"max_concurrent": 0}
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 100, "composite_score": 0,
+                     "triggers": []},
+            snap, snap, snap, "N/A", "no news", 300.0,
+            [{"coin": "CHIP", "side": "long", "size_usd": 40.0}], "LIVE")
+        assert "book slots" not in msg
+
+        # key absent -> code default 3 (same value the entry gate uses)
+        research_mod.read_agent_config = lambda: {}
+        msg = _build_user_message(
+            "CHIP", {"type": "perp", "mid": 100, "composite_score": 0,
+                     "triggers": []},
+            snap, snap, snap, "N/A", "no news", 300.0,
+            [{"coin": "CHIP", "side": "long", "size_usd": 40.0}], "LIVE")
+        assert "(book slots: 1 of 3 in use)" in msg
+    finally:
+        research_mod.read_agent_config = real_cfg
+
+
 def test_held_annotation_now_falls_back_to_live_price():
     """A1 fallback: a tracker with no last_mark_px (fresh, or just after a
     restart before the first fast-exit tick) still surfaces CURRENT PnL via a
