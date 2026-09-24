@@ -30,6 +30,8 @@ class GateContext:
         total_open_notional: float,
         composite_score: float = 0.0,
         momentum_burst_fired: bool = False,
+        volume_spike_fired: bool = False,
+        breakout_fired: bool = False,
         slow_burn_fired: bool = False,
         whale_signal_fired: bool = False,
         binary_news_match: str = "",
@@ -58,6 +60,12 @@ class GateContext:
         self.total_open_notional = total_open_notional
         self.composite_score = composite_score
         self.momentum_burst_fired = momentum_burst_fired
+        # Fresh-impulse trigger twins (volume_spike / breakout), carried for
+        # the tail gates' impulse-class composite-escape denial — see
+        # _tail_composite_escape_allowed. Default False = byte-identical
+        # behaviour for every existing construction site.
+        self.volume_spike_fired = volume_spike_fired
+        self.breakout_fired = breakout_fired
         # True iff any 1h slow-burn trigger fired (volumeBuildup1h /
         # trendFlip1h / higherLows1h). Used as a counter-regime bypass: a
         # clean 1h accumulation pattern overrides the slow BTC proxy.
@@ -117,6 +125,38 @@ class GateContext:
         # maybe_execute. None = the duelist is disabled or failed — the
         # veto has no opinion and passes.
         self.duelist_verdict = duelist_verdict
+
+
+def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> bool:
+    """Whether a tripped tail-trigger gate may be escaped via composite score.
+
+    The impulse-class denial (2026-09-24, NIL knife cohort): on the fresh-
+    impulse hype class — >= ``impulse_min_triggers`` (default 2) of the
+    volume_spike / breakout / momentum_burst trio fired — the composite-score
+    escape is CLOSED for tail gates. Conviction (conf >= min_conf) or nothing.
+
+    Why: composite on this class is *earned by the blow-off itself* — one
+    terminal re-acceleration wick fires all three triggers and mutes every
+    forecaster gate at once. Executed-entry replay over the full log history
+    (09-05..09-24, scratch/_tail_escape_replay.py): 4 entries where the
+    chronos adverse tail tripped and composite escaped — MET 09-07 (comp 89.5,
+    -$19.53), NIL 09-19 (-$1.10), ZEC 09-22 (conf+comp, -$0.28), NIL 09-24
+    (comp 61.8, -$2.15) — 4/4 losers, net -$23.1, ALL with the full trio
+    fired and every forecaster median negative. Same structural hole C.6
+    closed on the regime gate (which also cites MET 09-07).
+
+    Config: ``no_composite_escape_on_impulse`` per tail-gate block — code
+    default False (byte-identical for any config without the key); armed via
+    .agent-config.json. The conf escape path is never touched. Missing
+    trigger flags default False => impulse count 0 => escape allowed
+    (fail-open, old behaviour).
+    """
+    if not bool(cfg.get("no_composite_escape_on_impulse", False)):
+        return True
+    need = int(cfg.get("impulse_min_triggers", 2) or 2)
+    fired = sum(1 for f in (ctx.volume_spike_fired, ctx.breakout_fired,
+                            ctx.momentum_burst_fired) if f)
+    return fired < need
 
 
 def confidence_gate(ctx: GateContext, min_confidence: float) -> GateResult:
@@ -707,13 +747,17 @@ def chronos_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
         return {"pass": True}
     min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
     min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
-    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+    comp_escape_open = _tail_composite_escape_allowed(ctx, cfg)
+    if ctx.confidence >= min_conf or (
+            comp_escape_open and ctx.composite_score >= min_composite):
         return {"pass": True}
     reason = (f"chronos_tail_trigger ({ctx.trade_side} entry, adverse q-path "
               f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
               f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
               f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
               f"{min_composite:.0f})")
+    if not comp_escape_open:
+        reason += "; composite escape closed on fresh-impulse class"
     if bool(cfg.get("shadow_mode", True)):
         return {"pass": True, "reason": reason, "shadow_would_block": True}
     return {"pass": False, "reason": reason}
@@ -769,13 +813,17 @@ def tirex_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateR
         return {"pass": True}
     min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
     min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
-    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+    comp_escape_open = _tail_composite_escape_allowed(ctx, cfg)
+    if ctx.confidence >= min_conf or (
+            comp_escape_open and ctx.composite_score >= min_composite):
         return {"pass": True}
     reason = (f"tirex_tail_trigger ({ctx.trade_side} entry, adverse q-path "
               f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
               f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
               f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
               f"{min_composite:.0f})")
+    if not comp_escape_open:
+        reason += "; composite escape closed on fresh-impulse class"
     if bool(cfg.get("shadow_mode", True)):
         return {"pass": True, "reason": reason, "shadow_would_block": True,
                 "tail_pct": tail, "window_steps": k}
@@ -936,13 +984,17 @@ def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
         return {"pass": True}
     min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
     min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
-    if ctx.confidence >= min_conf or ctx.composite_score >= min_composite:
+    comp_escape_open = _tail_composite_escape_allowed(ctx, cfg)
+    if ctx.confidence >= min_conf or (
+            comp_escape_open and ctx.composite_score >= min_composite):
         return {"pass": True}
     reason = (f"timesfm_tail_trigger ({ctx.trade_side} entry, adverse q-path "
               f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
               f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
               f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
               f"{min_composite:.0f})")
+    if not comp_escape_open:
+        reason += "; composite escape closed on fresh-impulse class"
     if bool(cfg.get("shadow_mode", True)):
         return {
             "pass": True,

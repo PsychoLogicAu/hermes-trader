@@ -1386,6 +1386,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         total_open_notional=total_open_notional,
         composite_score=float(analysis.get("composite_score", 0) or 0),
         momentum_burst_fired=bool(analysis.get("momentum_burst_fired", False)),
+        # Fresh-impulse twins for the tail gates' impulse-class escape denial
+        # (_tail_composite_escape_allowed). Same analysis flags the trade-
+        # result line reports as volume_spike_fired / breakout_fired.
+        volume_spike_fired=bool(analysis.get("volume_spike_fired", False)),
+        breakout_fired=bool(analysis.get("breakout_fired", False)),
         slow_burn_fired=bool(analysis.get("slow_burn_fired", False)),
         # whale_regime_bypass gates whether a whale signal can bypass the
         # counter-regime gate. Missing config fails closed.
