@@ -500,6 +500,13 @@ def market_regime_gate(ctx: GateContext, counter_regime_min_conf: float = 0.7,
     """
     from hermes_trader.agents.market_regime import detect_regime
     regime = detect_regime(ctx.coin)
+    # Regime-divergence shadow annotation (2026-09-27, WATCHLIST §C.16):
+    # btc / alt-basket / own-coin trend reads attached to EVERY market_regime
+    # gate result — pass and block alike — so they ride the `Trade result:`
+    # line for accrual. Pure annotation: computed after the verdict inputs,
+    # never read by any branch below, and failures collapse to gap-nulls.
+    from hermes_trader.agents.market_regime import regime_divergence
+    divergence = regime_divergence(ctx.coin)
 
     # Pull funding regime (cached) — used as a symmetric overlay on the
     # trend-regime gate. Both directions are treated identically: anything
@@ -545,9 +552,11 @@ def market_regime_gate(ctx: GateContext, counter_regime_min_conf: float = 0.7,
         effective_min_score = 60.0
 
     # Context attached to every result so the log reads "why" without
-    # re-deriving regime state after the fact.
+    # re-deriving regime state after the fact. The divergence dict spreads
+    # into every return path (§C.16 shadow annotation — display-only).
     base = {"regime": regime, "funding": funding_regime,
-            "against_funding": against_funding, "counter_trend": False}
+            "against_funding": against_funding, "counter_trend": False,
+            "divergence": divergence}
 
     # Aligned with trend regime AND not against funding regime → easy pass,
     # UNLESS it's a with-crowd (squeeze-prone) entry that fails the elevated
