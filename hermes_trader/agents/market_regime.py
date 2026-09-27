@@ -23,7 +23,7 @@ import logging
 import math
 import statistics
 import time
-from typing import Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 from hermes_trader.client.hl_client import fetch_hl_candles
 from hermes_trader.indicators.math import ema
@@ -339,6 +339,132 @@ def alt_basket_tape_activity(
     drift = (idx[-1] / idx[0] - 1) * 100
     _alt_basket_cache = ({"vol": vol, "drift": drift}, now)
     return _alt_basket_cache[0]
+
+
+# Alt-basket TREND read (2026-09-27, WATCHLIST §C.16 regime-divergence shadow).
+# The quiet_tape gate already measures the alt basket's LOUDNESS; this is the
+# missing TREND-axis twin: run the same EMA20/50+slope classifier used for BTC
+# over the equal-weight basket index (same construction as
+# ``alt_basket_tape_activity``). Motivation: crypto coins' regime label comes
+# from BTC alone (CRYPTO_PROXY), while the equity class already got per-name
+# trending in FIX #3 — in a decoupled tape (BTC flat, alts ripping) every alt
+# long carries BTC's "neutral/down" and pays the counter-regime bar. This read
+# is ANNOTATION-ONLY for now: it never blocks; the accrual answers whether a
+# coin/basket-aware release would have helped before any gate change.
+_alt_basket_regime_cache: Tuple[Optional[str], float] = (None, 0.0)
+
+
+def alt_basket_regime(force: bool = False) -> Optional[str]:
+    """EMA20/50+slope trend of the equal-weight alt-basket index (1h).
+
+    Returns 'up'/'down'/'neutral', or None on a data gap (a gap is
+    no-opinion, never a verdict). Reuses the basket construction of
+    ``alt_basket_tape_activity`` but fetches 1h candles so the classifier
+    runs on the same timeframe as ``_detect_for_proxy``. Cached for
+    REGIME_TTL_S; ``force=True`` bypasses the cache.
+    """
+    global _alt_basket_regime_cache
+    now = time.time()
+    cached, ts = _alt_basket_regime_cache
+    if not force and cached is not None and (now - ts) < REGIME_TTL_S:
+        return cached
+    try:
+        from hermes_trader.client.universe import get_universe
+        uni = get_universe()
+        cands = [
+            m for m in uni
+            if m.get("type") == "perp"
+            and not m.get("dex")
+            and m.get("coin") not in _ALT_BASKET_EXCLUDE
+            and float(m.get("dayNtlVlm") or 0) >= _ALT_BASKET_DEFAULT_VOL_FLOOR
+        ]
+        cands.sort(key=lambda m: float(m.get("dayNtlVlm") or 0), reverse=True)
+        basket = [m["coin"] for m in cands[:_ALT_BASKET_DEFAULT_N]]
+    except Exception as e:
+        logger.warning(f"[regime] alt-basket regime universe fetch failed: {e}")
+        return None
+    series = {}
+    for coin in basket:
+        try:
+            candles = fetch_hl_candles(coin, interval="1h", count=60)
+        except Exception as e:
+            logger.warning(f"[regime] alt-basket regime fetch failed for {coin}: {e}")
+            continue
+        closes = [float(c.c) for c in candles if float(c.c) > 0]
+        if len(closes) >= 50:
+            series[coin] = closes
+    if len(series) < 2:
+        return None
+    L = min(len(v) for v in series.values())
+    idx = [sum(v[-L:][i] / v[-L:][0] for v in series.values()) / len(series)
+           for i in range(L)]
+    regime = _trend_from_closes(idx)
+    _alt_basket_regime_cache = (regime, now)
+    return regime
+
+
+def regime_divergence(coin: str) -> Dict[str, Any]:
+    """Shadow annotation: all three trend reads + divergence flags.
+
+    NEVER affects a gate verdict — callers attach the dict to gate results /
+    Trade result lines for accrual only (WATCHLIST §C.16). A fetch failure
+    yields nulls ("gap"), never an exception path into execution. Fields:
+      btc_regime         BTC-proxy trend (what crypto entries are gated by)
+      alt_basket_regime  trend of the equal-weight top-alts index
+      coin_regime        the coin's OWN 1h EMA trend (mirror of the equity
+                         FIX #3 logic; 'n/a' for non-crypto classes, which
+                         already gate on their own trend or a macro fallback)
+      btc_vs_alt_diverged   up/down disagreement between the two macro reads
+      coin_vs_btc_diverged  the trade-relevant divergence: coin's own trend
+                         vs the BTC label actually gating it
+    """
+    out: Dict[str, Any] = {"btc_regime": None, "alt_basket_regime": None,
+                           "coin_regime": None,
+                           "btc_vs_alt_diverged": False,
+                           "coin_vs_btc_diverged": False}
+    try:
+        btc = _detect_cached(CRYPTO_PROXY)
+        alt = alt_basket_regime()
+        out["btc_regime"] = btc
+        out["alt_basket_regime"] = alt
+        klass = classify_asset(coin)
+        if klass == "crypto":
+            # The coin's own 1h trend, cached separately from the proxy cache
+            # so this annotation can never poison detect_regime()'s verdict.
+            global _own_trend_shadow_cache
+            now = time.time()
+            hit = _own_trend_shadow_cache.get(coin)
+            if hit and (now - hit[1]) < REGIME_TTL_S:
+                own = hit[0]
+            else:
+                own = _detect_for_proxy(coin if ":" in coin else coin.upper())
+                _own_trend_shadow_cache[coin] = (own, now)
+            out["coin_regime"] = own
+        else:
+            out["coin_regime"] = "n/a"
+        trended = {"up", "down"}
+        if btc in trended and alt in trended and btc != alt:
+            out["btc_vs_alt_diverged"] = True
+        own = out["coin_regime"]
+        if own in trended and btc in trended and own != btc:
+            out["coin_vs_btc_diverged"] = True
+    except Exception as e:  # annotation must never break a decision path
+        logger.debug(f"[regime] divergence annotation failed for {coin}: {e}")
+    return out
+
+
+_own_trend_shadow_cache: Dict[str, Tuple[str, float]] = {}
+
+
+def _detect_cached(proxy: str) -> Optional[str]:
+    """Read the shared proxy regime cache; compute (and cache) on miss."""
+    now = time.time()
+    hit = _regime_cache.get(proxy)
+    if hit and (now - hit[1]) < REGIME_TTL_S:
+        return hit[0]
+    regime = _detect_for_proxy(proxy)
+    _regime_cache[proxy] = (regime, now)
+    return regime
 
 
 def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
