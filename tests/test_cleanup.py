@@ -3185,7 +3185,7 @@ def test_held_annotation_direction_of_travel_5m():
         dsl_exit._active_positions.pop("CHIP_long", None)
         research_mod.fetch_hl_candles = real_candles
     assert "now -1.5% vs entry, -1.8% vs best move, price +1.6% " \
-           "over last 30min (5m bars)" in msg
+           "over last 30min (5m bars) — MOVING IN FAVOUR of your LONG" in msg
 
 
 def test_held_annotation_direction_omitted_on_partial_window():
@@ -3261,7 +3261,7 @@ def test_held_annotation_recovering_flag_on_v_recovery():
               0.22819, 0.22812, 0.22850] + [0.22860]  # last = forming
     msg = _held_msg_with_closes("ADA", "long", entry, peak=0.22853,
                                 mark=0.22853, age_min=65, closes=closes)
-    assert "RECOVERING +1.5% off the -1.3% low" in msg
+    assert "POSITION RECOVERING +1.5% off its worst mark (-1.3%), moving in favour of your LONG" in msg
 
 
 def test_held_annotation_no_recovering_flag_while_sinking():
@@ -3284,7 +3284,22 @@ def test_held_annotation_recovering_flag_short_side():
               100.70, 100.50, 100.40, 100.30] + [100.28]  # last = forming
     msg = _held_msg_with_closes("XYZ", "short", 100.0, peak=99.70,
                                 mark=100.30, age_min=60, closes=closes)
-    assert "RECOVERING +1.2% off the -1.5% low" in msg
+    assert "POSITION RECOVERING +1.2% off its worst mark (-1.5%), moving in favour of your SHORT" in msg
+
+
+def test_held_annotation_short_trump_shape_reads_in_favour():
+    """TRUMP 2026-09-23 regression: short entered 1.9689, adverse peak at
+    16:10, price FALLING for 20 straight minutes toward entry when the model
+    closed it as 'actively recovering against our short direction'. Every
+    rendered move must name the POSITION as the referent — a falling price on
+    a short is MOVING IN FAVOUR, and the recovery flag says so explicitly."""
+    closes = [1.9940, 1.9900, 1.9850, 1.9800, 1.9767, 1.9745, 1.9734] + [1.9740]  # last = forming
+    msg = _held_msg_with_closes("TRUMP", "short", 1.9689, peak=1.9689,
+                                mark=1.9734, age_min=26, closes=closes)
+    assert "MOVING IN FAVOUR of your SHORT" in msg
+    assert "POSITION RECOVERING" in msg
+    # the vocabulary that invited the misread must not stand alone anywhere
+    assert "off the -" not in msg
 
 
 def test_held_annotation_recovering_flag_suppressed_on_flat_noise():
