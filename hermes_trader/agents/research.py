@@ -792,8 +792,19 @@ def _build_user_message(
                         c0 = candle_val(c5m[-_HELD_DIR_WINDOW_BARS], "c")
                         c1 = candle_val(c5m[-1], "c")
                         if c0 and c1:
-                            now += (f", price {((c1 - c0) / c0 * 100):+.1f}% "
-                                    "over last 30min (5m bars)")
+                            # TRUMP 2026-09-23 vocabulary failure: a raw price
+                            # delta is direction-ambiguous for shorts — the
+                            # model read "price −0.2% over 30min" (favouring
+                            # its short) as "recovering against our short".
+                            # Tag every move with whether it helps or hurts
+                            # THE POSITION, not what price did.
+                            _d30 = (c1 - c0) / c0 * 100
+                            _helps = (_d30 < 0) if h_side == "short" else (_d30 > 0)
+                            _tag = ("MOVING IN FAVOUR of your " + h_side.upper()
+                                    if _helps else
+                                    "moving against your " + h_side.upper())
+                            now += (f", price {_d30:+.1f}% over last 30min "
+                                    f"(5m bars) — {_tag}")
                     # RECOVERING flag: trough of the CLOSED 5m closes vs entry,
                     # truncated at entry time so a pre-entry dip can't inflate
                     # it. Fires when the position has clawed back at least
@@ -815,8 +826,18 @@ def _build_user_message(
                             trough_pct = min(pcts)
                             recovery = now_pct - trough_pct
                             if recovery >= max(0.5, 0.5 * abs(min(trough_pct, 0.0))):
-                                now += (f", RECOVERING +{recovery:.1f}% off the "
-                                        f"{trough_pct:+.1f}% low")
+                                # TRUMP 2026-09-23: for a SHORT this flag sat
+                                # next to its own "recovering against us"
+                                # reasoning — "recovering"/"low" are price-
+                                # centric words and the model read them as
+                                # price rising (bad for the short) when the
+                                # flag means the POSITION is clawing back off
+                                # its worst mark. Spell out the referent: it
+                                # is the position recovering, in favour of
+                                # the side held.
+                                now += (f", POSITION RECOVERING +{recovery:.1f}% "
+                                        f"off its worst mark ({trough_pct:+.1f}%), "
+                                        f"moving in favour of your {h_side.upper()}")
                     except Exception:
                         pass
                 except Exception:
@@ -869,9 +890,14 @@ def _build_user_message(
             f"recovery; 'now' is the live PnL vs entry and is the number that "
             f"matters for a CLOSE call. CLOSE on PnL grounds requires BOTH: "
             f"'now' at or below entry AND no recovery — the 30min price field "
-            f"flat or falling, no RECOVERING flag, and the structure shows "
-            f"nothing back in the position's favour. A position flagged "
-            f"RECOVERING (climbing off its recent low toward/beyond entry) is "
+            f"flat or falling, no POSITION RECOVERING flag, and the structure "
+            f"shows nothing back in the position's favour. Every move figure "
+            f"is stated for THE POSITION, not for price: 'RECOVERING' / "
+            f"'MOVING IN FAVOUR' means the position is clawing back toward "
+            f"profit — for a SHORT that happens while PRICE FALLS, so do not "
+            f"read it as price moving against you. A position flagged "
+            f"POSITION RECOVERING (climbing off its worst mark toward/beyond "
+            f"entry) is "
             f"NOT a close candidate on PnL grounds even if 'best move' looks "
             f"small — and a position with 'now' above entry is not a loser; "
             f"do not close a green, recovering position by relabelling it a "
