@@ -22,6 +22,10 @@ dependencies = [
     # Optional shadow signal: Chronos-2 forecasting (lazy-imported; the bot
     # runs fine without it — the signal just stays disabled).
     "chronos-forecasting>=2.0,<3",
+    # Prompt/response archive (prompt_log.py) chunk compression. Falls back to
+    # stdlib compression.zstd (3.14+) or gzip when absent, but pin it so every
+    # environment gets real zstd (mirrors requirements.txt).
+    "zstandard>=0.22",
 ]
 
 [project.optional-dependencies]

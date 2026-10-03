@@ -27,7 +27,9 @@ from hermes_trader.agents.duel_store import (
     server_processing_ms,
     slot_get,
 )
+from hermes_trader.agents import prompt_log
 from hermes_trader.agents.memory import memory
+from hermes_trader.agents.prior_calls import build_prior_call_block
 from hermes_trader.agents.system_prompt import build_system_prompt
 from hermes_trader.client.hl_client import (
     fetch_account_state,
@@ -445,6 +447,7 @@ def _build_user_message(
     mode: str,
     dex_equity: Dict[str, float] | None = None,
     recent_candles: List[Candle] | None = None,
+    prior_block: str = "",
 ) -> str:
     """Build the user message passed to the LLM."""
     trigger_summary = (
@@ -933,7 +936,13 @@ def _build_user_message(
 
     ohlc_block = _ohlc_block(recent_candles)
 
-    return "\n".join([
+    # Prior-call context (statefulness experiment, WATCHLIST B.32 item 1):
+    # "your recent history on this coin" — computed by research() via
+    # prior_calls.build_prior_call_block; "" when disabled (the default), so
+    # the prompt is byte-identical to pre-feature unless the flag is flipped.
+    prior_section = f"{prior_block}\n\n" if prior_block else ""
+
+    return prior_section + "\n".join([
         f"Candidate: {coin} (HL {perception.get('type', 'perp')}-PERP)",
         f"Current mid: ${_fmt_px(perception.get('mid', 0))}",
         f"Perception score: {perception.get('composite_score', 0)}/100",
@@ -1036,6 +1045,68 @@ def _call_ai(
         loop.close()
 
 
+def _archive_record(
+    *,
+    coin: str,
+    perception: Dict[str, Any],
+    role: str,
+    model: str,
+    system_prompt: str | None,
+    user_message: str | None,
+    raw_response: str,
+    parsed: Dict[str, Any],
+    wall_ms: int = 0,
+    server_ms: int | None = None,
+    prior_block_injected: bool = False,
+) -> Dict[str, Any]:
+    """Assemble one prompt_log record (see prompt_log.py for the storage
+    model). ``system_prompt``/``user_message`` None → role="duelist" reference
+    row (its prompt is byte-identical to the primary's; analysis joins on
+    perception_id). Field truncation guards keep a runaway response from
+    bloating a chunk. NEVER raises — record_call has its own belt, but this
+    runs inside the parse path."""
+    try:
+        cfg = prompt_log._cfg()
+
+        def _clip(text: str | None, limit: int) -> str | None:
+            if text is None:
+                return None
+            if len(text) > limit:
+                return text[:limit] + "…[TRUNCATED]"
+            return text
+
+        return {
+            "ts": int(time.time() * 1000),
+            "coin": coin,
+            "role": role,
+            "model": model,
+            "perception_id": perception.get("id", "unknown"),
+            "mode": str(read_agent_config().get("mode", "OFF")),
+            "mid": perception.get("mid"),
+            "composite_score": perception.get("composite_score"),
+            "prior_block_injected": prior_block_injected,
+            "system_prompt": _clip(system_prompt, int(cfg.get("max_prompt_chars", 40000))),
+            "user_message": _clip(user_message, int(cfg.get("max_prompt_chars", 40000))),
+            "raw_response": _clip(raw_response, int(cfg.get("max_response_chars", 20000))),
+            "parsed": {
+                "verdict": parsed.get("verdict"),
+                "confidence": parsed.get("confidence"),
+                "side": parsed.get("side"),
+                "entry_px": parsed.get("entry_px"),
+                "stop_px": parsed.get("stop_px"),
+                "tp_px": parsed.get("tp_px"),
+                "reasoning": _clip(str(parsed.get("reasoning") or ""), 2000),
+                "ai_down": bool(parsed.get("ai_down")),
+                "close_guard_downgraded": bool(parsed.get("close_guard_downgraded")),
+            },
+            "wall_ms": int(wall_ms or 0),
+            "server_ms": server_ms,
+        }
+    except Exception as e:  # noqa: BLE001 — archive assembly must never break a verdict
+        logger.debug(f"[research] archive record assembly failed for {coin}: {e}")
+        return {}
+
+
 def _duelist_verdict(
     system_prompt: str,
     user_message: str,
@@ -1082,6 +1153,15 @@ def _duelist_verdict(
             )
             return None
         dl_parsed = parse_verdict(dl_text, coin, perception, held_coins=held_coins)
+        # Prompt/response archive (role=duelist). Its prompt is byte-identical
+        # to the primary's — recorded as a reference so the archive stores the
+        # text once per research call, not twice. Disabled by default; never
+        # raises (prompt_log contract).
+        prompt_log.record_call(_archive_record(
+            coin=coin, perception=perception, role="duelist", model=cfg["model"],
+            system_prompt=None, user_message=None, raw_response=dl_text,
+            parsed=dl_parsed, wall_ms=duelist_ms, server_ms=dl_server_ms,
+        ))
         row = {
             "coin": coin,
             "perception_id": perception.get("id", "unknown"),
@@ -1459,10 +1539,16 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
 
     wr = memory.get_win_rate()
     system_prompt = build_system_prompt(mode, wr.get("rate", 0), int(wr.get("total", 0)))
+    # Statefulness experiment (WATCHLIST B.32 item 1): "your recent history on
+    # this coin" — prior verdicts + last completed round trip. Disabled by
+    # default; build_prior_call_block returns "" and logs nothing on any fault.
+    _primary_model_name = effective_primary_model()
+    prior_block = build_prior_call_block(coin, primary_model=_primary_model_name)
     user_message = _build_user_message(
         coin, perception, tf1h, tf4h, tf1d,
         funding_raw, news, equity, open_positions, mode,
         dex_equity=dex_equity, recent_candles=c1h,
+        prior_block=prior_block,
     )
 
     ai_t0 = time.monotonic()
@@ -1486,6 +1572,17 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     # downgraded to PASS at parse time — the xyz:HOOD 2026-09-04 misread.
     held_coins = {p["coin"] for p in open_positions}
     parsed = parse_verdict(ai_text, coin, perception, held_coins=held_coins)
+
+    # Prompt/response archive (role=primary): full prompt text + raw response +
+    # parsed verdict, zstd-chunked under /app/log/prompt-log. Disabled by
+    # default; record_call never raises (prompt_log.py contract).
+    prompt_log.record_call(_archive_record(
+        coin=coin, perception=perception, role="primary", model=_primary_model_name,
+        system_prompt=system_prompt, user_message=user_message,
+        raw_response=ai_text, parsed=parsed,
+        wall_ms=primary_ms, server_ms=primary_server_ms,
+        prior_block_injected=bool(prior_block),
+    ))
 
     # A/B duelist: the SAME prompt to the second model, recorded but never
     # used. Runs AFTER the primary verdict so a duelist outage (slow 9B server

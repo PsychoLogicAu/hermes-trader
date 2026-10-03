@@ -29,6 +29,11 @@ os.environ["HERMES_LEDGER_FILE"] = os.path.join(_tmp, "trades.jsonl")
 # imports it, so an unset var would let a test that calls research() write
 # paired-verdict rows into the live ~/.hermes-trader-duel.jsonl.
 os.environ["HERMES_DUEL_FILE"] = os.path.join(_tmp, ".hermes-trader-duel.jsonl")
+# 2026-10-03: the prompt/response archive (prompt_log.py) gets the same
+# treatment — HERMES_PROMPT_LOG_DIR is read per call (default /app/log/
+# prompt-log, bind-mounted rw), so an unset var would let a test that calls
+# research() write real prompt text into the live archive dir.
+os.environ["HERMES_PROMPT_LOG_DIR"] = os.path.join(_tmp, "prompt-log")
 # Force the duelist OFF regardless of the dev shell: with a duelist model
 # exported, any test touching research() would fire a second (real) LLM call.
 # DELETE (not empty-string) so a dev-shell export can't leak through — a test
