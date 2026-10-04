@@ -30,6 +30,7 @@ from hermes_trader.agents.duel_store import (
 from hermes_trader.agents import prompt_log
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.prior_calls import build_prior_call_block
+from hermes_trader.agents.rvol_context import build_rvol_block
 from hermes_trader.agents.system_prompt import build_system_prompt
 from hermes_trader.client.hl_client import (
     fetch_account_state,
@@ -448,6 +449,7 @@ def _build_user_message(
     dex_equity: Dict[str, float] | None = None,
     recent_candles: List[Candle] | None = None,
     prior_block: str = "",
+    rvol_block: str = "",
 ) -> str:
     """Build the user message passed to the LLM."""
     trigger_summary = (
@@ -936,13 +938,19 @@ def _build_user_message(
 
     ohlc_block = _ohlc_block(recent_candles)
 
+    # RVOL entry context (statefulness experiment, WATCHLIST B.32 item 2):
+    # "how loud was the entry candle" — computed by research() via
+    # rvol_context.build_rvol_block; "" when disabled (the default), so the
+    # prompt is byte-identical to pre-feature unless the flag is flipped.
+    rvol_section = f"{rvol_block}\n\n" if rvol_block else ""
+
     # Prior-call context (statefulness experiment, WATCHLIST B.32 item 1):
     # "your recent history on this coin" — computed by research() via
     # prior_calls.build_prior_call_block; "" when disabled (the default), so
     # the prompt is byte-identical to pre-feature unless the flag is flipped.
     prior_section = f"{prior_block}\n\n" if prior_block else ""
 
-    return prior_section + "\n".join([
+    return prior_section + rvol_section + "\n".join([
         f"Candidate: {coin} (HL {perception.get('type', 'perp')}-PERP)",
         f"Current mid: ${_fmt_px(perception.get('mid', 0))}",
         f"Perception score: {perception.get('composite_score', 0)}/100",
@@ -1544,11 +1552,16 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     # default; build_prior_call_block returns "" and logs nothing on any fault.
     _primary_model_name = effective_primary_model()
     prior_block = build_prior_call_block(coin, primary_model=_primary_model_name)
+    # RVOL entry context (WATCHLIST B.32 item 2): one factual volume line for
+    # the entry candle. Disabled by default; build_rvol_block returns "" on any
+    # fault and does its own TTL-cached 5m fetch.
+    rvol_block = build_rvol_block(coin)
     user_message = _build_user_message(
         coin, perception, tf1h, tf4h, tf1d,
         funding_raw, news, equity, open_positions, mode,
         dex_equity=dex_equity, recent_candles=c1h,
         prior_block=prior_block,
+        rvol_block=rvol_block,
     )
 
     ai_t0 = time.monotonic()
