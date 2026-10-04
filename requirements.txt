@@ -30,3 +30,8 @@ certifi>=2023.5.0
 eth-account>=0.8.0
 hyperliquid-python-sdk>=0.24.0
 httpcore>=1.0.0
+
+# Prompt/response archive (prompt_log.py): zstd chunk compression with
+# rotation. Falls back to stdlib compression.zstd (3.14+) or gzip if absent,
+# but pin the package so the container always gets real zstd on 3.13.
+zstandard>=0.22
