@@ -2886,6 +2886,36 @@ def _exit_type(reason: str) -> Optional[str]:
     return reason.split(" ", 1)[0].split(":", 1)[0]
 
 
+# Full-close booking dedupe (B.36 double-book class). coin_side_entry_px ->
+# monotonic ts of the last BOOKED full close. A second booked full close of
+# the SAME position (same coin/side/entry_px) within the window books
+# NOTHING: on 2026-10-03 the killswitch flattened MON, the same-tick
+# rehydrate re-synthesized the tracker from a stale position read, and the
+# second flatten booked a SECOND CLOSE row — double-counted PnL feeding the
+# daily-PnL comparator and the ledger. The reduce-only ORDER still goes to
+# the exchange (flattening safety > ledger hygiene; a still-open position
+# must get closed), only the BOOKING is deduped. Keyed on entry_px so a
+# legitimate re-entry (different entry) books normally. Partial slices are
+# NOT stamped — the DSL's follow-up close of the residual must book too.
+# @_serialized already serializes callers, so no lock is needed.
+_RECENTLY_CLOSED_WINDOW_S = 600.0
+_recently_closed_full: Dict[str, float] = {}
+
+
+def was_recently_booked_close(coin: str, side: str, entry_px: float) -> bool:
+    """True when close_position_market booked a FULL close for this exact
+    position (coin/side/entry_px) within the dedupe window. The stale-settle
+    path consults this so a fill already booked by the executor's flatten is
+    never booked a second time as an exchange_close — the actual §B.36 shape
+    on 2026-10-03 was killswitch_daily_loss (20:12:20) + stale-settle
+    exchange_close (20:17:42) for the SAME fill."""
+    try:
+        key = f"{coin}_{side}_{float(entry_px):.10g}"
+    except (TypeError, ValueError):
+        return False
+    return (time.monotonic() - _recently_closed_full.get(key, 0.0)) < _RECENTLY_CLOSED_WINDOW_S
+
+
 @_serialized
 def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
     """Market-close any open perp position for `coin`. Deregisters the DSL tracker on success.
@@ -3025,6 +3055,27 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
             # order on this coin.
             deregister_position(coin, side)
             cancel_open_orders_for_coin(coin)
+            # BOOKING dedupe (B.36): a second booked full close of the SAME
+            # position (coin/side/entry_px) within the window books nothing.
+            # The order above still went to the exchange (flatten safety),
+            # but the ledger/outcome-store row is skipped — the 2026-10-03
+            # killswitch + rehydrate re-synth double-booked MON's close.
+            _dedupe_key = f"{coin}_{side}_{entry_px:.10g}"
+            _now_mono = time.monotonic()
+            _prev_ts = _recently_closed_full.get(_dedupe_key, 0.0)
+            if _now_mono - _prev_ts < _RECENTLY_CLOSED_WINDOW_S:
+                logger.warning(
+                    f"[executor] {coin} {side}: duplicate full close "
+                    f"{_now_mono - _prev_ts:.0f}s after a booked close of the "
+                    f"same position (entry {entry_px}) — order sent, NOT "
+                    f"re-booking (B.36 dedupe)")
+                out["noop"] = "duplicate_close_recent"
+                return out
+            _recently_closed_full[_dedupe_key] = _now_mono
+            # prune stale stamps
+            for _k in [k for k, ts in _recently_closed_full.items()
+                       if _now_mono - ts >= _RECENTLY_CLOSED_WINDOW_S]:
+                _recently_closed_full.pop(_k, None)
         if fill_px and entry_px > 0:
             # Book the realized slice at the actual fill price (avg_px), not the
             # pre-trade mid, on exactly what closed.

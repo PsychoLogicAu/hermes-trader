@@ -267,3 +267,52 @@ def test_pnl_formula_matches_reconcile_convention():
     fee = round(notional * (0.15 / 3) / 100.0, 4)
     assert out["realized_pnl_usd"] == pytest.approx(
         round(notional * spot / 100.0 - fee, 4), abs=0.01)
+
+
+def test_fill_already_booked_by_executor_is_skipped(ledger_file, monkeypatch):
+    """B.36 double-book guard (2026-10-03 MON): the killswitch flatten booked
+    the close at 20:12:20, then the re-synthesized tracker was stale-dropped
+    and stale-settle booked the SAME fill as exchange_close at 20:17:42.
+    When the executor's close path stamped a booked full close for this exact
+    position within its dedupe window, stale-settle must skip."""
+    from hermes_trader.agents import executor
+    executor._recently_closed_full.clear()
+    try:
+        # Simulate the executor having just booked this position's close.
+        executor._recently_closed_full["MON_long_0.033503"] = time.monotonic()
+        mem = FakeMemory()
+        now = time.time()
+        fills = [_fill(coin="MON", px=0.03330, sz=1000, ts=now - 300)]
+        settled = settle_stale_closes(
+            [_stale_rec(coin="MON", entry_px=0.033503, size=1000, leverage=5,
+                        entry_time=now - 1500)],
+            fetch_fills=lambda: fills, memory=mem,
+            read_agent_config=lambda: {"loss_cooldown_min": 180},
+            now_ms=int(now * 1000))
+        assert settled == [], "already-booked fill must not be re-booked"
+        assert not ledger_file.exists() or _read(ledger_file) == []
+        assert mem.closes == []
+    finally:
+        executor._recently_closed_full.clear()
+
+
+def test_unrelated_stale_close_still_books(ledger_file, monkeypatch):
+    """The guard is keyed on coin/side/entry_px — a DIFFERENT position's
+    stale close settles normally even while another coin's dedupe stamp is
+    live."""
+    from hermes_trader.agents import executor
+    executor._recently_closed_full.clear()
+    try:
+        executor._recently_closed_full["MON_long_0.033503"] = time.monotonic()
+        mem = FakeMemory()
+        now = time.time()
+        fills = [_fill(coin="ZETA", px=0.03811, ts=now - 300)]
+        settled = settle_stale_closes(
+            [_stale_rec(entry_time=now - 1500)],
+            fetch_fills=lambda: fills, memory=mem,
+            read_agent_config=lambda: {"loss_cooldown_min": 180},
+            now_ms=int(now * 1000))
+        assert len(settled) == 1
+        assert mem.closes and mem.closes[0]["coin"] == "ZETA"
+    finally:
+        executor._recently_closed_full.clear()

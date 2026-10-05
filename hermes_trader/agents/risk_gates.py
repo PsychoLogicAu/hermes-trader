@@ -229,6 +229,36 @@ def flatten_daily_kill_usd(config: Dict[str, Any], equity: float) -> float:
     return base * mult
 
 
+def hard_killswitch_should_fire(config: Dict[str, Any], equity: float,
+                                open_positions: List[Dict[str, Any]],
+                                daily_pnl: float,
+                                clean_read: bool = True) -> tuple[bool, float]:
+    """Pure decision for the heartbeat HARD daily-loss flatten: returns
+    (should_fire, flatten_threshold_usd).
+
+    Preserves the original guards (threshold>0, equity>0, positions open,
+    pnl <= -threshold) and adds the 2026-10-03 plausibility gate: `clean_read`
+    must be True — memory's equity plausibility filter rejected the last tick
+    (suspected partial-dex degraded read) when it is False. A degraded
+    aggregate can fabricate a catastrophic daily PnL: on 2026-10-03 a 429'd
+    HIP-3 dex query dropped ~$948 of IDLE equity from the aggregate and the
+    phantom -$948.16 fired the first-ever HARD fire, flattening the book on
+    fiction (and double-booking the close via the rehydrate re-synth).
+    A real crash with a clean feed still fires — the filter only trips on
+    rejected reads, and a SUSTAINED real move is accepted after 180s."""
+    thr = flatten_daily_kill_usd(config, equity)
+    if thr <= 0 or equity <= 0 or not open_positions:
+        return False, thr
+    if not clean_read:
+        logger.error(
+            "[killswitch] daily-loss breach computed from an IMPLAUSIBLE "
+            "equity read (memory rejected the last tick) — NOT flattening; "
+            f"raw PnL ${daily_pnl:.2f}. If the loss is real it will "
+            "re-assert on a clean read and fire then.")
+        return False, thr
+    return daily_pnl <= -thr, thr
+
+
 def daily_loss_kill_switch(ctx: GateContext, max_daily_loss: float,
                            halt_remaining_min: float = 0.0) -> GateResult:
     """Block new ENTRIES when the day is deep in the red (or a halt timer is

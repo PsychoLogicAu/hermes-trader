@@ -1299,6 +1299,67 @@ def test_fetch_account_state_aggregates_hip3_dexes(monkeypatch):
     assert coins == ["BTC", "xyz:MU"]
 
 
+def test_fetch_account_state_reports_failed_dexes(monkeypatch):
+    """A HIP-3 dex clearinghouse query that FAILS is reported in
+    `failed_dexes` so the heartbeat can treat the aggregate equity as
+    degraded even when no open position sits on that dex (idle funds).
+    2026-10-03: a 429'd xyz-dex query dropped ~$948 of idle equity from
+    the aggregate; nothing flagged it (the held-dex guard only knows
+    position-bearing dexes) and the phantom -$948 daily PnL fired the
+    hard killswitch."""
+    from hermes_trader.client import hl_client
+
+    def _fake_http_post(path, payload):
+        kind = payload.get("type")
+        if kind == "clearinghouseState" and "dex" not in payload:
+            return {
+                "marginSummary": {"accountValue": "1000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+                "assetPositions": [],
+            }
+        if kind == "clearinghouseState" and payload.get("dex") == "xyz":
+            raise RuntimeError("429 rate limited")
+        if kind == "clearinghouseState" and payload.get("dex") == "vntl":
+            return {
+                "marginSummary": {"accountValue": "50", "totalNtlPos": "0"},
+                "assetPositions": [],
+            }
+        if kind == "spotClearinghouseState":
+            return {"balances": [{"coin": "USDC", "total": "10"}]}
+        return None
+
+    monkeypatch.setattr(hl_client, "_http_post", _fake_http_post)
+    monkeypatch.setattr("hermes_trader.client.universe.list_hip3_dexes", lambda: ["xyz", "vntl"])
+
+    state = hl_client.fetch_account_state("0xUSER", include_hip3=True)
+    assert state["failed_dexes"] == {"xyz"}
+    # queried_dexes semantics unchanged (responders only) — DSL rehydrator back-compat
+    assert state["queried_dexes"] == {"", "vntl"}
+    # the failed dex's equity is NOT in the aggregate (that's the hazard)
+    assert state["dex_equity"] == {"": 1000.0, "vntl": 50.0}
+
+
+def test_fetch_account_state_failed_dexes_empty_when_all_respond(monkeypatch):
+    """Clean fan-out -> failed_dexes is an empty set (heartbeat stays clean)."""
+    from hermes_trader.client import hl_client
+
+    def _fake_http_post(path, payload):
+        kind = payload.get("type")
+        if kind == "clearinghouseState" and "dex" not in payload:
+            return {"marginSummary": {"accountValue": "100", "totalNtlPos": "0", "totalMarginUsed": "0"},
+                    "assetPositions": []}
+        if kind == "clearinghouseState":
+            return {"marginSummary": {"accountValue": "10", "totalNtlPos": "0"}, "assetPositions": []}
+        if kind == "spotClearinghouseState":
+            return {"balances": []}
+        return None
+
+    monkeypatch.setattr(hl_client, "_http_post", _fake_http_post)
+    monkeypatch.setattr("hermes_trader.client.universe.list_hip3_dexes", lambda: ["xyz", "vntl"])
+
+    state = hl_client.fetch_account_state("0xUSER", include_hip3=True)
+    assert state["failed_dexes"] == set()
+
+
 def test_fetch_account_state_main_only_default(monkeypatch):
     """Default include_hip3=False keeps the behavior the executor relies on
     for trade sizing — equity must reflect only the main clearinghouse so

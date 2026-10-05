@@ -51,6 +51,12 @@ class AgentMemory:
         self._day_start_ts: int = 0
         self._daily_halt_until: int = 0  # epoch ms; daily-halt timer (see arm_daily_halt)
         self._daily_halt_day: str = ""   # UTC day the active halt was armed on
+        # Equity plausibility filter state (see track_daily_pnl): the divergent
+        # reading under sustained-reassertion evaluation, when it was first
+        # seen, and whether the LAST tick was rejected as implausible.
+        self._suspect_reading: float = 0.0
+        self._suspect_first_ts: float = 0.0
+        self._last_read_suspect: bool = False
         self._open_positions: List[Dict[str, Any]] = []
         self._initialized = False
         # Guards every mutation of the in-memory lists/dicts AND flush(). The
@@ -222,19 +228,45 @@ class AgentMemory:
         # gross book without liquidation, so reject fast spikes and keep
         # the prior reading; a SUSTAINED move re-asserts itself after 180s
         # and is then accepted (genuine crash detection delayed ≤3min).
+        #
+        # 2026-10-03 fix: the comparison is against the last ACCEPTED
+        # reading NO MATTER how stale. The old filter skipped the 25% check
+        # when prev was >180s old — but a 429 storm's failed fetches skip
+        # memory updates WITHOUT updating _last_eq_reading_ts, so the gap
+        # went stale and a partial-dex $6.19 read vs the true $954 was
+        # accepted unconditionally (phantom −$948 daily PnL, first-ever
+        # HARD killswitch fire). Sustained re-assertion (same divergent
+        # reading for ≥180s) is the ONLY way a big swing gets in.
         now_s = _time.time()
         prev_eq = getattr(self, "_last_eq_reading", 0.0)
-        prev_ts = getattr(self, "_last_eq_reading_ts", 0.0)
         if (prev_eq > 0 and current_equity > 0
-                and (now_s - prev_ts) < 180
                 and abs(current_equity - prev_eq) / prev_eq > 0.25):
-            logger.error(
-                f"[memory] IMPLAUSIBLE equity swing ${prev_eq:.2f} -> "
-                f"${current_equity:.2f} in {now_s - prev_ts:.0f}s — suspected "
-                f"partial-dex degraded read; IGNORING this tick (kill-switch "
-                f"protected). If real, it will re-assert after 180s."
-            )
-            return
+            suspect_reading = getattr(self, "_suspect_reading", 0.0)
+            suspect_first = getattr(self, "_suspect_first_ts", 0.0)
+            if (suspect_first
+                    and (now_s - suspect_first) >= 180
+                    and abs(current_equity - suspect_reading) / prev_eq < 0.05):
+                logger.warning(
+                    f"[memory] equity swing ${prev_eq:.2f} -> "
+                    f"${current_equity:.2f} sustained >=180s — accepting "
+                    f"(real move)."
+                )
+            else:
+                if (not suspect_first
+                        or abs(current_equity - suspect_reading) / prev_eq >= 0.05):
+                    self._suspect_reading = current_equity
+                    self._suspect_first_ts = now_s
+                self._last_read_suspect = True
+                logger.error(
+                    f"[memory] IMPLAUSIBLE equity swing ${prev_eq:.2f} -> "
+                    f"${current_equity:.2f} — suspected partial-dex degraded "
+                    f"read; IGNORING this tick (kill-switch protected). "
+                    f"Sustained re-assertion after 180s is accepted."
+                )
+                return
+        self._suspect_reading = 0.0
+        self._suspect_first_ts = 0.0
+        self._last_read_suspect = False
         self._last_eq_reading = current_equity
         self._last_eq_reading_ts = now_s
 
@@ -281,6 +313,16 @@ class AgentMemory:
     def peak_daily_pnl(self) -> float:
         """Intraday high-water mark of daily PnL (resets at UTC midnight)."""
         return self._peak_daily_pnl
+
+    def last_read_suspect(self) -> bool:
+        """True when the most recent track_daily_pnl tick was REJECTED as an
+        implausible equity swing (suspected partial-dex degraded read). The
+        HARD kill-switch refuses to flatten while this is set — a degraded
+        aggregate can fabricate a catastrophic daily PnL (2026-10-03: a
+        429'd HIP-3 dex query dropped ~$948 of idle equity from the
+        aggregate; the phantom -$948.16 fired the first-ever HARD fire and
+        flattened the book on fiction)."""
+        return getattr(self, "_last_read_suspect", False)
 
     # ── Daily-halt timer (equity-relative kill switch) ──────────────────────
     # When daily PnL breaches the equity-relative kill threshold, new entries

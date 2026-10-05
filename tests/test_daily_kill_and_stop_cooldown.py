@@ -5,7 +5,7 @@ import pytest
 
 from hermes_trader.agents.risk_gates import (
     GateContext, daily_loss_kill_switch, effective_daily_kill_usd,
-    flatten_daily_kill_usd)
+    flatten_daily_kill_usd, hard_killswitch_should_fire)
 
 
 def _ctx(daily_pnl=0.0, equity=100.0):
@@ -93,6 +93,166 @@ def test_halt_timer_blocks_even_after_partial_recovery():
     r = daily_loss_kill_switch(_ctx(daily_pnl=-4.0), 9.0, halt_remaining_min=120)
     assert r["pass"] is False
     assert "halt active" in r["reason"]
+
+
+# ── hard_killswitch_should_fire (heartbeat HARD flatten decision) ───────────
+
+def test_hard_killswitch_fires_on_clean_breach():
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0,
+           "daily_kill_min_usd": 8}
+    # equity 954 -> base clamp $20, flatten thr 25; pnl -30 breaches
+    fire, thr = hard_killswitch_should_fire(cfg, 954.0, [{"position": {}}],
+                                            -30.0, clean_read=True)
+    assert fire is True and thr == 25.0
+
+
+def test_hard_killswitch_no_fire_on_suspect_read():
+    """2026-10-03 replay: phantom -$948.16 from a degraded aggregate read.
+    With the plausibility filter rejecting the read (clean_read=False), the
+    HARD flatten must NOT fire no matter how deep the phantom PnL is."""
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0,
+           "daily_kill_min_usd": 8}
+    fire, thr = hard_killswitch_should_fire(cfg, 6.19, [{"position": {}}],
+                                            -948.16, clean_read=False)
+    assert fire is False
+
+
+def test_hard_killswitch_no_fire_when_disabled_or_flat():
+    assert hard_killswitch_should_fire({}, 954.0, [{"position": {}}],
+                                       -999.0, clean_read=True)[0] is False
+    # no open positions -> nothing to flatten (idempotence after a fire)
+    cfg = {"daily_kill_pct_of_equity": 0.20}
+    assert hard_killswitch_should_fire(cfg, 954.0, [], -999.0,
+                                       clean_read=True)[0] is False
+    # degraded equity<=0 read -> never fires (existing guard preserved)
+    assert hard_killswitch_should_fire(cfg, 0.0, [{"position": {}}], -999.0,
+                                       clean_read=True)[0] is False
+
+
+def test_hard_killswitch_no_fire_above_threshold():
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0}
+    fire, thr = hard_killswitch_should_fire(cfg, 954.0, [{"position": {}}],
+                                            -24.0, clean_read=True)
+    assert fire is False and thr == 25.0
+
+
+# ── close-booking dedupe (B.36 double-book class) ──────────────────────────
+
+def _dedupe_close_env(monkeypatch, coin="MON", entry_px="0.033503", szi="1000"):
+    """Stub the close path so close_position_market sees an OPEN position and
+    a full fill every call (the 2026-10-03 shape: killswitch flattened MON,
+    the same-tick rehydrate re-synthesized the tracker, and the second
+    flatten booked a SECOND CLOSE row)."""
+    from hermes_trader.agents import executor
+    monkeypatch.setattr(executor, "resolve_user_address", lambda: "0xUSER")
+    monkeypatch.setattr(executor, "fetch_account_state", lambda u, **kw: {
+        "equity": 954.0,
+        "asset_positions": [{"position": {"coin": coin, "szi": szi,
+                                          "entryPx": entry_px}}],
+    })
+    monkeypatch.setattr(executor, "get_hl_price", lambda c: float(entry_px))
+    monkeypatch.setattr(executor, "place_hl_order",
+                        lambda is_buy, size, mid_price, coin, **kw: {
+                            "ok": True, "order_id": "x",
+                            "avg_px": float(entry_px), "total_sz": float(szi)})
+    monkeypatch.setattr(executor, "cancel_open_orders_for_coin", lambda c: 0)
+    monkeypatch.setattr(executor.memory, "pop_entry_context",
+                        lambda coin, side: {})
+    rows = []
+    monkeypatch.setattr(executor, "record_close", lambda **kw: rows.append(kw))
+    monkeypatch.setattr(executor.memory, "record_close", lambda c: None)
+    return executor, rows
+
+
+def test_duplicate_close_within_window_books_once(monkeypatch):
+    """Two booked closes of the SAME coin/side/entry within 10min book
+    exactly ONE ledger row (the 2026-10-03 MON double-CLOSE, §B.36)."""
+    from hermes_trader.agents import executor
+    executor._recently_closed_full.clear()
+    executor, rows = _dedupe_close_env(monkeypatch)
+    try:
+        r1 = executor.close_position_market("MON", "killswitch_daily_loss")
+        assert r1.get("noop") is None and rows and len(rows) == 1
+        r2 = executor.close_position_market("MON", "killswitch_daily_loss")
+        assert r2.get("noop") == "duplicate_close_recent"
+        assert len(rows) == 1, "second close must NOT book a second row"
+        assert "realized_pnl_pct" not in r2  # nothing booked on the dup
+    finally:
+        executor._recently_closed_full.clear()
+
+
+def test_dedupe_key_includes_entry_px_so_reentry_books(monkeypatch):
+    """A legitimate re-entry (different entryPx) is NOT swallowed by the
+    dedupe — the key is coin+side+entry_px, not coin alone."""
+    from hermes_trader.agents import executor
+    executor._recently_closed_full.clear()
+    executor, rows = _dedupe_close_env(monkeypatch, entry_px="0.033503")
+    try:
+        executor.close_position_market("MON", "dsl")
+        assert len(rows) == 1
+        # re-opened at a different entry price -> books normally
+        executor.fetch_account_state = lambda u, **kw: {
+            "equity": 954.0,
+            "asset_positions": [{"position": {"coin": "MON", "szi": "900",
+                                              "entryPx": "0.0341"}}],
+        }
+        monkeypatch.setattr(executor, "place_hl_order",
+                            lambda is_buy, size, mid_price, coin, **kw: {
+                                "ok": True, "order_id": "y",
+                                "avg_px": 0.0341, "total_sz": 900.0})
+        r2 = executor.close_position_market("MON", "dsl")
+        assert r2.get("noop") is None
+        assert len(rows) == 2
+    finally:
+        executor._recently_closed_full.clear()
+
+
+def test_dedupe_window_expiry_allows_booking(monkeypatch):
+    """After the window passes, a same-key close books again (the guard is a
+    window, not a permanent block)."""
+    from hermes_trader.agents import executor
+    executor._recently_closed_full.clear()
+    executor, rows = _dedupe_close_env(monkeypatch)
+    try:
+        executor.close_position_market("MON", "dsl")
+        assert len(rows) == 1
+        for k in executor._recently_closed_full:
+            executor._recently_closed_full[k] -= 601.0  # age the stamp out
+        r2 = executor.close_position_market("MON", "dsl")
+        assert r2.get("noop") is None
+        assert len(rows) == 2
+    finally:
+        executor._recently_closed_full.clear()
+
+
+def test_partial_fill_slice_does_not_set_or_consume_dedupe(monkeypatch):
+    """A partial-fill slice books normally and does NOT stamp the dedupe key;
+    the DSL's follow-up close of the residual (same coin/side/entry, seconds
+    later) must still book its slice."""
+    from hermes_trader.agents import executor
+    executor._recently_closed_full.clear()
+    monkeypatch.setattr(executor, "resolve_user_address", lambda: "0xUSER")
+    monkeypatch.setattr(executor, "fetch_account_state", lambda u, **kw: {
+        "asset_positions": [{"position": {"coin": "ARB", "szi": "-1000",
+                                          "entryPx": "0.11684"}}],
+    })
+    monkeypatch.setattr(executor, "get_hl_price", lambda c: 0.10522)
+    monkeypatch.setattr(executor, "place_hl_order",
+                        lambda is_buy, size, mid_price, coin, **kw: {
+                            "ok": True, "order_id": "999",
+                            "avg_px": 0.10522, "total_sz": 400.0})
+    monkeypatch.setattr(executor.memory, "record_close", lambda c: None)
+    monkeypatch.setattr(executor.memory, "pop_entry_context", lambda coin, side: {})
+    ledger_rows = []
+    monkeypatch.setattr(executor, "record_close", lambda **kw: ledger_rows.append(kw))
+    monkeypatch.setattr(executor, "cancel_open_orders_for_coin", lambda c: 0)
+    try:
+        r1 = executor.close_position_market("ARB")
+        assert r1.get("noop") is None and len(ledger_rows) == 1
+        assert executor._recently_closed_full == {}, \
+            "partial slice must not stamp the full-close dedupe"
+    finally:
+        executor._recently_closed_full.clear()
 
 
 # ── halt timer arm / clear / expiry (memory) ───────────────────────────────
@@ -263,8 +423,16 @@ def test_mid_day_restart_after_deposit_does_not_invent_a_loss(monkeypatch):
 
     # (3) Money arriving AFTER the baseline stamp is contribution-neutral:
     # a +$20 deposit moves equity, not PnL (old code: 50-34.70-41.77 = -26.47).
-    m._last_eq_reading_ts -= 200  # the jump must look sustained, not a degraded read
-    m.track_daily_pnl(50.00, net_contributions=41.77)
+    # The +66% jump trips the plausibility filter on its first tick (a jump
+    # this size is indistinguishable from a partial-dex read); it is accepted
+    # once sustained (same reading re-asserted >=180s — 2026-10-03 filter
+    # redesign: staleness of the PREVIOUS read no longer bypasses the check).
+    m.track_daily_pnl(50.00, net_contributions=41.77)   # first tick: ignored
+    assert m.last_read_suspect() is True
+    assert abs(m.get_daily_pnl() - (-4.70)) < 0.02       # unchanged by the jump
+    m._suspect_first_ts -= 200  # pretend the 50.00 re-asserted for 200s
+    m.track_daily_pnl(50.00, net_contributions=41.77)   # sustained -> accepted
+    assert m.last_read_suspect() is False
     assert abs(m.get_daily_pnl() - (50.00 - 34.70 - 20.0)) < 0.01
 
 

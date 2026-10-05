@@ -530,21 +530,29 @@ def _sync_account_state():
     queried_dexes = state.get("queried_dexes") or {""}
 
     # PARTIAL-DEX degraded-read guard: a 'successful' fetch where equity>0 (main
-    # dex fine) but a HIP-3 dex we HOLD a position on failed to respond drops that
-    # dex's equity from the aggregate — e.g. on 2026-06-03 a missing xyz dex made
-    # equity read $56.65 instead of $187.42 (a phantom -$128/-69%). The equity<=0
-    # guard above can't catch it (main was funded). Left unguarded it poisons
+    # dex fine) but a HIP-3 dex FAILED to respond drops that dex's equity from
+    # the aggregate — e.g. on 2026-06-03 a missing xyz dex made equity read
+    # $56.65 instead of $187.42 (a phantom -$128/-69%). The equity<=0 guard
+    # above can't catch it (main was funded). Left unguarded it poisons
     # memory equity/dailyPnl AND can FALSE-TRIP the daily-loss kill switch.
-    # Detect it: if any dex backing an open DSL tracker isn't in queried_dexes,
-    # the aggregate is incomplete → preserve last-known-good (skip memory update,
-    # queried_dexes=set() keeps trackers), same as the equity<=0 path.
+    # Detect it two ways: (a) any dex backing an open DSL tracker isn't in
+    # queried_dexes, or (b) ANY dex query failed at all (failed_dexes) — (b)
+    # is the 2026-10-03 hole: ~$948 of IDLE funds sat on a HIP-3 dex with no
+    # open position, its query 429'd, and the held-dex-only check was blind;
+    # the phantom -$948 daily PnL fired the HARD killswitch and flattened the
+    # book on fiction. Either way the aggregate is incomplete → preserve
+    # last-known-good (skip memory update, queried_dexes=set() keeps
+    # trackers), same as the equity<=0 path.
     held_dexes = {(c.split(":", 1)[0] if ":" in c else "") for c in active_position_coins()}
     missing_dexes = held_dexes - set(queried_dexes)
-    if missing_dexes:
+    failed_dexes = set(state.get("failed_dexes") or ())
+    if missing_dexes or failed_dexes:
         logger.warning(
-            f"[heartbeat] partial-dex degraded read: held dex(es) {missing_dexes} "
-            f"missing from queried {set(queried_dexes)} (equity read ${equity:.2f} is "
-            f"incomplete) — skipping memory update, preserving last-known-good")
+            f"[heartbeat] partial-dex degraded read: failed dex(es) "
+            f"{failed_dexes or missing_dexes} (queried {set(queried_dexes)}, "
+            f"held {held_dexes or '{}'}) — equity read ${equity:.2f} may be "
+            f"missing idle-fund dex equity; skipping memory update, "
+            f"preserving last-known-good")
         return 0.0, [], 0.0, 0.0, set(), {}
 
     # Subtract net USDC contributions so transfers/deposits don't show
@@ -1048,6 +1056,69 @@ def _fast_exit_daemon() -> None:
 threading.Thread(target=_fast_exit_daemon, name="hermes-fast-exit", daemon=True).start()
 logger.info("[dsl-fast] fast-exit daemon started (lighter-cadence DSL checks for held positions)")
 
+
+def _run_hard_killswitch(_cfg, equity, positions, daily_pnl):
+    """The daily_loss GATE (risk_gates) only blocks NEW entries — it can't
+    close what's already open, so a losing book OVERSHOOTS the limit as
+    positions keep bleeding to their DSL stops (2026-06-09: hit -$35 vs a
+    -$30 cap). Make the floor HARD: once the day's loss breaches the limit,
+    FLATTEN every open position so the loss can't run further. The gate then
+    keeps re-entry blocked while the halt timer runs (breakable on
+    recovery — see risk_gates.daily_loss). Guarded by equity>0: every
+    degraded/partial-read path in _sync_account_state returns equity=0 (and
+    preserves last-known-good daily_pnl), so a bad read can NEVER trigger a
+    flatten. Idempotent: after flattening, the next tick's positions are
+    empty so it won't re-fire. 2026-09-02: the flatten uses
+    flatten_daily_kill_usd = effective_daily_kill_usd × flatten_mult
+    (default 1.25) — deliberately HIGHER than the entry gate / halt so
+    the open book has a grace band (-T .. -mult*T) to claw the day back
+    above the release band and clear the halt early; a flat flatten at
+    T would pin the equity-based daily PnL red and make early release
+    unreachable. pct=0 disables the gate, halt AND flatten.
+
+    2026-10-03 (first-ever fire, on a phantom -$948.16 from a degraded
+    partial-dex aggregate): two hardenings —
+    (a) the decision goes through the pure hard_killswitch_should_fire(),
+        which refuses to act while memory's plausibility filter has an
+        outstanding REJECTED equity read (clean_read=False);
+    (b) the flatten now ARMS the daily-halt timer (same timer the entry
+        gate honors): the 10-03 kill flattened the book but left no halt,
+        so the bot opened a new position 2 minutes later.
+    """
+    from hermes_trader.agents.risk_gates import hard_killswitch_should_fire
+    _fire, _kill_thr = hard_killswitch_should_fire(
+        _cfg, equity, positions, daily_pnl,
+        clean_read=not memory.last_read_suspect())
+    if not _fire:
+        return
+    logger.warning(
+        f"[killswitch] HARD daily-loss floor breached: PnL ${daily_pnl:.2f} "
+        f"<= -${_kill_thr:.2f} (equity-relative) — flattening {len(positions)} open "
+        f"position(s) to cap the loss")
+    for _p in positions:
+        _coin = (_p.get("position") or {}).get("coin")
+        if not _coin:
+            continue
+        try:
+            _res = close_position_market(_coin, "killswitch_daily_loss")
+            logger.warning(f"[killswitch] flattened {_coin}: ok={_res.get('ok')}")
+        except Exception as _e:
+            logger.error(f"[killswitch] failed to flatten {_coin}: {_e}")
+    # Arm the daily-halt timer (risk_gates.daily_loss_kill_switch honors it;
+    # the executor path clears it early on recovery). halt_min +
+    # early-release semantics are identical to the entry-path halt
+    # (memory.arm_daily_halt survives the UTC roll).
+    from datetime import datetime as _dt_kill, timezone as _tz_kill
+    _halt_cfg_k = _cfg.get("daily_loss_halt") or {}
+    _halt_min_k = float(_halt_cfg_k.get("halt_min", 360) or 360)
+    memory.arm_daily_halt(
+        _halt_min_k,
+        utc_day=_dt_kill.now(_tz_kill.utc).strftime("%Y-%m-%d"))
+    log_event({"event": "hard_killswitch", "daily_pnl": round(daily_pnl, 2),
+               "limit": _kill_thr, "flattened": len(positions),
+               "halt_armed_min": _halt_min_k})
+
+
 while True:
     try:
         # ── Heartbeat: refresh equity / positions before scanning ──────────
@@ -1094,41 +1165,8 @@ while True:
         write_snapshot(positions)
 
         # ── HARD daily-loss kill-switch ─────────────────────────────────────
-        # The daily_loss GATE (risk_gates) only blocks NEW entries — it can't
-        # close what's already open, so a losing book OVERSHOOTS the limit as
-        # positions keep bleeding to their DSL stops (2026-06-09: hit -$35 vs a
-        # -$30 cap). Make the floor HARD: once the day's loss breaches the limit,
-        # FLATTEN every open position so the loss can't run further. The gate then
-        # keeps re-entry blocked while the halt timer runs (breakable on
-        # recovery — see risk_gates.daily_loss). Guarded by equity>0: every
-        # degraded/partial-read path in _sync_account_state returns equity=0 (and
-        # preserves last-known-good daily_pnl), so a bad read can NEVER trigger a
-        # flatten. Idempotent: after flattening, the next tick's positions are
-        # empty so it won't re-fire. 2026-09-02: the flatten uses
-        # flatten_daily_kill_usd = effective_daily_kill_usd × flatten_mult
-        # (default 1.25) — deliberately HIGHER than the entry gate / halt so
-        # the open book has a grace band (-T .. -mult*T) to claw the day back
-        # above the release band and clear the halt early; a flat flatten at
-        # T would pin the equity-based daily PnL red and make early release
-        # unreachable. pct=0 disables the gate, halt AND flatten.
-        from hermes_trader.agents.risk_gates import flatten_daily_kill_usd
-        _kill_thr = flatten_daily_kill_usd(_cfg, equity)  # 0 = disabled
-        if _kill_thr > 0 and equity > 0 and positions and daily_pnl <= -_kill_thr:
-            logger.warning(
-                f"[killswitch] HARD daily-loss floor breached: PnL ${daily_pnl:.2f} "
-                f"<= -${_kill_thr:.2f} (equity-relative) — flattening {len(positions)} open "
-                f"position(s) to cap the loss")
-            for _p in positions:
-                _coin = (_p.get("position") or {}).get("coin")
-                if not _coin:
-                    continue
-                try:
-                    _res = close_position_market(_coin, "killswitch_daily_loss")
-                    logger.warning(f"[killswitch] flattened {_coin}: ok={_res.get('ok')}")
-                except Exception as _e:
-                    logger.error(f"[killswitch] failed to flatten {_coin}: {_e}")
-            log_event({"event": "hard_killswitch", "daily_pnl": round(daily_pnl, 2),
-                       "limit": _kill_thr, "flattened": len(positions)})
+        # See _run_hard_killswitch below for the full rationale + history.
+        _run_hard_killswitch(_cfg, equity, positions, daily_pnl)
 
         # ── DSL exit pass ───────────────────────────────────────────────────
         # Reconcile trackers with live exchange positions (handles restarts,

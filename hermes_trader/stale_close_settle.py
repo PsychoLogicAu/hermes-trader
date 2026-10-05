@@ -267,6 +267,23 @@ def settle_stale_closes(stale_recs: List[Dict[str, Any]], *,
                     f"(startup reconcile stays the backstop)")
                 continue
             computed = _compute_record(rec, cands)
+            # B.36 double-book guard: if the executor's close path already
+            # BOOKED this exact position's close within its dedupe window
+            # (e.g. a killswitch flatten), the fill we just attributed is the
+            # SAME fill — booking it again as exchange_close double-counts
+            # realized PnL (2026-10-03 MON: killswitch booked 20:12:20,
+            # stale-settle booked the same fill 20:17:42).
+            try:
+                from hermes_trader.agents.executor import was_recently_booked_close
+                if was_recently_booked_close(coin, side, rec.get("entry_px") or 0):
+                    logger.info(
+                        f"[stale-settle] {coin}_{side} closing fill already "
+                        f"booked by the executor close path — skipping "
+                        f"(B.36 double-book guard)")
+                    continue
+            except Exception as _dg_e:  # guard must never break settlement
+                logger.warning(f"[stale-settle] dedupe guard failed for "
+                               f"{coin}_{side} (non-fatal): {_dg_e}")
             if len(cands) > 1:
                 # Split fills: only trustworthy when every fill carries an
                 # exchange closedPnl AND the aggregate is a loss (the gate we
