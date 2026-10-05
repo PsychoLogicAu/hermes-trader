@@ -302,6 +302,7 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
     dex_equity: Dict[str, float] = {"": perp_equity}
     dex_available: Dict[str, float] = {"": available}
     queried_dexes: set = {""}
+    failed_dexes: set = set()  # HIP-3 dexes whose query failed (degraded aggregate)
     available_aggregated = available  # starts as main; HIP-3 adds in
 
     if include_hip3:
@@ -330,6 +331,14 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
                                     thread_name_prefix="hl-dex") as pool:
                 for dex, dex_state in pool.map(_fetch_dex, dexes):
                     if dex_state is None:
+                        # Query FAILED — its equity is missing from the aggregate.
+                        # Report it: the heartbeat partial-dex guard needs this to
+                        # catch degraded reads on dexes holding only IDLE funds
+                        # (no open position => invisible to the held-dex check).
+                        # 2026-10-03: a 429'd dex query dropped ~$948 from the
+                        # aggregate; the phantom -$948 daily PnL fired the hard
+                        # killswitch and flattened the book on fiction.
+                        failed_dexes.add(dex)
                         continue
                     queried_dexes.add(dex)
                     dex_ms = dex_state.get("marginSummary", {}) or {}
@@ -364,6 +373,7 @@ def fetch_account_state(user: str, include_hip3: bool = False) -> Dict[str, Any]
         "dex_equity": dex_equity,
         "dex_available": dex_available,
         "queried_dexes": queried_dexes,
+        "failed_dexes": failed_dexes,
     }
 
 
