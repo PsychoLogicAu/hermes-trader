@@ -2041,6 +2041,69 @@ def fast_exit_pass(
     ]
 
 
+def _ai_close_slot_defer_check(coin: str) -> Optional[Dict[str, Any]]:
+    """Decide whether an LLM CLOSE verdict for `coin` falls OUTSIDE the LLM's
+    slot-pressure jurisdiction. Returns None when the close should proceed
+    untouched (guard off, no tracker, position armed, or book contended).
+
+    Mirrors the code-level stale-flat timeout's own contention condition
+    (dsl_exit.stale_flat_min_positions): the timeout deliberately does NOT cut
+    never-armed drifters when the book is below the contention floor, because
+    the "free the slot" rationale is false there. The LLM gets the same limit.
+    Config lives in .agent-config.json under `ai_close_slot_defer`:
+      enabled (default True), shadow_mode (default True = log only).
+    Fail-safe: any read failure or missing tracker -> None (close proceeds).
+    """
+    try:
+        cfg = read_agent_config().get("ai_close_slot_defer") or {}
+    except Exception:
+        return None
+    if not bool(cfg.get("enabled", True)):
+        return None
+    try:
+        from hermes_trader.agents import dsl_exit
+        with dsl_exit._registry_lock:
+            trackers = [t for t in dsl_exit._active_positions.values()
+                        if t.coin == coin]
+            used = len(dsl_exit._active_positions)
+        if not trackers:
+            return None  # no tracker (flat / not booked) — close no-ops anyway
+        cap = int(read_agent_config().get("max_concurrent", 5) or 5)
+        floor = 3
+        dsl_cfg = read_agent_config().get("dsl_exit") or {}
+        floor = int(dsl_cfg.get("stale_flat_min_positions", 3) or 0)
+        if used >= floor:
+            return None  # contended book — LLM close is legitimate
+        # NEVER-ARMED test, same as the stale-flat timeout: peak profit
+        # below protect_pct for every tracker on this coin.
+        worst: Optional[Dict[str, Any]] = None
+        for t in trackers:
+            pol = t.policy
+            if t.is_long():
+                peak_pct = (t.peak_px - t.entry_px) / t.entry_px * 100
+            else:
+                peak_pct = (t.entry_px - t.peak_px) / t.entry_px * 100
+            if peak_pct >= pol.protect_pct:
+                return None  # armed at least once — LLM jurisdiction stands
+            if worst is None or peak_pct < worst["peak_pct"]:
+                worst = {"peak_pct": peak_pct, "protect_pct": pol.protect_pct}
+        assert worst is not None
+        return {
+            "shadow": bool(cfg.get("shadow_mode", True)),
+            "used": used, "cap": cap, "floor": floor,
+            "peak_pct": worst["peak_pct"], "protect_pct": worst["protect_pct"],
+            "verb": ("closing anyway (shadow)" if cfg.get("shadow_mode", True)
+                     else "deferring to"),
+            "reason": (f"ai_close_slot_defer: slots {used}/{cap} < floor {floor}, "
+                       f"never armed (peak {worst['peak_pct']:+.2f}% < "
+                       f"protect {worst['protect_pct']:.2f}%)"),
+        }
+    except Exception as exc:  # fail-safe: never block a close on guard bugs
+        logger.warning(f"[route_verdict] ai_close slot-defer check failed "
+                       f"for {coin}: {exc} — closing")
+        return None
+
+
 def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -> Dict[str, Any]:
     """Route an analysis to the right action based on its verdict.
 
@@ -2068,6 +2131,36 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
         return {"action": "execute", "verdict": verdict, "result": _res}
     if verdict == "CLOSE":
         _reason = f"ai_close: {str(analysis.get('reasoning') or '')[:200]}"
+        # ── Slot-pressure jurisdiction guard (2026-10-05, scan #5) ──────
+        # The LLM's ai_close cohort cost ~$3.06 vs letting the deterministic
+        # stale-flat clock run (n=15 replay, WATCHLIST §B.35 follow-up): every
+        # dead-bag cut in the window fired at 1-of-5 slots where the "free the
+        # capital" rationale is provably false, and 0/625 prompt-log responses
+        # engaged with the book-slots fact the prompt already carries. The
+        # code-level stale-flat timeout ALREADY defers below its contention
+        # floor (stale_flat_min_positions, 2026-07-11); this gives the LLM the
+        # same jurisdiction limit: a CLOSE for a NEVER-ARMED position (peak
+        # profit < protect_pct — the same test the timeout uses) on an
+        # UNCONTENDED book is deferred to the deterministic machinery
+        # (max_loss / floor / hard_timeout). Armed positions and contended
+        # books close exactly as before.
+        # SHADOW MODE (default, house convention): log WOULD-HAVE-DEFERRED
+        # loudly and close anyway — accrues the counterfactual until the
+        # operator flips shadow_mode to false in .agent-config.json.
+        _defer = _ai_close_slot_defer_check(coin) if coin else None
+        if _defer is not None:
+            _mode = "WOULD-HAVE-DEFERRED" if _defer["shadow"] else "DEFERRED"
+            logger.warning(
+                f"[route_verdict] {coin}: ai_close {_mode} "
+                f"(slots {_defer['used']}/{_defer['cap']} in use < contention "
+                f"floor {_defer['floor']}, never armed: peak "
+                f"{_defer['peak_pct']:+.2f}% < protect {_defer['protect_pct']:.2f}%)"
+                f" — {_defer['verb']} deterministic exits keep ownership. "
+                f"LLM reasoning: {_reason[:160]}"
+            )
+            if not _defer["shadow"]:
+                return {"action": "none", "verdict": verdict, "result": None,
+                        "deferred_reason": _defer["reason"]}
         return {"action": "close", "verdict": verdict, "result": close_fn(coin, _reason)}
     if verdict in ("PASS", "VETO"):
         # PASS = neutral abstention; VETO (2026-09-03) = ACTIVE rejection,

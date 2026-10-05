@@ -1,0 +1,7551 @@
+{
+ "tirex_would": [
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-03T15:06:32",
+   "side": "long",
+   "tail": 4.69,
+   "conf": 0.82,
+   "comp": 43.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.69M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T15:19:34",
+   "side": "long",
+   "tail": 6.56,
+   "conf": 0.82,
+   "comp": 62.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-03T15:19:50",
+   "side": "long",
+   "tail": 3.98,
+   "conf": 0.85,
+   "comp": 47.2,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T15:20:20",
+   "side": "long",
+   "tail": 2.68,
+   "conf": 0.75,
+   "comp": 10.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T16:14:44",
+   "side": "long",
+   "tail": 5.6,
+   "conf": 0.78,
+   "comp": 37.9,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T16:18:43",
+   "side": "long",
+   "tail": 5.6,
+   "conf": 0.85,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-03T16:33:51",
+   "side": "long",
+   "tail": 2.66,
+   "conf": 0.82,
+   "comp": 37.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.86M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-10-03T16:46:24",
+   "side": "long",
+   "tail": 4.95,
+   "conf": 0.85,
+   "comp": 42.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T16:55:31",
+   "side": "long",
+   "tail": 6.16,
+   "conf": 0.85,
+   "comp": 53.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T17:21:41",
+   "side": "long",
+   "tail": 9.5,
+   "conf": 0.82,
+   "comp": 65.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T17:26:57",
+   "side": "long",
+   "tail": 7.41,
+   "conf": 0.82,
+   "comp": 43.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-10-03T17:54:39",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-10-03T20:14:42",
+   "side": "long",
+   "tail": 3.48,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-04T04:56:41",
+   "side": "long",
+   "tail": 4.52,
+   "conf": 0.82,
+   "comp": 53.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-04T05:00:43",
+   "side": "long",
+   "tail": 4.69,
+   "conf": 0.78,
+   "comp": 35.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AXS",
+   "ts": "2026-10-04T07:30:18",
+   "side": "long",
+   "tail": 6.32,
+   "conf": 0.75,
+   "comp": 29.2,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "IO",
+   "ts": "2026-10-04T14:33:42",
+   "side": "long",
+   "tail": 4.2,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.78M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "IO",
+   "ts": "2026-10-04T14:37:54",
+   "side": "long",
+   "tail": 4.2,
+   "conf": 0.85,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-04T15:03:00",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-10-04T16:17:58",
+   "side": "long",
+   "tail": 5.21,
+   "conf": 0.75,
+   "comp": 34.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FET",
+   "ts": "2026-10-04T19:33:26",
+   "side": "long",
+   "tail": 2.99,
+   "conf": 0.78,
+   "comp": 39.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-10-05T01:00:57",
+   "side": "long",
+   "tail": 3.56,
+   "conf": 0.78,
+   "comp": 34.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-10-05T03:05:04",
+   "side": "long",
+   "tail": 3.32,
+   "conf": 0.78,
+   "comp": 47.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "DOT",
+   "ts": "2026-09-17T16:04:46",
+   "side": "long",
+   "tail": 2.65,
+   "conf": 0.78,
+   "comp": 33.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-17T23:31:53",
+   "side": "long",
+   "tail": 3.64,
+   "conf": 0.85,
+   "comp": 33.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-18T00:51:29",
+   "side": "long",
+   "tail": 2.51,
+   "conf": 0.82,
+   "comp": 45.2,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ARB",
+   "ts": "2026-09-18T03:12:04",
+   "side": "long",
+   "tail": 6.2,
+   "conf": 0.82,
+   "comp": 56.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-18T03:22:57",
+   "side": "long",
+   "tail": 2.79,
+   "conf": 0.75,
+   "comp": 5.2,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-18T03:30:02",
+   "side": "long",
+   "tail": 6.3,
+   "conf": 0.75,
+   "comp": 31.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-18T17:24:33",
+   "side": "long",
+   "tail": 22.16,
+   "conf": 0.85,
+   "comp": 44.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "INJ",
+   "ts": "2026-09-19T07:01:20",
+   "side": "long",
+   "tail": 3.37,
+   "conf": 0.82,
+   "comp": 33.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "trade notional $33.60 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-19T09:37:12",
+   "side": "long",
+   "tail": 5.48,
+   "conf": 0.78,
+   "comp": 5.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BERA",
+   "ts": "2026-09-19T16:56:28",
+   "side": "long",
+   "tail": 2.65,
+   "conf": 0.78,
+   "comp": 31.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.35M below floor $1."
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-19T17:19:09",
+   "side": "long",
+   "tail": 7.32,
+   "conf": 0.75,
+   "comp": 35.3,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BERA",
+   "ts": "2026-09-19T17:29:59",
+   "side": "long",
+   "tail": 4.57,
+   "conf": 0.85,
+   "comp": 53.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "INJ",
+   "ts": "2026-09-19T19:09:36",
+   "side": "long",
+   "tail": 2.69,
+   "conf": 0.82,
+   "comp": 28.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T01:05:34",
+   "side": "long",
+   "tail": 3.64,
+   "conf": 0.75,
+   "comp": 36.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T01:13:30",
+   "side": "long",
+   "tail": 3.04,
+   "conf": 0.82,
+   "comp": 36.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T01:22:02",
+   "side": "long",
+   "tail": 2.77,
+   "conf": 0.85,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-20T02:06:38",
+   "side": "long",
+   "tail": 4.48,
+   "conf": 0.78,
+   "comp": 40.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T03:46:39",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 27.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T06:16:17",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 23.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T08:15:37",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T08:33:42",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 34.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:30:04",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:38:45",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:45:09",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 34.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:51:50",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:56:15",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:59:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:05:58",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 33.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:12:09",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:16:02",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:19:00",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:21:04",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:24:15",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:28:24",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:31:55",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:36:50",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:41:03",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.2,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T12:19:05",
+   "side": "long",
+   "tail": 3.51,
+   "conf": 0.85,
+   "comp": 32.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "VVV",
+   "ts": "2026-09-20T12:57:08",
+   "side": "long",
+   "tail": 2.87,
+   "conf": 0.78,
+   "comp": 27.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "VVV",
+   "ts": "2026-09-20T13:03:14",
+   "side": "long",
+   "tail": 3.37,
+   "conf": 0.78,
+   "comp": 26.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "ALGO",
+   "ts": "2026-09-20T14:45:44",
+   "side": "long",
+   "tail": 3.15,
+   "conf": 0.82,
+   "comp": 43.3,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T14:58:30",
+   "side": "long",
+   "tail": 6.93,
+   "conf": 0.82,
+   "comp": 49.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.85M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T15:12:39",
+   "side": "long",
+   "tail": 12.23,
+   "conf": 0.75,
+   "comp": 39.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T15:36:14",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 27.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "MANTA",
+   "ts": "2026-09-20T15:59:50",
+   "side": "long",
+   "tail": 2.74,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.45M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-20T16:57:54",
+   "side": "long",
+   "tail": 4.43,
+   "conf": 0.82,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AR",
+   "ts": "2026-09-20T17:07:32",
+   "side": "long",
+   "tail": 9.82,
+   "conf": 0.75,
+   "comp": 42.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T17:26:04",
+   "side": "long",
+   "tail": 10.64,
+   "conf": 0.82,
+   "comp": 45.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AR",
+   "ts": "2026-09-20T17:38:51",
+   "side": "long",
+   "tail": 10.1,
+   "conf": 0.85,
+   "comp": 52.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T17:53:37",
+   "side": "long",
+   "tail": 15.89,
+   "conf": 0.78,
+   "comp": 44.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T18:45:20",
+   "side": "long",
+   "tail": 7.62,
+   "conf": 0.85,
+   "comp": 33.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LDO",
+   "ts": "2026-09-21T00:52:42",
+   "side": "long",
+   "tail": 2.72,
+   "conf": 0.82,
+   "comp": 34.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-09-21T03:15:18",
+   "side": "long",
+   "tail": 6.75,
+   "conf": 0.78,
+   "comp": 28.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.38M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-09-21T04:02:16",
+   "side": "long",
+   "tail": 32.24,
+   "conf": 0.82,
+   "comp": 43.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.77M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-09-21T06:54:46",
+   "side": "long",
+   "tail": 18.83,
+   "conf": 0.75,
+   "comp": 41.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MINA",
+   "ts": "2026-09-21T07:23:06",
+   "side": "long",
+   "tail": 2.55,
+   "conf": 0.78,
+   "comp": 30.4,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-21T16:23:31",
+   "side": "long",
+   "tail": 10.79,
+   "conf": 0.75,
+   "comp": 32.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.49M below floor $1.",
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PENGU",
+   "ts": "2026-09-21T16:42:07",
+   "side": "long",
+   "tail": 2.7,
+   "conf": 0.78,
+   "comp": 38.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-21T19:18:05",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 25.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "KAS",
+   "ts": "2026-09-21T19:58:45",
+   "side": "long",
+   "tail": 3.1,
+   "conf": 0.75,
+   "comp": 11.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.85M below floor $1.",
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-21T22:59:22",
+   "side": "long",
+   "tail": 2.99,
+   "conf": 0.75,
+   "comp": 13.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T00:53:18",
+   "side": "long",
+   "tail": 3.83,
+   "conf": 0.85,
+   "comp": 34.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:08:54",
+   "side": "long",
+   "tail": 4.62,
+   "conf": 0.74,
+   "comp": 34.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:22:47",
+   "side": "long",
+   "tail": 3.55,
+   "conf": 0.85,
+   "comp": 33.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-22T01:25:03",
+   "side": "long",
+   "tail": 2.8,
+   "conf": 0.72,
+   "comp": 24.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:34:05",
+   "side": "long",
+   "tail": 4.06,
+   "conf": 0.78,
+   "comp": 32.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:47:13",
+   "side": "long",
+   "tail": 4.47,
+   "conf": 0.82,
+   "comp": 31.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T02:01:27",
+   "side": "long",
+   "tail": 3.55,
+   "conf": 0.75,
+   "comp": 32.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-22T02:02:12",
+   "side": "long",
+   "tail": 3.08,
+   "conf": 0.82,
+   "comp": 28.3,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-22T02:15:58",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-22T02:31:33",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-22T03:02:28",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DOGE",
+   "ts": "2026-09-22T04:04:16",
+   "side": "long",
+   "tail": 5.2,
+   "conf": 0.75,
+   "comp": 10.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-22T04:13:18",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend"
+   ]
+  },
+  {
+   "coin": "WIF",
+   "ts": "2026-09-22T04:29:26",
+   "side": "long",
+   "tail": 2.71,
+   "conf": 0.72,
+   "comp": 26.9,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kBONK",
+   "ts": "2026-09-22T05:01:09",
+   "side": "long",
+   "tail": 2.9,
+   "conf": 0.78,
+   "comp": 35.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SKR",
+   "ts": "2026-09-22T05:13:10",
+   "side": "long",
+   "tail": 6.34,
+   "conf": 0.75,
+   "comp": 40.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SKR",
+   "ts": "2026-09-22T05:27:27",
+   "side": "long",
+   "tail": 2.89,
+   "conf": 0.75,
+   "comp": 39.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T08:25:10",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.39M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T08:35:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.39M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T08:59:03",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.40M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-22T12:54:03",
+   "side": "long",
+   "tail": 8.1,
+   "conf": 0.82,
+   "comp": 39.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $33.68 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BCH",
+   "ts": "2026-09-22T13:03:09",
+   "side": "long",
+   "tail": 13.41,
+   "conf": 0.85,
+   "comp": 44.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GOAT",
+   "ts": "2026-09-22T13:20:52",
+   "side": "long",
+   "tail": 4.42,
+   "conf": 0.82,
+   "comp": 35.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.52M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MINA",
+   "ts": "2026-09-22T15:07:02",
+   "side": "long",
+   "tail": 6.7,
+   "conf": 0.85,
+   "comp": 42.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MINA",
+   "ts": "2026-09-22T16:03:39",
+   "side": "long",
+   "tail": 5.75,
+   "conf": 0.82,
+   "comp": 49.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-22T16:19:44",
+   "side": "long",
+   "tail": 6.64,
+   "conf": 0.82,
+   "comp": 53.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-22T16:32:15",
+   "side": "long",
+   "tail": 7.58,
+   "conf": 0.85,
+   "comp": 35.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-22T17:06:48",
+   "side": "long",
+   "tail": 3.25,
+   "conf": 0.82,
+   "comp": 47.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GOAT",
+   "ts": "2026-09-22T18:44:50",
+   "side": "long",
+   "tail": 6.12,
+   "conf": 0.82,
+   "comp": 36.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.74M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "TIA",
+   "ts": "2026-09-22T19:31:39",
+   "side": "long",
+   "tail": 5.6,
+   "conf": 0.78,
+   "comp": 55.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PENGU",
+   "ts": "2026-09-22T20:03:16",
+   "side": "long",
+   "tail": 3.4,
+   "conf": 0.78,
+   "comp": 42.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-22T21:37:25",
+   "side": "long",
+   "tail": 3.02,
+   "conf": 0.78,
+   "comp": 56.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-22T22:24:37",
+   "side": "long",
+   "tail": 4.87,
+   "conf": 0.82,
+   "comp": 32.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $33.74 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-23T01:16:03",
+   "side": "long",
+   "tail": 3.24,
+   "conf": 0.75,
+   "comp": 43.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "BSV",
+   "ts": "2026-09-23T01:25:08",
+   "side": "long",
+   "tail": 5.9,
+   "conf": 0.75,
+   "comp": 48.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PENGU",
+   "ts": "2026-09-23T03:42:20",
+   "side": "long",
+   "tail": 2.9,
+   "conf": 0.78,
+   "comp": 28.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T03:50:04",
+   "side": "long",
+   "tail": 3.09,
+   "conf": 0.82,
+   "comp": 38.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T03:57:34",
+   "side": "long",
+   "tail": 8.48,
+   "conf": 0.78,
+   "comp": 36.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-09-23T04:06:33",
+   "side": "long",
+   "tail": 2.98,
+   "conf": 0.75,
+   "comp": 42.3,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.31M below floor $1.",
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:07:29",
+   "side": "long",
+   "tail": 3.87,
+   "conf": 0.75,
+   "comp": 35.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:16:28",
+   "side": "long",
+   "tail": 4.42,
+   "conf": 0.82,
+   "comp": 29.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T04:24:37",
+   "side": "long",
+   "tail": 2.89,
+   "conf": 0.78,
+   "comp": 44.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:26:54",
+   "side": "long",
+   "tail": 5.72,
+   "conf": 0.82,
+   "comp": 27.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-09-23T04:34:06",
+   "side": "long",
+   "tail": 3.08,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.33M below floor $1.",
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:45:05",
+   "side": "long",
+   "tail": 6.46,
+   "conf": 0.82,
+   "comp": 26.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T06:11:44",
+   "side": "long",
+   "tail": 8.8,
+   "conf": 0.75,
+   "comp": 31.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-09-23T06:20:05",
+   "side": "long",
+   "tail": 3.42,
+   "conf": 0.85,
+   "comp": 30.2,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "BCH",
+   "ts": "2026-09-23T06:41:37",
+   "side": "long",
+   "tail": 3.96,
+   "conf": 0.78,
+   "comp": 32.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kBONK",
+   "ts": "2026-09-23T06:50:24",
+   "side": "long",
+   "tail": 5.28,
+   "conf": 0.85,
+   "comp": 35.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kBONK",
+   "ts": "2026-09-23T08:12:57",
+   "side": "long",
+   "tail": 3.14,
+   "conf": 0.75,
+   "comp": 22.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-23T13:56:57",
+   "side": "long",
+   "tail": 2.65,
+   "conf": 0.82,
+   "comp": 40.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ACE",
+   "ts": "2026-09-23T14:21:55",
+   "side": "long",
+   "tail": 5.43,
+   "conf": 0.78,
+   "comp": 50.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.35M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-23T14:25:17",
+   "side": "long",
+   "tail": 2.86,
+   "conf": 0.82,
+   "comp": 33.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ACE",
+   "ts": "2026-09-23T14:37:00",
+   "side": "long",
+   "tail": 8.46,
+   "conf": 0.85,
+   "comp": 43.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T14:42:07",
+   "side": "long",
+   "tail": 2.91,
+   "conf": 0.82,
+   "comp": 30.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SPX",
+   "ts": "2026-09-23T15:43:02",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 26.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SPX",
+   "ts": "2026-09-23T15:56:55",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 29.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "TRUMP",
+   "ts": "2026-09-23T16:04:31",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "SPX",
+   "ts": "2026-09-23T16:37:26",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SPX",
+   "ts": "2026-09-23T16:49:29",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 38.2,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FOGO",
+   "ts": "2026-09-23T17:26:54",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.47M below floor $1.",
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:14:22",
+   "side": "long",
+   "tail": 4.34,
+   "conf": 0.75,
+   "comp": 7.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:25:20",
+   "side": "long",
+   "tail": 10.94,
+   "conf": 0.78,
+   "comp": 34.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:34:46",
+   "side": "long",
+   "tail": 13.92,
+   "conf": 0.78,
+   "comp": 56.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:37:33",
+   "side": "long",
+   "tail": 13.92,
+   "conf": 0.75,
+   "comp": 44.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:41:19",
+   "side": "long",
+   "tail": 9.13,
+   "conf": 0.85,
+   "comp": 34.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:43:26",
+   "side": "long",
+   "tail": 9.13,
+   "conf": 0.85,
+   "comp": 37.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T23:21:52",
+   "side": "long",
+   "tail": 12.85,
+   "conf": 0.78,
+   "comp": 45.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-24T00:09:37",
+   "side": "long",
+   "tail": 6.25,
+   "conf": 0.78,
+   "comp": 48.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-24T01:12:48",
+   "side": "long",
+   "tail": 10.5,
+   "conf": 0.78,
+   "comp": 35.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LTC",
+   "ts": "2026-09-24T02:47:16",
+   "side": "long",
+   "tail": 2.58,
+   "conf": 0.82,
+   "comp": 28.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-24T11:20:01",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-24T11:40:46",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MORPHO",
+   "ts": "2026-09-24T13:25:20",
+   "side": "long",
+   "tail": 6.35,
+   "conf": 0.82,
+   "comp": 34.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MORPHO",
+   "ts": "2026-09-24T14:13:27",
+   "side": "long",
+   "tail": 3.38,
+   "conf": 0.82,
+   "comp": 35.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ETC",
+   "ts": "2026-09-24T14:21:21",
+   "side": "long",
+   "tail": 4.69,
+   "conf": 0.75,
+   "comp": 42.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FET",
+   "ts": "2026-09-24T14:34:41",
+   "side": "long",
+   "tail": 4.02,
+   "conf": 0.82,
+   "comp": 63.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FET",
+   "ts": "2026-09-24T14:44:20",
+   "side": "long",
+   "tail": 3.62,
+   "conf": 0.75,
+   "comp": 39.6,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MORPHO",
+   "ts": "2026-09-24T15:00:10",
+   "side": "long",
+   "tail": 2.76,
+   "conf": 0.82,
+   "comp": 37.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "INJ",
+   "ts": "2026-09-24T15:35:23",
+   "side": "long",
+   "tail": 5.82,
+   "conf": 0.82,
+   "comp": 42.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "XPL",
+   "ts": "2026-09-24T16:05:32",
+   "side": "long",
+   "tail": 5.0,
+   "conf": 0.78,
+   "comp": 42.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "XAI",
+   "ts": "2026-09-24T17:45:19",
+   "side": "long",
+   "tail": 15.53,
+   "conf": 0.75,
+   "comp": 47.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.41M below floor $1.",
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DYM",
+   "ts": "2026-09-24T21:26:39",
+   "side": "long",
+   "tail": 3.91,
+   "conf": 0.85,
+   "comp": 41.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-24T23:20:53",
+   "side": "long",
+   "tail": 9.01,
+   "conf": 0.82,
+   "comp": 45.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.55M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T00:02:13",
+   "side": "long",
+   "tail": 14.18,
+   "conf": 0.82,
+   "comp": 55.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.61M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T00:15:33",
+   "side": "long",
+   "tail": 5.57,
+   "conf": 0.85,
+   "comp": 48.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DYM",
+   "ts": "2026-09-25T00:15:55",
+   "side": "long",
+   "tail": 2.91,
+   "conf": 0.78,
+   "comp": 35.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.71M below floor $1."
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T00:50:24",
+   "side": "long",
+   "tail": 28.58,
+   "conf": 0.82,
+   "comp": 56.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.82M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T01:11:24",
+   "side": "long",
+   "tail": 30.82,
+   "conf": 0.78,
+   "comp": 48.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.91M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T01:39:13",
+   "side": "long",
+   "tail": 16.74,
+   "conf": 0.85,
+   "comp": 46.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T02:07:21",
+   "side": "long",
+   "tail": 11.6,
+   "conf": 0.78,
+   "comp": 52.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.96M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T02:14:48",
+   "side": "long",
+   "tail": 15.16,
+   "conf": 0.75,
+   "comp": 41.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T02:22:40",
+   "side": "long",
+   "tail": 12.08,
+   "conf": 0.75,
+   "comp": 41.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AXS",
+   "ts": "2026-09-25T06:24:12",
+   "side": "long",
+   "tail": 3.35,
+   "conf": 0.78,
+   "comp": 34.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-25T11:19:45",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 32.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-25T13:09:16",
+   "side": "long",
+   "tail": 3.89,
+   "conf": 0.85,
+   "comp": 3.9,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-25T15:16:51",
+   "side": "long",
+   "tail": 3.28,
+   "conf": 0.82,
+   "comp": 15.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-25T20:53:08",
+   "side": "long",
+   "tail": 2.77,
+   "conf": 0.75,
+   "comp": 39.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-25T21:00:00",
+   "side": "long",
+   "tail": 2.85,
+   "conf": 0.78,
+   "comp": 35.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-25T21:15:02",
+   "side": "long",
+   "tail": 2.81,
+   "conf": 0.75,
+   "comp": 32.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AVNT",
+   "ts": "2026-09-26T04:02:55",
+   "side": "long",
+   "tail": 3.89,
+   "conf": 0.78,
+   "comp": 17.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.41M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AVNT",
+   "ts": "2026-09-26T04:40:21",
+   "side": "long",
+   "tail": 3.44,
+   "conf": 0.85,
+   "comp": 62.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-09-26T06:25:21",
+   "side": "long",
+   "tail": 10.43,
+   "conf": 0.82,
+   "comp": 39.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-09-26T07:30:54",
+   "side": "long",
+   "tail": 4.43,
+   "conf": 0.75,
+   "comp": 30.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "XPL",
+   "ts": "2026-09-26T08:44:29",
+   "side": "long",
+   "tail": 4.91,
+   "conf": 0.78,
+   "comp": 35.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-09-26T09:29:57",
+   "side": "long",
+   "tail": 6.6,
+   "conf": 0.78,
+   "comp": 44.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "TAO",
+   "ts": "2026-09-26T11:54:51",
+   "side": "long",
+   "tail": 3.6,
+   "conf": 0.85,
+   "comp": 57.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "KAS",
+   "ts": "2026-09-26T14:23:52",
+   "side": "long",
+   "tail": 3.4,
+   "conf": 0.82,
+   "comp": 54.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.64M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "KAS",
+   "ts": "2026-09-26T14:31:51",
+   "side": "long",
+   "tail": 3.47,
+   "conf": 0.85,
+   "comp": 55.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-26T15:29:09",
+   "side": "long",
+   "tail": 2.62,
+   "conf": 0.75,
+   "comp": 25.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-09-26T22:31:38",
+   "side": "long",
+   "tail": 2.92,
+   "conf": 0.78,
+   "comp": 30.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-27T00:31:04",
+   "side": "long",
+   "tail": 3.24,
+   "conf": 0.82,
+   "comp": 35.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PYTH",
+   "ts": "2026-09-27T00:31:25",
+   "side": "long",
+   "tail": 2.95,
+   "conf": 0.85,
+   "comp": 39.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T05:08:25",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 0.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.78M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PYTH",
+   "ts": "2026-09-27T05:30:01",
+   "side": "long",
+   "tail": 3.39,
+   "conf": 0.75,
+   "comp": 10.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T06:10:10",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 42.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.86M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "W",
+   "ts": "2026-09-27T06:27:28",
+   "side": "long",
+   "tail": 3.39,
+   "conf": 0.78,
+   "comp": 26.0,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T06:55:38",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 39.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T07:50:00",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUI",
+   "ts": "2026-09-27T09:10:26",
+   "side": "long",
+   "tail": 3.26,
+   "conf": 0.82,
+   "comp": 35.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRAM",
+   "ts": "2026-09-27T16:06:53",
+   "side": "long",
+   "tail": 2.63,
+   "conf": 0.78,
+   "comp": 35.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "trade notional $33.80 exceeds cap $33.33",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-27T16:08:35",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-27T16:12:35",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AZTEC",
+   "ts": "2026-09-27T17:24:30",
+   "side": "long",
+   "tail": 6.95,
+   "conf": 0.82,
+   "comp": 39.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.50M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AZTEC",
+   "ts": "2026-09-27T17:29:48",
+   "side": "long",
+   "tail": 8.08,
+   "conf": 0.85,
+   "comp": 38.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AZTEC",
+   "ts": "2026-09-27T17:33:42",
+   "side": "long",
+   "tail": 8.08,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.50M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-27T19:03:24",
+   "side": "long",
+   "tail": 2.93,
+   "conf": 0.75,
+   "comp": 24.9,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "JUP",
+   "ts": "2026-09-27T21:43:45",
+   "side": "long",
+   "tail": 3.31,
+   "conf": 0.78,
+   "comp": 32.5,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "JUP",
+   "ts": "2026-09-27T21:49:22",
+   "side": "long",
+   "tail": 3.39,
+   "conf": 0.82,
+   "comp": 35.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-27T21:55:31",
+   "side": "long",
+   "tail": 3.48,
+   "conf": 0.78,
+   "comp": 45.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PURR",
+   "ts": "2026-09-27T23:11:13",
+   "side": "long",
+   "tail": 4.04,
+   "conf": 0.82,
+   "comp": 38.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "ONDO",
+   "ts": "2026-09-27T23:51:49",
+   "side": "long",
+   "tail": 5.1,
+   "conf": 0.82,
+   "comp": 24.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-28T01:28:04",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-28T02:51:26",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 44.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-28T03:38:49",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-28T03:50:51",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 33.9,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-28T04:00:17",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 33.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-28T04:19:15",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-28T04:39:52",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-28T07:28:56",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-28T07:56:11",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.1,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "HBAR",
+   "ts": "2026-09-28T08:55:57",
+   "side": "long",
+   "tail": 12.29,
+   "conf": 0.85,
+   "comp": 47.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ONDO",
+   "ts": "2026-09-28T12:14:50",
+   "side": "long",
+   "tail": 3.25,
+   "conf": 0.75,
+   "comp": 32.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LINK",
+   "ts": "2026-09-28T12:19:29",
+   "side": "long",
+   "tail": 5.36,
+   "conf": 0.85,
+   "comp": 63.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "HBAR",
+   "ts": "2026-09-28T12:25:07",
+   "side": "long",
+   "tail": 8.2,
+   "conf": 0.85,
+   "comp": 43.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-28T16:28:15",
+   "side": "long",
+   "tail": 6.68,
+   "conf": 0.78,
+   "comp": 29.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-28T19:39:54",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 33.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "0G",
+   "ts": "2026-09-29T00:47:33",
+   "side": "long",
+   "tail": 4.82,
+   "conf": 0.82,
+   "comp": 42.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T04:26:38",
+   "side": "long",
+   "tail": 3.46,
+   "conf": 0.85,
+   "comp": 44.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T06:11:36",
+   "side": "long",
+   "tail": 3.92,
+   "conf": 0.85,
+   "comp": 55.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CELO",
+   "ts": "2026-09-29T10:54:29",
+   "side": "long",
+   "tail": 9.66,
+   "conf": 0.85,
+   "comp": 50.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AAVE",
+   "ts": "2026-09-29T11:34:15",
+   "side": "long",
+   "tail": 3.93,
+   "conf": 0.82,
+   "comp": 34.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-29T11:53:53",
+   "side": "long",
+   "tail": 10.23,
+   "conf": 0.82,
+   "comp": 29.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-29T12:00:42",
+   "side": "long",
+   "tail": 8.82,
+   "conf": 0.78,
+   "comp": 40.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-29T15:27:31",
+   "side": "long",
+   "tail": 3.11,
+   "conf": 0.82,
+   "comp": 38.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ETHFI",
+   "ts": "2026-09-29T15:35:52",
+   "side": "long",
+   "tail": 3.15,
+   "conf": 0.78,
+   "comp": 37.9,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "INIT",
+   "ts": "2026-09-29T16:34:43",
+   "side": "long",
+   "tail": 6.05,
+   "conf": 0.82,
+   "comp": 43.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.57M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-29T18:18:25",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 21.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T19:36:11",
+   "side": "long",
+   "tail": 5.84,
+   "conf": 0.82,
+   "comp": 37.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T20:58:41",
+   "side": "long",
+   "tail": 4.17,
+   "conf": 0.75,
+   "comp": 36.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T21:06:32",
+   "side": "long",
+   "tail": 4.63,
+   "conf": 0.78,
+   "comp": 42.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-29T23:39:45",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.95 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-29T23:40:05",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 48.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-29T23:45:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 44.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.06 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-29T23:45:53",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 40.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-29T23:51:24",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 31.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-29T23:56:43",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 35.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:08:39",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 36.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:08:57",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:12:07",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 43.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $33.90 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:12:27",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:16:06",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 50.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AZTEC",
+   "ts": "2026-09-30T00:16:22",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:16:56",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:26:25",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.03 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:30:31",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:34:47",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 44.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:35:47",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 31.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:39:17",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $35.13 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:44:06",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:50:26",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 36.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $35.23 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-30T01:00:33",
+   "side": "long",
+   "tail": 2.88,
+   "conf": 0.82,
+   "comp": 41.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:01:34",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 34.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $35.09 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:24:09",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.29 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "COMP",
+   "ts": "2026-09-30T01:24:22",
+   "side": "long",
+   "tail": 8.0,
+   "conf": 0.82,
+   "comp": 38.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.38M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:30:11",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 34.4,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.37 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:36:30",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 33.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.93 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:48:50",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 28.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $34.85 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:55:38",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 28.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-30T02:01:31",
+   "side": "long",
+   "tail": 2.82,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T04:17:06",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 19.8,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "0G",
+   "ts": "2026-09-30T05:25:30",
+   "side": "long",
+   "tail": 4.65,
+   "conf": 0.75,
+   "comp": 27.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-30T09:15:44",
+   "side": "long",
+   "tail": 4.63,
+   "conf": 0.82,
+   "comp": 53.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BLUR",
+   "ts": "2026-09-30T15:00:01",
+   "side": "long",
+   "tail": 3.24,
+   "conf": 0.75,
+   "comp": 11.4,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.31M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "REZ",
+   "ts": "2026-09-30T15:20:51",
+   "side": "long",
+   "tail": 3.35,
+   "conf": 0.85,
+   "comp": 22.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-30T15:33:32",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-30T15:41:20",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-09-30T17:06:15",
+   "side": "long",
+   "tail": 2.61,
+   "conf": 0.78,
+   "comp": 44.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.73M below floor $1."
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-09-30T22:27:24",
+   "side": "long",
+   "tail": 3.89,
+   "conf": 0.78,
+   "comp": 32.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MON",
+   "ts": "2026-09-30T23:47:02",
+   "side": "long",
+   "tail": 2.76,
+   "conf": 0.82,
+   "comp": 37.9,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MON",
+   "ts": "2026-10-01T00:24:09",
+   "side": "long",
+   "tail": 3.3,
+   "conf": 0.78,
+   "comp": 44.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-01T01:05:40",
+   "side": "long",
+   "tail": 3.63,
+   "conf": 0.85,
+   "comp": 38.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-01T01:43:52",
+   "side": "long",
+   "tail": 5.16,
+   "conf": 0.82,
+   "comp": 40.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-01T03:53:33",
+   "side": "long",
+   "tail": 3.02,
+   "conf": 0.85,
+   "comp": 35.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-10-01T04:04:23",
+   "side": "long",
+   "tail": 5.35,
+   "conf": 0.78,
+   "comp": 42.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.30M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MON",
+   "ts": "2026-10-01T05:11:59",
+   "side": "long",
+   "tail": 2.77,
+   "conf": 0.82,
+   "comp": 5.7,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "MOVE",
+   "ts": "2026-10-01T05:52:34",
+   "side": "long",
+   "tail": 2.85,
+   "conf": 0.82,
+   "comp": 46.2,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.32M below floor $1."
+   ]
+  },
+  {
+   "coin": "MON",
+   "ts": "2026-10-01T12:08:23",
+   "side": "long",
+   "tail": 2.71,
+   "conf": 0.75,
+   "comp": 24.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MEGA",
+   "ts": "2026-10-01T17:15:23",
+   "side": "long",
+   "tail": 2.79,
+   "conf": 0.82,
+   "comp": 43.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MEGA",
+   "ts": "2026-10-01T18:14:54",
+   "side": "long",
+   "tail": 3.01,
+   "conf": 0.75,
+   "comp": 43.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-01T23:22:05",
+   "side": "long",
+   "tail": 4.44,
+   "conf": 0.75,
+   "comp": 17.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.59M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-01T23:36:29",
+   "side": "long",
+   "tail": 3.58,
+   "conf": 0.82,
+   "comp": 25.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.59M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MEGA",
+   "ts": "2026-10-02T00:30:02",
+   "side": "long",
+   "tail": 5.51,
+   "conf": 0.82,
+   "comp": 43.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AAVE",
+   "ts": "2026-10-02T01:36:04",
+   "side": "long",
+   "tail": 3.06,
+   "conf": 0.82,
+   "comp": 45.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "trade notional $33.68 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FARTCOIN",
+   "ts": "2026-10-02T04:56:27",
+   "side": "long",
+   "tail": 3.94,
+   "conf": 0.75,
+   "comp": 35.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-10-02T05:12:07",
+   "side": "long",
+   "tail": 2.76,
+   "conf": 0.85,
+   "comp": 32.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T07:04:47",
+   "side": "long",
+   "tail": 5.71,
+   "conf": 0.85,
+   "comp": 76.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T07:10:04",
+   "side": "long",
+   "tail": 7.95,
+   "conf": 0.78,
+   "comp": 65.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.47M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T07:17:24",
+   "side": "long",
+   "tail": 11.49,
+   "conf": 0.85,
+   "comp": 43.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GALA",
+   "ts": "2026-10-02T08:31:38",
+   "side": "long",
+   "tail": 5.46,
+   "conf": 0.85,
+   "comp": 61.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T08:31:54",
+   "side": "long",
+   "tail": 12.26,
+   "conf": 0.85,
+   "comp": 65.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T11:52:18",
+   "side": "long",
+   "tail": 5.3,
+   "conf": 0.85,
+   "comp": 49.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "APE",
+   "ts": "2026-10-02T13:45:59",
+   "side": "long",
+   "tail": 6.43,
+   "conf": 0.78,
+   "comp": 44.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.82M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "APE",
+   "ts": "2026-10-02T14:36:04",
+   "side": "long",
+   "tail": 6.13,
+   "conf": 0.82,
+   "comp": 55.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T14:54:22",
+   "side": "long",
+   "tail": 5.14,
+   "conf": 0.75,
+   "comp": 32.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T15:23:12",
+   "side": "long",
+   "tail": 2.82,
+   "conf": 0.78,
+   "comp": 31.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-10-02T16:51:42",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 43.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-10-02T17:14:53",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-10-02T18:10:51",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-10-02T18:35:07",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T18:42:10",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 74.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZEC",
+   "ts": "2026-10-02T18:44:49",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 51.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "trade notional $38.76 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "USELESS",
+   "ts": "2026-10-02T20:10:38",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T20:17:19",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 36.3,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "USELESS",
+   "ts": "2026-10-02T20:21:53",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T20:29:18",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.0,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "USELESS",
+   "ts": "2026-10-02T20:33:38",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T20:40:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T20:49:30",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.1,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T21:12:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 36.9,
+   "executed": true,
+   "chronos_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "MINA",
+   "ts": "2026-10-03T01:16:04",
+   "side": "long",
+   "tail": 3.15,
+   "conf": 0.82,
+   "comp": 43.2,
+   "executed": false,
+   "chronos_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T03:00:43",
+   "side": "long",
+   "tail": 8.12,
+   "conf": 0.85,
+   "comp": 56.2,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T03:19:45",
+   "side": "long",
+   "tail": 7.17,
+   "conf": 0.82,
+   "comp": 39.9,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T03:23:42",
+   "side": "long",
+   "tail": 10.16,
+   "conf": 0.82,
+   "comp": 51.3,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:49:12",
+   "side": "long",
+   "tail": 15.64,
+   "conf": 0.75,
+   "comp": 61.5,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.65M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:51:54",
+   "side": "long",
+   "tail": 15.64,
+   "conf": 0.82,
+   "comp": 78.6,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.65M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:55:18",
+   "side": "long",
+   "tail": 15.29,
+   "conf": 0.75,
+   "comp": 46.8,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.65M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:57:24",
+   "side": "long",
+   "tail": 15.29,
+   "conf": 0.85,
+   "comp": 48.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "IMX",
+   "ts": "2026-10-03T06:24:30",
+   "side": "long",
+   "tail": 2.53,
+   "conf": 0.82,
+   "comp": 10.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.82M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-10-03T09:02:28",
+   "side": "long",
+   "tail": 7.21,
+   "conf": 0.82,
+   "comp": 64.1,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "USELESS",
+   "ts": "2026-10-03T10:38:37",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 29.7,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-10-03T10:45:36",
+   "side": "long",
+   "tail": 2.54,
+   "conf": 0.85,
+   "comp": 34.0,
+   "executed": false,
+   "chronos_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  }
+ ],
+ "chronos_blocks": [
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-03T15:06:32",
+   "side": "long",
+   "tail": 4.56,
+   "conf": 0.82,
+   "comp": 43.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.69M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T15:19:34",
+   "side": "long",
+   "tail": 5.01,
+   "conf": 0.82,
+   "comp": 62.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-03T16:33:51",
+   "side": "long",
+   "tail": 3.28,
+   "conf": 0.82,
+   "comp": 37.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.86M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-10-03T16:46:24",
+   "side": "long",
+   "tail": 4.68,
+   "conf": 0.85,
+   "comp": 42.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T16:55:31",
+   "side": "long",
+   "tail": 5.39,
+   "conf": 0.85,
+   "comp": 53.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T17:21:41",
+   "side": "long",
+   "tail": 8.04,
+   "conf": 0.82,
+   "comp": 65.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "STRK",
+   "ts": "2026-10-03T17:26:57",
+   "side": "long",
+   "tail": 6.95,
+   "conf": 0.82,
+   "comp": 43.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-10-03T18:45:15",
+   "side": "long",
+   "tail": 3.57,
+   "conf": 0.82,
+   "comp": 64.0,
+   "tirex_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-04T04:56:41",
+   "side": "long",
+   "tail": 5.13,
+   "conf": 0.82,
+   "comp": 53.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-04T05:00:43",
+   "side": "long",
+   "tail": 5.13,
+   "conf": 0.78,
+   "comp": 35.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-04T15:03:00",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 29.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "VIRTUAL",
+   "ts": "2026-10-04T17:06:58",
+   "side": "long",
+   "tail": 3.83,
+   "conf": 0.85,
+   "comp": 58.5,
+   "tirex_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "VIRTUAL",
+   "ts": "2026-10-04T17:09:41",
+   "side": "long",
+   "tail": 3.83,
+   "conf": 0.85,
+   "comp": 41.3,
+   "tirex_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-10-05T01:00:57",
+   "side": "long",
+   "tail": 3.33,
+   "conf": 0.78,
+   "comp": 34.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-10-05T03:05:04",
+   "side": "long",
+   "tail": 5.54,
+   "conf": 0.78,
+   "comp": 47.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "DOT",
+   "ts": "2026-09-17T16:04:46",
+   "side": "long",
+   "tail": 2.81,
+   "conf": 0.78,
+   "comp": 33.9,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-17T23:31:53",
+   "side": "long",
+   "tail": 2.71,
+   "conf": 0.85,
+   "comp": 33.9,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "ARB",
+   "ts": "2026-09-18T03:12:04",
+   "side": "long",
+   "tail": 7.9,
+   "conf": 0.82,
+   "comp": 56.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-18T03:30:02",
+   "side": "long",
+   "tail": 5.02,
+   "conf": 0.75,
+   "comp": 31.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DYDX",
+   "ts": "2026-09-18T09:54:04",
+   "side": "long",
+   "tail": 2.72,
+   "conf": 0.82,
+   "comp": 43.5,
+   "tirex_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.32M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-18T17:24:33",
+   "side": "long",
+   "tail": 22.85,
+   "conf": 0.85,
+   "comp": 44.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "APT",
+   "ts": "2026-09-19T00:22:38",
+   "side": "long",
+   "tail": 3.31,
+   "conf": 0.85,
+   "comp": 32.2,
+   "tirex_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "AAVE",
+   "ts": "2026-09-19T03:09:07",
+   "side": "long",
+   "tail": 2.91,
+   "conf": 0.82,
+   "comp": 36.2,
+   "tirex_trip": false,
+   "other_blockers": [
+    "trade notional $33.69 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-19T09:37:12",
+   "side": "long",
+   "tail": 5.66,
+   "conf": 0.78,
+   "comp": 5.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BERA",
+   "ts": "2026-09-19T16:56:28",
+   "side": "long",
+   "tail": 3.06,
+   "conf": 0.78,
+   "comp": 31.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.35M below floor $1."
+   ]
+  },
+  {
+   "coin": "BERA",
+   "ts": "2026-09-19T17:29:59",
+   "side": "long",
+   "tail": 4.07,
+   "conf": 0.85,
+   "comp": 53.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FIL",
+   "ts": "2026-09-19T20:26:29",
+   "side": "long",
+   "tail": 3.18,
+   "conf": 0.78,
+   "comp": 31.4,
+   "tirex_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T01:05:34",
+   "side": "long",
+   "tail": 3.52,
+   "conf": 0.75,
+   "comp": 36.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T01:13:30",
+   "side": "long",
+   "tail": 3.16,
+   "conf": 0.82,
+   "comp": 36.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T01:22:02",
+   "side": "long",
+   "tail": 2.6,
+   "conf": 0.85,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-20T02:06:38",
+   "side": "long",
+   "tail": 4.34,
+   "conf": 0.78,
+   "comp": 40.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T08:15:37",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T08:33:42",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 34.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:38:45",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:45:09",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 34.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:51:50",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:56:15",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T09:59:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.8,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:05:58",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 33.9,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:12:09",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:16:02",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:19:00",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:21:04",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:24:15",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:28:24",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:31:55",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T10:36:50",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "AVAX",
+   "ts": "2026-09-20T12:19:05",
+   "side": "long",
+   "tail": 4.31,
+   "conf": 0.85,
+   "comp": 32.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "VVV",
+   "ts": "2026-09-20T12:57:08",
+   "side": "long",
+   "tail": 2.76,
+   "conf": 0.78,
+   "comp": 27.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "VVV",
+   "ts": "2026-09-20T13:03:14",
+   "side": "long",
+   "tail": 2.58,
+   "conf": 0.78,
+   "comp": 26.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T14:58:30",
+   "side": "long",
+   "tail": 6.49,
+   "conf": 0.82,
+   "comp": 49.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.85M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T15:12:39",
+   "side": "long",
+   "tail": 11.7,
+   "conf": 0.75,
+   "comp": 39.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-20T15:36:14",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 27.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "AR",
+   "ts": "2026-09-20T17:07:32",
+   "side": "long",
+   "tail": 8.01,
+   "conf": 0.75,
+   "comp": 42.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T17:26:04",
+   "side": "long",
+   "tail": 7.55,
+   "conf": 0.82,
+   "comp": 45.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AR",
+   "ts": "2026-09-20T17:38:51",
+   "side": "long",
+   "tail": 7.35,
+   "conf": 0.85,
+   "comp": 52.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T17:53:37",
+   "side": "long",
+   "tail": 15.06,
+   "conf": 0.78,
+   "comp": 44.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-20T18:45:20",
+   "side": "long",
+   "tail": 4.74,
+   "conf": 0.85,
+   "comp": 33.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LDO",
+   "ts": "2026-09-21T00:52:42",
+   "side": "long",
+   "tail": 4.31,
+   "conf": 0.82,
+   "comp": 34.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-09-21T03:15:18",
+   "side": "long",
+   "tail": 7.12,
+   "conf": 0.78,
+   "comp": 28.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.38M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-09-21T04:02:16",
+   "side": "long",
+   "tail": 28.92,
+   "conf": 0.82,
+   "comp": 43.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.77M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-21T04:47:20",
+   "side": "long",
+   "tail": 2.85,
+   "conf": 0.78,
+   "comp": 26.7,
+   "tirex_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-09-21T06:54:46",
+   "side": "long",
+   "tail": 10.91,
+   "conf": 0.75,
+   "comp": 41.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-21T16:23:31",
+   "side": "long",
+   "tail": 12.73,
+   "conf": 0.75,
+   "comp": 32.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.49M below floor $1.",
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PENGU",
+   "ts": "2026-09-21T16:42:07",
+   "side": "long",
+   "tail": 2.55,
+   "conf": 0.78,
+   "comp": 38.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DOGE",
+   "ts": "2026-09-21T17:40:18",
+   "side": "long",
+   "tail": 3.12,
+   "conf": 0.72,
+   "comp": 23.9,
+   "tirex_trip": false,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "KAS",
+   "ts": "2026-09-21T19:58:45",
+   "side": "long",
+   "tail": 2.62,
+   "conf": 0.75,
+   "comp": 11.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.85M below floor $1.",
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-21T22:59:22",
+   "side": "long",
+   "tail": 2.6,
+   "conf": 0.75,
+   "comp": 13.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T00:53:18",
+   "side": "long",
+   "tail": 4.1,
+   "conf": 0.85,
+   "comp": 34.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:08:54",
+   "side": "long",
+   "tail": 4.17,
+   "conf": 0.74,
+   "comp": 34.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:22:47",
+   "side": "long",
+   "tail": 3.77,
+   "conf": 0.85,
+   "comp": 33.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:34:05",
+   "side": "long",
+   "tail": 3.35,
+   "conf": 0.78,
+   "comp": 32.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T01:47:13",
+   "side": "long",
+   "tail": 2.79,
+   "conf": 0.82,
+   "comp": 31.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kPEPE",
+   "ts": "2026-09-22T02:01:27",
+   "side": "long",
+   "tail": 3.51,
+   "conf": 0.75,
+   "comp": 32.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-22T03:02:28",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 29.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DOGE",
+   "ts": "2026-09-22T04:04:16",
+   "side": "long",
+   "tail": 5.09,
+   "conf": 0.75,
+   "comp": 10.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-22T04:13:18",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend"
+   ]
+  },
+  {
+   "coin": "SKR",
+   "ts": "2026-09-22T05:13:10",
+   "side": "long",
+   "tail": 5.98,
+   "conf": 0.75,
+   "comp": 40.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SKR",
+   "ts": "2026-09-22T05:27:27",
+   "side": "long",
+   "tail": 2.66,
+   "conf": 0.75,
+   "comp": 39.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T08:25:10",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.39M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T08:35:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.39M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T09:22:52",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 37.8,
+   "tirex_trip": false,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "SOPH",
+   "ts": "2026-09-22T09:34:20",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.6,
+   "tirex_trip": false,
+   "other_blockers": [
+    "market 24h volume $0.40M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-22T12:54:03",
+   "side": "long",
+   "tail": 3.49,
+   "conf": 0.82,
+   "comp": 39.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $33.68 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BCH",
+   "ts": "2026-09-22T13:03:09",
+   "side": "long",
+   "tail": 10.81,
+   "conf": 0.85,
+   "comp": 44.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GOAT",
+   "ts": "2026-09-22T13:20:52",
+   "side": "long",
+   "tail": 3.87,
+   "conf": 0.82,
+   "comp": 35.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.52M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MINA",
+   "ts": "2026-09-22T15:07:02",
+   "side": "long",
+   "tail": 6.25,
+   "conf": 0.85,
+   "comp": 42.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MINA",
+   "ts": "2026-09-22T16:03:39",
+   "side": "long",
+   "tail": 6.32,
+   "conf": 0.82,
+   "comp": 49.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-22T16:19:44",
+   "side": "long",
+   "tail": 6.86,
+   "conf": 0.82,
+   "comp": 53.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-09-22T16:32:15",
+   "side": "long",
+   "tail": 7.74,
+   "conf": 0.85,
+   "comp": 35.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-22T17:06:48",
+   "side": "long",
+   "tail": 3.87,
+   "conf": 0.82,
+   "comp": 47.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GOAT",
+   "ts": "2026-09-22T18:44:50",
+   "side": "long",
+   "tail": 4.93,
+   "conf": 0.82,
+   "comp": 36.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.74M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "TIA",
+   "ts": "2026-09-22T19:31:39",
+   "side": "long",
+   "tail": 4.31,
+   "conf": 0.78,
+   "comp": 55.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PENGU",
+   "ts": "2026-09-22T20:03:16",
+   "side": "long",
+   "tail": 3.47,
+   "conf": 0.78,
+   "comp": 42.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-22T22:24:37",
+   "side": "long",
+   "tail": 5.45,
+   "conf": 0.82,
+   "comp": 32.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $33.74 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "UNI",
+   "ts": "2026-09-23T01:16:03",
+   "side": "long",
+   "tail": 2.93,
+   "conf": 0.75,
+   "comp": 43.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "BSV",
+   "ts": "2026-09-23T01:25:08",
+   "side": "long",
+   "tail": 9.11,
+   "conf": 0.75,
+   "comp": 48.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PENGU",
+   "ts": "2026-09-23T03:42:20",
+   "side": "long",
+   "tail": 2.76,
+   "conf": 0.78,
+   "comp": 28.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T03:50:04",
+   "side": "long",
+   "tail": 3.71,
+   "conf": 0.82,
+   "comp": 38.5,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T03:57:34",
+   "side": "long",
+   "tail": 5.68,
+   "conf": 0.78,
+   "comp": 36.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:07:29",
+   "side": "long",
+   "tail": 3.23,
+   "conf": 0.75,
+   "comp": 35.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:16:28",
+   "side": "long",
+   "tail": 2.97,
+   "conf": 0.82,
+   "comp": 29.5,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T04:24:37",
+   "side": "long",
+   "tail": 2.69,
+   "conf": 0.78,
+   "comp": 44.6,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:26:54",
+   "side": "long",
+   "tail": 3.54,
+   "conf": 0.82,
+   "comp": 27.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T04:45:05",
+   "side": "long",
+   "tail": 2.89,
+   "conf": 0.82,
+   "comp": 26.8,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T06:11:44",
+   "side": "long",
+   "tail": 11.45,
+   "conf": 0.75,
+   "comp": 31.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "with-crowd long into LONG_CROWDED",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "BCH",
+   "ts": "2026-09-23T06:41:37",
+   "side": "long",
+   "tail": 4.09,
+   "conf": 0.78,
+   "comp": 32.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "kBONK",
+   "ts": "2026-09-23T06:50:24",
+   "side": "long",
+   "tail": 4.95,
+   "conf": 0.85,
+   "comp": 35.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-23T13:56:57",
+   "side": "long",
+   "tail": 3.11,
+   "conf": 0.82,
+   "comp": 40.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ACE",
+   "ts": "2026-09-23T14:21:55",
+   "side": "long",
+   "tail": 3.92,
+   "conf": 0.78,
+   "comp": 50.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.35M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-23T14:25:17",
+   "side": "long",
+   "tail": 2.51,
+   "conf": 0.82,
+   "comp": 33.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ACE",
+   "ts": "2026-09-23T14:37:00",
+   "side": "long",
+   "tail": 4.88,
+   "conf": 0.85,
+   "comp": 43.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T14:42:07",
+   "side": "long",
+   "tail": 2.76,
+   "conf": 0.82,
+   "comp": 30.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MET",
+   "ts": "2026-09-23T14:54:45",
+   "side": "long",
+   "tail": 2.61,
+   "conf": 0.75,
+   "comp": 30.0,
+   "tirex_trip": false,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:14:22",
+   "side": "long",
+   "tail": 4.57,
+   "conf": 0.75,
+   "comp": 7.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:25:20",
+   "side": "long",
+   "tail": 8.02,
+   "conf": 0.78,
+   "comp": 34.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:34:46",
+   "side": "long",
+   "tail": 6.8,
+   "conf": 0.78,
+   "comp": 56.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:37:33",
+   "side": "long",
+   "tail": 6.8,
+   "conf": 0.75,
+   "comp": 44.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:41:19",
+   "side": "long",
+   "tail": 8.83,
+   "conf": 0.85,
+   "comp": 34.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T22:43:26",
+   "side": "long",
+   "tail": 8.83,
+   "conf": 0.85,
+   "comp": 37.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-23T23:21:52",
+   "side": "long",
+   "tail": 8.88,
+   "conf": 0.78,
+   "comp": 45.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-24T00:09:37",
+   "side": "long",
+   "tail": 4.92,
+   "conf": 0.78,
+   "comp": 48.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-24T01:12:48",
+   "side": "long",
+   "tail": 15.38,
+   "conf": 0.78,
+   "comp": 35.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LTC",
+   "ts": "2026-09-24T02:47:16",
+   "side": "long",
+   "tail": 3.1,
+   "conf": 0.82,
+   "comp": 28.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MORPHO",
+   "ts": "2026-09-24T13:25:20",
+   "side": "long",
+   "tail": 6.01,
+   "conf": 0.82,
+   "comp": 34.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MORPHO",
+   "ts": "2026-09-24T14:13:27",
+   "side": "long",
+   "tail": 4.06,
+   "conf": 0.82,
+   "comp": 35.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ETC",
+   "ts": "2026-09-24T14:21:21",
+   "side": "long",
+   "tail": 4.78,
+   "conf": 0.75,
+   "comp": 42.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FET",
+   "ts": "2026-09-24T14:34:41",
+   "side": "long",
+   "tail": 2.59,
+   "conf": 0.82,
+   "comp": 63.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MORPHO",
+   "ts": "2026-09-24T15:00:10",
+   "side": "long",
+   "tail": 3.16,
+   "conf": 0.82,
+   "comp": 37.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "INJ",
+   "ts": "2026-09-24T15:35:23",
+   "side": "long",
+   "tail": 5.28,
+   "conf": 0.82,
+   "comp": 42.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "XPL",
+   "ts": "2026-09-24T16:05:32",
+   "side": "long",
+   "tail": 5.49,
+   "conf": 0.78,
+   "comp": 42.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "XAI",
+   "ts": "2026-09-24T17:45:19",
+   "side": "long",
+   "tail": 16.75,
+   "conf": 0.75,
+   "comp": 47.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.41M below floor $1.",
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DYM",
+   "ts": "2026-09-24T21:26:39",
+   "side": "long",
+   "tail": 3.94,
+   "conf": 0.85,
+   "comp": 41.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-24T23:20:53",
+   "side": "long",
+   "tail": 6.86,
+   "conf": 0.82,
+   "comp": 45.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.55M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T00:02:13",
+   "side": "long",
+   "tail": 17.44,
+   "conf": 0.82,
+   "comp": 55.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.61M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T00:15:33",
+   "side": "long",
+   "tail": 4.95,
+   "conf": 0.85,
+   "comp": 48.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "DYM",
+   "ts": "2026-09-25T00:15:55",
+   "side": "long",
+   "tail": 3.56,
+   "conf": 0.78,
+   "comp": 35.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.71M below floor $1."
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T00:50:24",
+   "side": "long",
+   "tail": 28.61,
+   "conf": 0.82,
+   "comp": 56.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.82M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T01:11:24",
+   "side": "long",
+   "tail": 23.48,
+   "conf": 0.78,
+   "comp": 48.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.91M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T01:39:13",
+   "side": "long",
+   "tail": 11.28,
+   "conf": 0.85,
+   "comp": 46.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T02:07:21",
+   "side": "long",
+   "tail": 10.55,
+   "conf": 0.78,
+   "comp": 52.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.96M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T02:14:48",
+   "side": "long",
+   "tail": 23.34,
+   "conf": 0.75,
+   "comp": 41.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-25T02:22:40",
+   "side": "long",
+   "tail": 16.85,
+   "conf": 0.75,
+   "comp": 41.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AXS",
+   "ts": "2026-09-25T06:24:12",
+   "side": "long",
+   "tail": 3.23,
+   "conf": 0.78,
+   "comp": 34.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-25T11:19:45",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 32.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-25T15:16:51",
+   "side": "long",
+   "tail": 3.1,
+   "conf": 0.82,
+   "comp": 15.0,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "AERO",
+   "ts": "2026-09-26T02:29:31",
+   "side": "long",
+   "tail": 3.7,
+   "conf": 0.75,
+   "comp": 42.9,
+   "tirex_trip": false,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AVNT",
+   "ts": "2026-09-26T04:40:21",
+   "side": "long",
+   "tail": 3.35,
+   "conf": 0.85,
+   "comp": 62.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-09-26T06:25:21",
+   "side": "long",
+   "tail": 8.57,
+   "conf": 0.82,
+   "comp": 39.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-09-26T07:30:54",
+   "side": "long",
+   "tail": 3.46,
+   "conf": 0.75,
+   "comp": 30.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "XPL",
+   "ts": "2026-09-26T08:44:29",
+   "side": "long",
+   "tail": 4.35,
+   "conf": 0.78,
+   "comp": 35.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-09-26T09:29:57",
+   "side": "long",
+   "tail": 9.64,
+   "conf": 0.78,
+   "comp": 44.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "TAO",
+   "ts": "2026-09-26T11:54:51",
+   "side": "long",
+   "tail": 3.22,
+   "conf": 0.85,
+   "comp": 57.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "KAS",
+   "ts": "2026-09-26T14:23:52",
+   "side": "long",
+   "tail": 3.47,
+   "conf": 0.82,
+   "comp": 54.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.64M below floor $1.",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "KAS",
+   "ts": "2026-09-26T14:31:51",
+   "side": "long",
+   "tail": 3.39,
+   "conf": 0.85,
+   "comp": 55.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-27T00:31:04",
+   "side": "long",
+   "tail": 3.49,
+   "conf": 0.82,
+   "comp": 35.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T05:08:25",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 0.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.78M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T06:10:10",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 42.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.86M below floor $1.",
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T06:55:38",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 39.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAGA",
+   "ts": "2026-09-27T07:50:00",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "WLD",
+   "ts": "2026-09-27T11:36:16",
+   "side": "long",
+   "tail": 3.05,
+   "conf": 0.86,
+   "comp": 52.0,
+   "tirex_trip": false,
+   "other_blockers": []
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-27T21:55:31",
+   "side": "long",
+   "tail": 3.14,
+   "conf": 0.78,
+   "comp": 45.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PURR",
+   "ts": "2026-09-27T23:11:13",
+   "side": "long",
+   "tail": 3.05,
+   "conf": 0.82,
+   "comp": 38.3,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "ONDO",
+   "ts": "2026-09-27T23:51:49",
+   "side": "long",
+   "tail": 4.81,
+   "conf": 0.82,
+   "comp": 24.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-28T01:28:04",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-28T02:51:26",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 44.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-28T03:38:49",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-28T04:19:15",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger",
+    "quiet_tape[btc]"
+   ]
+  },
+  {
+   "coin": "NIL",
+   "ts": "2026-09-28T07:28:56",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "HBAR",
+   "ts": "2026-09-28T08:55:57",
+   "side": "long",
+   "tail": 10.2,
+   "conf": 0.85,
+   "comp": 47.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ONDO",
+   "ts": "2026-09-28T12:14:50",
+   "side": "long",
+   "tail": 3.94,
+   "conf": 0.75,
+   "comp": 32.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LINK",
+   "ts": "2026-09-28T12:19:29",
+   "side": "long",
+   "tail": 4.58,
+   "conf": 0.85,
+   "comp": 63.2,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "HBAR",
+   "ts": "2026-09-28T12:25:07",
+   "side": "long",
+   "tail": 4.06,
+   "conf": 0.85,
+   "comp": 43.4,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-28T16:28:15",
+   "side": "long",
+   "tail": 6.84,
+   "conf": 0.78,
+   "comp": 29.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "NEAR",
+   "ts": "2026-09-28T19:39:54",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 33.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T06:11:36",
+   "side": "long",
+   "tail": 4.42,
+   "conf": 0.85,
+   "comp": 55.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CELO",
+   "ts": "2026-09-29T10:54:29",
+   "side": "long",
+   "tail": 7.96,
+   "conf": 0.85,
+   "comp": 50.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "AAVE",
+   "ts": "2026-09-29T11:34:15",
+   "side": "long",
+   "tail": 3.55,
+   "conf": 0.82,
+   "comp": 34.4,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-29T11:53:53",
+   "side": "long",
+   "tail": 9.21,
+   "conf": 0.82,
+   "comp": 29.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PUMP",
+   "ts": "2026-09-29T12:00:42",
+   "side": "long",
+   "tail": 6.72,
+   "conf": 0.78,
+   "comp": 40.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "INIT",
+   "ts": "2026-09-29T16:34:43",
+   "side": "long",
+   "tail": 4.66,
+   "conf": 0.82,
+   "comp": 43.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.57M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "CASHCAT",
+   "ts": "2026-09-29T18:18:25",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 21.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T19:36:11",
+   "side": "long",
+   "tail": 6.5,
+   "conf": 0.82,
+   "comp": 37.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T20:58:41",
+   "side": "long",
+   "tail": 5.09,
+   "conf": 0.75,
+   "comp": 36.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GRASS",
+   "ts": "2026-09-29T21:06:32",
+   "side": "long",
+   "tail": 5.21,
+   "conf": 0.78,
+   "comp": 42.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-29T23:39:45",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 29.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.95 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-29T23:40:05",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 48.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-29T23:45:36",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 44.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.06 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-29T23:45:53",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 40.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-29T23:51:24",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 31.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-29T23:56:43",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 35.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:08:39",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 36.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:08:57",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:12:07",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 43.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $33.90 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:12:27",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:16:06",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 50.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:16:56",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:26:25",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.03 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:30:31",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 31.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:34:47",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 44.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-09-30T00:35:47",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 31.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:39:17",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $35.13 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:44:06",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T00:50:26",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 36.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $35.23 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:01:34",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 34.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $35.09 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:24:09",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 34.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.29 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "COMP",
+   "ts": "2026-09-30T01:24:22",
+   "side": "long",
+   "tail": 4.8,
+   "conf": 0.82,
+   "comp": 38.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.38M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:30:11",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 34.4,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.37 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:36:30",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 33.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.93 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "LIT",
+   "ts": "2026-09-30T01:48:50",
+   "side": "short",
+   "tail": null,
+   "conf": 0.82,
+   "comp": 28.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $34.85 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "0G",
+   "ts": "2026-09-30T05:25:30",
+   "side": "long",
+   "tail": 3.92,
+   "conf": 0.75,
+   "comp": 27.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ENA",
+   "ts": "2026-09-30T09:15:44",
+   "side": "long",
+   "tail": 3.1,
+   "conf": 0.82,
+   "comp": 53.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "counter-regime long vs down trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "REZ",
+   "ts": "2026-09-30T15:20:51",
+   "side": "long",
+   "tail": 3.98,
+   "conf": 0.85,
+   "comp": 22.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-09-30T17:06:15",
+   "side": "long",
+   "tail": 3.33,
+   "conf": 0.78,
+   "comp": 44.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.73M below floor $1."
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-09-30T22:27:24",
+   "side": "long",
+   "tail": 3.86,
+   "conf": 0.78,
+   "comp": 32.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-01T01:05:40",
+   "side": "long",
+   "tail": 3.22,
+   "conf": 0.85,
+   "comp": 38.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "STX",
+   "ts": "2026-10-01T03:53:33",
+   "side": "long",
+   "tail": 3.23,
+   "conf": 0.85,
+   "comp": 35.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZETA",
+   "ts": "2026-10-01T04:04:23",
+   "side": "long",
+   "tail": 4.65,
+   "conf": 0.78,
+   "comp": 42.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.30M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MON",
+   "ts": "2026-10-01T12:08:23",
+   "side": "long",
+   "tail": 3.15,
+   "conf": 0.75,
+   "comp": 24.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MEGA",
+   "ts": "2026-10-01T17:15:23",
+   "side": "long",
+   "tail": 3.86,
+   "conf": 0.82,
+   "comp": 43.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MEGA",
+   "ts": "2026-10-01T18:14:54",
+   "side": "long",
+   "tail": 4.08,
+   "conf": 0.75,
+   "comp": 43.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-01T23:22:05",
+   "side": "long",
+   "tail": 4.65,
+   "conf": 0.75,
+   "comp": 17.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.59M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SUPER",
+   "ts": "2026-10-01T23:36:29",
+   "side": "long",
+   "tail": 3.9,
+   "conf": 0.82,
+   "comp": 25.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.59M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "MEGA",
+   "ts": "2026-10-02T00:30:02",
+   "side": "long",
+   "tail": 5.66,
+   "conf": 0.82,
+   "comp": 43.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "FARTCOIN",
+   "ts": "2026-10-02T04:56:27",
+   "side": "long",
+   "tail": 4.07,
+   "conf": 0.75,
+   "comp": 35.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T07:04:47",
+   "side": "long",
+   "tail": 6.65,
+   "conf": 0.85,
+   "comp": 76.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T07:10:04",
+   "side": "long",
+   "tail": 7.69,
+   "conf": 0.78,
+   "comp": 65.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.47M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "GALA",
+   "ts": "2026-10-02T08:31:38",
+   "side": "long",
+   "tail": 4.24,
+   "conf": 0.85,
+   "comp": 61.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T08:31:54",
+   "side": "long",
+   "tail": 5.94,
+   "conf": 0.85,
+   "comp": 65.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T11:52:18",
+   "side": "long",
+   "tail": 4.77,
+   "conf": 0.85,
+   "comp": 49.2,
+   "tirex_trip": true,
+   "other_blockers": []
+  },
+  {
+   "coin": "APE",
+   "ts": "2026-10-02T13:45:59",
+   "side": "long",
+   "tail": 5.94,
+   "conf": 0.78,
+   "comp": 44.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.82M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "APE",
+   "ts": "2026-10-02T14:36:04",
+   "side": "long",
+   "tail": 5.33,
+   "conf": 0.82,
+   "comp": 55.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-02T14:54:22",
+   "side": "long",
+   "tail": 3.32,
+   "conf": 0.75,
+   "comp": 32.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-10-02T16:51:42",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 43.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "2Z",
+   "ts": "2026-10-02T17:14:53",
+   "side": "short",
+   "tail": null,
+   "conf": 0.75,
+   "comp": 37.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "counter-regime short vs up trend",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "PONS",
+   "ts": "2026-10-02T18:42:10",
+   "side": "short",
+   "tail": null,
+   "conf": 0.85,
+   "comp": 74.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZEC",
+   "ts": "2026-10-02T18:44:49",
+   "side": "short",
+   "tail": null,
+   "conf": 0.78,
+   "comp": 51.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "trade notional $38.76 exceeds cap $33.33",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T03:00:43",
+   "side": "long",
+   "tail": 10.76,
+   "conf": 0.85,
+   "comp": 56.2,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T03:19:45",
+   "side": "long",
+   "tail": 8.52,
+   "conf": 0.82,
+   "comp": 39.9,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "SAND",
+   "ts": "2026-10-03T03:23:42",
+   "side": "long",
+   "tail": 12.73,
+   "conf": 0.82,
+   "comp": 51.3,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:49:12",
+   "side": "long",
+   "tail": 12.9,
+   "conf": 0.75,
+   "comp": 61.5,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.65M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:51:54",
+   "side": "long",
+   "tail": 12.9,
+   "conf": 0.82,
+   "comp": 78.6,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.65M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:55:18",
+   "side": "long",
+   "tail": 12.53,
+   "conf": 0.75,
+   "comp": 46.8,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.65M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "RESOLV",
+   "ts": "2026-10-03T05:57:24",
+   "side": "long",
+   "tail": 12.53,
+   "conf": 0.85,
+   "comp": 48.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "IMX",
+   "ts": "2026-10-03T06:24:30",
+   "side": "long",
+   "tail": 3.45,
+   "conf": 0.82,
+   "comp": 10.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "market 24h volume $0.82M below floor $1.",
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-10-03T09:02:28",
+   "side": "long",
+   "tail": 6.46,
+   "conf": 0.82,
+   "comp": 64.1,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  },
+  {
+   "coin": "USELESS",
+   "ts": "2026-10-03T10:38:37",
+   "side": "short",
+   "tail": null,
+   "conf": 0.72,
+   "comp": 29.7,
+   "tirex_trip": true,
+   "other_blockers": [
+    "short on thin market"
+   ]
+  },
+  {
+   "coin": "ZRO",
+   "ts": "2026-10-03T10:45:36",
+   "side": "long",
+   "tail": 3.0,
+   "conf": 0.85,
+   "comp": 34.0,
+   "tirex_trip": true,
+   "other_blockers": [
+    "timesfm_tail_trigger"
+   ]
+  }
+ ]
+}
