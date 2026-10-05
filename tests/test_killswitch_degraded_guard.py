@@ -136,3 +136,69 @@ def test_missing_failed_dexes_key_is_tolerated():
          "asset_positions": [], "queried_dexes": {"", "xyz"}},
         held_coins=set(), logger=logger, mem=mem)
     assert equity == 954.46 and mem.tracked == [954.46]
+
+
+# ── _run_hard_killswitch wiring (flatten + halt arming) ─────────────────────
+
+class _HaltMemory:
+    def __init__(self):
+        self.halt_until = 0
+        self.suspect = False
+
+    def last_read_suspect(self):
+        return self.suspect
+
+    def arm_daily_halt(self, minutes, utc_day=""):
+        import time as _t
+        self.halt_until = int(_t.time() * 1000 + minutes * 60_000)
+
+    def daily_halt_remaining_min(self):
+        import time as _t
+        return max(0.0, (self.halt_until - _t.time() * 1000) / 60_000)
+
+
+def _run_killswitch(cfg, equity, positions, daily_pnl, mem, closed):
+    ns = {
+        "logger": _Logger(),
+        "memory": mem,
+        "close_position_market": lambda coin, reason: closed.append((coin, reason)) or {"ok": True},
+        "log_event": lambda e: ns.setdefault("_events", []).append(e),
+    }
+    exec(compile(_extract("_run_hard_killswitch"), "<loop>", "exec"), ns)
+    ns["_run_hard_killswitch"](cfg, equity, positions, daily_pnl)
+    return ns.get("_events", [])
+
+
+def test_hard_killswitch_flattens_and_arms_halt():
+    """A CLEAN deep breach -> flatten every position AND arm the halt timer
+    (the 2026-10-03 gap: the kill flattened but nothing blocked re-entry,
+    and PUMP opened 2 minutes later)."""
+    import time
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0,
+           "daily_kill_min_usd": 8, "daily_loss_halt": {"halt_min": 360}}
+    mem = _HaltMemory()
+    closed = []
+    events = _run_killswitch(cfg, 954.0,
+                             [{"position": {"coin": "MON"}},
+                              {"position": {"coin": "PUMP"}}],
+                             -30.0, mem, closed)
+    assert closed == [("MON", "killswitch_daily_loss"),
+                      ("PUMP", "killswitch_daily_loss")]
+    assert mem.daily_halt_remaining_min() > 350, "halt timer must be armed"
+    assert events and events[0]["event"] == "hard_killswitch"
+    assert events[0]["halt_armed_min"] == 360.0
+
+
+def test_hard_killswitch_suspect_read_flattens_nothing_arms_nothing():
+    """The full 2026-10-03 replay through the wiring: memory flagged the last
+    read suspect -> no flatten, no halt armed, no hard_killswitch event."""
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0,
+           "daily_kill_min_usd": 8, "daily_loss_halt": {"halt_min": 360}}
+    mem = _HaltMemory()
+    mem.suspect = True
+    closed = []
+    events = _run_killswitch(cfg, 6.19, [{"position": {"coin": "MON"}}],
+                             -948.16, mem, closed)
+    assert closed == []
+    assert mem.daily_halt_remaining_min() == 0.0
+    assert events == []
