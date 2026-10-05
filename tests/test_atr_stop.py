@@ -144,8 +144,8 @@ def test_loss_cooldown_blocks_reentry(monkeypatch):
 
 
 def test_degraded_read_filter_protects_daily_pnl(monkeypatch):
-    """A >25% equity spike within 180s must be IGNORED (partial-dex read);
-    the same value re-asserted after 180s must be ACCEPTED (real move)."""
+    """A >25% equity spike must be IGNORED (partial-dex read); the same value
+    re-asserted for >=180s must be ACCEPTED (real move)."""
     from hermes_trader.agents.memory import AgentMemory
     m = AgentMemory()
     monkeypatch.setattr(m, "flush", lambda: None)
@@ -155,9 +155,51 @@ def test_degraded_read_filter_protects_daily_pnl(monkeypatch):
     assert round(m.get_daily_pnl(), 2) == -1.0
     m.track_daily_pnl(59.7)           # phantom: -40% in seconds -> ignored
     assert round(m.get_daily_pnl(), 2) == -1.0  # unchanged, kill-switch safe
-    m._last_eq_reading_ts -= 200      # pretend 200s passed -> now plausible
+    m._suspect_first_ts -= 200        # pretend 200s of re-assertion passed
     m.track_daily_pnl(59.7)           # sustained -> accepted
     assert round(m.get_daily_pnl(), 2) == -40.3
+
+
+def test_stale_prev_reading_does_not_bypass_plausibility_filter(monkeypatch):
+    """2026-10-03 incident replay (regression): the OLD filter skipped the 25%
+    check when the last ACCEPTED reading was >180s old — a 429 storm's failed
+    fetches left the timestamp stale, so a partial-dex $6.19 read vs the true
+    $954 was accepted unconditionally and phantom -$948 daily PnL fired the
+    hard killswitch. The filter must now compare against the last accepted
+    reading NO MATTER how stale."""
+    from hermes_trader.agents.memory import AgentMemory
+    m = AgentMemory()
+    monkeypatch.setattr(m, "flush", lambda: None)
+    m._initialized = True
+    m.track_daily_pnl(954.33)         # baseline: SOD=954.33
+    m.track_daily_pnl(954.00)         # normal tick: dailyPnl=-0.33
+    m._last_eq_reading_ts -= 300      # 429 storm: fetches failed, ts stale
+    m.track_daily_pnl(6.19)           # partial-dex read -> MUST be ignored
+    assert round(m.get_daily_pnl(), 2) == -0.33, \
+        "stale-gap degraded read poisoned daily PnL (the 2026-10-03 phantom)"
+    assert m.last_read_suspect() is True
+    # the genuine recovery read is accepted immediately (matches prev accepted)
+    m.track_daily_pnl(954.92)
+    assert round(m.get_daily_pnl(), 2) == 0.59
+    assert m.last_read_suspect() is False
+
+
+def test_genuine_crash_sustained_over_180s_is_accepted(monkeypatch):
+    """Real crash detection keeps working: the same divergent reading
+    re-asserted for >=180s is accepted (delay <=3min, same as the old design)."""
+    from hermes_trader.agents.memory import AgentMemory
+    m = AgentMemory()
+    monkeypatch.setattr(m, "flush", lambda: None)
+    m._initialized = True
+    m.track_daily_pnl(954.0)          # baseline
+    m.track_daily_pnl(600.0)          # crash tick 1 -> ignored, suspect armed
+    assert m.get_daily_pnl() == 0.0
+    m._suspect_first_ts -= 100        # crash tick 2 at t+100s -> still ignored
+    m.track_daily_pnl(605.0)
+    assert m.get_daily_pnl() == 0.0
+    m._suspect_first_ts -= 100        # crash tick 3 at t+200s -> sustained, accept
+    m.track_daily_pnl(602.0)
+    assert round(m.get_daily_pnl(), 2) == -352.0
 
 
 def test_breakout_force_execute_upgrades_pass(monkeypatch):

@@ -263,8 +263,16 @@ def test_mid_day_restart_after_deposit_does_not_invent_a_loss(monkeypatch):
 
     # (3) Money arriving AFTER the baseline stamp is contribution-neutral:
     # a +$20 deposit moves equity, not PnL (old code: 50-34.70-41.77 = -26.47).
-    m._last_eq_reading_ts -= 200  # the jump must look sustained, not a degraded read
-    m.track_daily_pnl(50.00, net_contributions=41.77)
+    # The +66% jump trips the plausibility filter on its first tick (a jump
+    # this size is indistinguishable from a partial-dex read); it is accepted
+    # once sustained (same reading re-asserted >=180s — 2026-10-03 filter
+    # redesign: staleness of the PREVIOUS read no longer bypasses the check).
+    m.track_daily_pnl(50.00, net_contributions=41.77)   # first tick: ignored
+    assert m.last_read_suspect() is True
+    assert abs(m.get_daily_pnl() - (-4.70)) < 0.02       # unchanged by the jump
+    m._suspect_first_ts -= 200  # pretend the 50.00 re-asserted for 200s
+    m.track_daily_pnl(50.00, net_contributions=41.77)   # sustained -> accepted
+    assert m.last_read_suspect() is False
     assert abs(m.get_daily_pnl() - (50.00 - 34.70 - 20.0)) < 0.01
 
 
