@@ -530,21 +530,29 @@ def _sync_account_state():
     queried_dexes = state.get("queried_dexes") or {""}
 
     # PARTIAL-DEX degraded-read guard: a 'successful' fetch where equity>0 (main
-    # dex fine) but a HIP-3 dex we HOLD a position on failed to respond drops that
-    # dex's equity from the aggregate — e.g. on 2026-06-03 a missing xyz dex made
-    # equity read $56.65 instead of $187.42 (a phantom -$128/-69%). The equity<=0
-    # guard above can't catch it (main was funded). Left unguarded it poisons
+    # dex fine) but a HIP-3 dex FAILED to respond drops that dex's equity from
+    # the aggregate — e.g. on 2026-06-03 a missing xyz dex made equity read
+    # $56.65 instead of $187.42 (a phantom -$128/-69%). The equity<=0 guard
+    # above can't catch it (main was funded). Left unguarded it poisons
     # memory equity/dailyPnl AND can FALSE-TRIP the daily-loss kill switch.
-    # Detect it: if any dex backing an open DSL tracker isn't in queried_dexes,
-    # the aggregate is incomplete → preserve last-known-good (skip memory update,
-    # queried_dexes=set() keeps trackers), same as the equity<=0 path.
+    # Detect it two ways: (a) any dex backing an open DSL tracker isn't in
+    # queried_dexes, or (b) ANY dex query failed at all (failed_dexes) — (b)
+    # is the 2026-10-03 hole: ~$948 of IDLE funds sat on a HIP-3 dex with no
+    # open position, its query 429'd, and the held-dex-only check was blind;
+    # the phantom -$948 daily PnL fired the HARD killswitch and flattened the
+    # book on fiction. Either way the aggregate is incomplete → preserve
+    # last-known-good (skip memory update, queried_dexes=set() keeps
+    # trackers), same as the equity<=0 path.
     held_dexes = {(c.split(":", 1)[0] if ":" in c else "") for c in active_position_coins()}
     missing_dexes = held_dexes - set(queried_dexes)
-    if missing_dexes:
+    failed_dexes = set(state.get("failed_dexes") or ())
+    if missing_dexes or failed_dexes:
         logger.warning(
-            f"[heartbeat] partial-dex degraded read: held dex(es) {missing_dexes} "
-            f"missing from queried {set(queried_dexes)} (equity read ${equity:.2f} is "
-            f"incomplete) — skipping memory update, preserving last-known-good")
+            f"[heartbeat] partial-dex degraded read: failed dex(es) "
+            f"{failed_dexes or missing_dexes} (queried {set(queried_dexes)}, "
+            f"held {held_dexes or '{}'}) — equity read ${equity:.2f} may be "
+            f"missing idle-fund dex equity; skipping memory update, "
+            f"preserving last-known-good")
         return 0.0, [], 0.0, 0.0, set(), {}
 
     # Subtract net USDC contributions so transfers/deposits don't show
