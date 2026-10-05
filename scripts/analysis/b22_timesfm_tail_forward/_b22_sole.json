@@ -1,0 +1,1002 @@
+[
+ {
+  "coin": "STRK",
+  "ts": "2026-10-04T00:25:51",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.60% beyond 2.0%; conf 0.75 < 0.90, composite 22.2 < 60)",
+  "tail": 5.6,
+  "conf": 0.75,
+  "comp": 22.2,
+  "executed": false
+ },
+ {
+  "coin": "STRK",
+  "ts": "2026-10-04T00:33:27",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.37% beyond 2.0%; conf 0.75 < 0.90, composite 22.1 < 60)",
+  "tail": 4.37,
+  "conf": 0.75,
+  "comp": 22.1,
+  "executed": false
+ },
+ {
+  "coin": "PUMP",
+  "ts": "2026-10-04T03:16:18",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.75% beyond 2.0%; conf 0.82 < 0.90, composite 34.9 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.75,
+  "conf": 0.82,
+  "comp": 34.9,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-04T06:27:57",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.62% beyond 2.0%; conf 0.78 < 0.90, composite 26.8 < 60)",
+  "tail": 2.62,
+  "conf": 0.78,
+  "comp": 26.8,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-04T06:31:45",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.62% beyond 2.0%; conf 0.78 < 0.90, composite 26.8 < 60)",
+  "tail": 2.62,
+  "conf": 0.78,
+  "comp": 26.8,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-04T06:35:20",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.31% beyond 2.0%; conf 0.78 < 0.90, composite 25.7 < 60)",
+  "tail": 2.31,
+  "conf": 0.78,
+  "comp": 25.7,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-04T06:47:33",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.42% beyond 2.0%; conf 0.75 < 0.90, composite 22.3 < 60)",
+  "tail": 2.42,
+  "conf": 0.75,
+  "comp": 22.3,
+  "executed": false
+ },
+ {
+  "coin": "IO",
+  "ts": "2026-10-04T14:37:54",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.08% beyond 2.0%; conf 0.85 < 0.90, composite 29.7 < 60)",
+  "tail": 5.08,
+  "conf": 0.85,
+  "comp": 29.7,
+  "executed": false
+ },
+ {
+  "coin": "SUI",
+  "ts": "2026-10-04T15:06:34",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.08% beyond 2.0%; conf 0.85 < 0.90, composite 68.2 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.08,
+  "conf": 0.85,
+  "comp": 68.2,
+  "executed": false
+ },
+ {
+  "coin": "PUMP",
+  "ts": "2026-10-04T15:39:01",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.16% beyond 2.0%; conf 0.78 < 0.90, composite 15.2 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.16,
+  "conf": 0.78,
+  "comp": 15.2,
+  "executed": false
+ },
+ {
+  "coin": "PUMP",
+  "ts": "2026-10-04T16:17:58",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.54% beyond 2.0%; conf 0.75 < 0.90, composite 34.7 < 60)",
+  "tail": 5.54,
+  "conf": 0.75,
+  "comp": 34.7,
+  "executed": false
+ },
+ {
+  "coin": "FET",
+  "ts": "2026-10-04T19:33:26",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.52% beyond 2.0%; conf 0.78 < 0.90, composite 39.0 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.52,
+  "conf": 0.78,
+  "comp": 39.0,
+  "executed": false
+ },
+ {
+  "coin": "FET",
+  "ts": "2026-09-18T00:45:31",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.39% beyond 2.0%; conf 0.75 < 0.90, composite 33.2 < 60)",
+  "tail": 3.39,
+  "conf": 0.75,
+  "comp": 33.2,
+  "executed": false
+ },
+ {
+  "coin": "PONS",
+  "ts": "2026-09-18T00:51:29",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.26% beyond 2.0%; conf 0.82 < 0.90, composite 45.2 < 60)",
+  "tail": 2.26,
+  "conf": 0.82,
+  "comp": 45.2,
+  "executed": false
+ },
+ {
+  "coin": "CASHCAT",
+  "ts": "2026-09-18T03:22:57",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.87% beyond 2.0%; conf 0.75 < 0.90, composite 5.2 < 60)",
+  "tail": 3.87,
+  "conf": 0.75,
+  "comp": 5.2,
+  "executed": false
+ },
+ {
+  "coin": "AR",
+  "ts": "2026-09-19T04:15:39",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.99% beyond 2.0%; conf 0.82 < 0.90, composite 39.5 < 60)",
+  "tail": 4.99,
+  "conf": 0.82,
+  "comp": 39.5,
+  "executed": false
+ },
+ {
+  "coin": "AERO",
+  "ts": "2026-09-19T04:16:30",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.89% beyond 2.0%; conf 0.78 < 0.90, composite 30.1 < 60)",
+  "tail": 2.89,
+  "conf": 0.78,
+  "comp": 30.1,
+  "executed": false
+ },
+ {
+  "coin": "AERO",
+  "ts": "2026-09-19T04:30:28",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.68% beyond 2.0%; conf 0.82 < 0.90, composite 30.7 < 60)",
+  "tail": 2.68,
+  "conf": 0.82,
+  "comp": 30.7,
+  "executed": false
+ },
+ {
+  "coin": "AVAX",
+  "ts": "2026-09-19T10:08:07",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.73% beyond 2.0%; conf 0.78 < 0.90, composite 32.8 < 60)",
+  "tail": 2.73,
+  "conf": 0.78,
+  "comp": 32.8,
+  "executed": false
+ },
+ {
+  "coin": "AVAX",
+  "ts": "2026-09-19T11:07:20",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.07% beyond 2.0%; conf 0.82 < 0.90, composite 42.5 < 60)",
+  "tail": 2.07,
+  "conf": 0.82,
+  "comp": 42.5,
+  "executed": false
+ },
+ {
+  "coin": "TAO",
+  "ts": "2026-09-20T16:55:00",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.84% beyond 2.0%; conf 0.82 < 0.90, composite 34.3 < 60)",
+  "tail": 2.84,
+  "conf": 0.82,
+  "comp": 34.3,
+  "executed": false
+ },
+ {
+  "coin": "ONDO",
+  "ts": "2026-09-20T16:56:30",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.72% beyond 2.0%; conf 0.82 < 0.90, composite 29.9 < 60)",
+  "tail": 2.72,
+  "conf": 0.82,
+  "comp": 29.9,
+  "executed": false
+ },
+ {
+  "coin": "ENA",
+  "ts": "2026-09-20T16:57:54",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.40% beyond 2.0%; conf 0.82 < 0.90, composite 29.7 < 60)",
+  "tail": 5.4,
+  "conf": 0.82,
+  "comp": 29.7,
+  "executed": false
+ },
+ {
+  "coin": "OP",
+  "ts": "2026-09-20T17:59:35",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.85% beyond 2.0%; conf 0.78 < 0.90, composite 29.7 < 60)",
+  "tail": 4.85,
+  "conf": 0.78,
+  "comp": 29.7,
+  "executed": false
+ },
+ {
+  "coin": "NEAR",
+  "ts": "2026-09-20T19:50:53",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.85% beyond 2.0%; conf 0.82 < 0.90, composite 8.1 < 60)",
+  "tail": 4.85,
+  "conf": 0.82,
+  "comp": 8.1,
+  "executed": false
+ },
+ {
+  "coin": "PUMP",
+  "ts": "2026-09-21T00:55:00",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.87% beyond 2.0%; conf 0.75 < 0.90, composite 26.7 < 60)",
+  "tail": 3.87,
+  "conf": 0.75,
+  "comp": 26.7,
+  "executed": false
+ },
+ {
+  "coin": "VVV",
+  "ts": "2026-09-21T01:50:36",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.15% beyond 2.0%; conf 0.82 < 0.90, composite 34.5 < 60)",
+  "tail": 3.15,
+  "conf": 0.82,
+  "comp": 34.5,
+  "executed": false
+ },
+ {
+  "coin": "VVV",
+  "ts": "2026-09-21T02:26:17",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.96% beyond 2.0%; conf 0.85 < 0.90, composite 41.6 < 60)",
+  "tail": 4.96,
+  "conf": 0.85,
+  "comp": 41.6,
+  "executed": false
+ },
+ {
+  "coin": "XMR",
+  "ts": "2026-09-21T05:26:06",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.24% beyond 2.0%; conf 0.82 < 0.90, composite 14.8 < 60)",
+  "tail": 2.24,
+  "conf": 0.82,
+  "comp": 14.8,
+  "executed": false
+ },
+ {
+  "coin": "BTC",
+  "ts": "2026-09-21T08:42:30",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.51% beyond 2.0%; conf 0.78 < 0.90, composite 58.3 < 60)",
+  "tail": 2.51,
+  "conf": 0.78,
+  "comp": 58.3,
+  "executed": false
+ },
+ {
+  "coin": "MET",
+  "ts": "2026-09-21T23:12:43",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.87% beyond 2.0%; conf 0.82 < 0.90, composite 34.5 < 60)",
+  "tail": 2.87,
+  "conf": 0.82,
+  "comp": 34.5,
+  "executed": false
+ },
+ {
+  "coin": "FARTCOIN",
+  "ts": "2026-09-22T00:52:24",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.61% beyond 2.0%; conf 0.82 < 0.90, composite 34.9 < 60)",
+  "tail": 3.61,
+  "conf": 0.82,
+  "comp": 34.9,
+  "executed": false
+ },
+ {
+  "coin": "NIL",
+  "ts": "2026-09-22T02:02:12",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.49% beyond 2.0%; conf 0.82 < 0.90, composite 28.3 < 60)",
+  "tail": 2.49,
+  "conf": 0.82,
+  "comp": 28.3,
+  "executed": false
+ },
+ {
+  "coin": "PENGU",
+  "ts": "2026-09-22T04:37:07",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.23% beyond 2.0%; conf 0.78 < 0.90, composite 35.9 < 60)",
+  "tail": 2.23,
+  "conf": 0.78,
+  "comp": 35.9,
+  "executed": false
+ },
+ {
+  "coin": "kBONK",
+  "ts": "2026-09-22T05:01:09",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.01% beyond 2.0%; conf 0.78 < 0.90, composite 35.4 < 60)",
+  "tail": 3.01,
+  "conf": 0.78,
+  "comp": 35.4,
+  "executed": false
+ },
+ {
+  "coin": "USELESS",
+  "ts": "2026-09-22T08:12:12",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.08% beyond 2.0%; conf 0.85 < 0.90, composite 35.4 < 60)",
+  "tail": 4.08,
+  "conf": 0.85,
+  "comp": 35.4,
+  "executed": false
+ },
+ {
+  "coin": "PONS",
+  "ts": "2026-09-22T18:17:07",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.19% beyond 2.0%; conf 0.78 < 0.90, composite 31.1 < 60)",
+  "tail": 3.19,
+  "conf": 0.78,
+  "comp": 31.1,
+  "executed": false
+ },
+ {
+  "coin": "PONS",
+  "ts": "2026-09-22T18:23:29",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.45% beyond 2.0%; conf 0.78 < 0.90, composite 33.2 < 60)",
+  "tail": 3.45,
+  "conf": 0.78,
+  "comp": 33.2,
+  "executed": false
+ },
+ {
+  "coin": "UNI",
+  "ts": "2026-09-22T20:40:08",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.02% beyond 2.0%; conf 0.82 < 0.90, composite 11.0 < 60)",
+  "tail": 3.02,
+  "conf": 0.82,
+  "comp": 11.0,
+  "executed": false
+ },
+ {
+  "coin": "PONS",
+  "ts": "2026-09-22T21:37:25",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.18% beyond 2.0%; conf 0.78 < 0.90, composite 56.7 < 60)",
+  "tail": 2.18,
+  "conf": 0.78,
+  "comp": 56.7,
+  "executed": false
+ },
+ {
+  "coin": "NIL",
+  "ts": "2026-09-23T02:47:18",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.61% beyond 2.0%; conf 0.78 < 0.90, composite 29.7 < 60)",
+  "tail": 2.61,
+  "conf": 0.78,
+  "comp": 29.7,
+  "executed": false
+ },
+ {
+  "coin": "USELESS",
+  "ts": "2026-09-23T04:15:58",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.14% beyond 2.0%; conf 0.82 < 0.90, composite 32.4 < 60)",
+  "tail": 3.14,
+  "conf": 0.82,
+  "comp": 32.4,
+  "executed": false
+ },
+ {
+  "coin": "USELESS",
+  "ts": "2026-09-24T10:48:24",
+  "side": "short",
+  "reason": "timesfm_tail_trigger (short entry, adverse q-path max of first 12 steps = +4.36% beyond 2.0%; conf 0.75 < 0.90, composite 30.0 < 60)",
+  "tail": null,
+  "conf": 0.75,
+  "comp": 30.0,
+  "executed": false
+ },
+ {
+  "coin": "PUMP",
+  "ts": "2026-09-24T11:45:37",
+  "side": "short",
+  "reason": "timesfm_tail_trigger (short entry, adverse q-path max of first 12 steps = +2.22% beyond 2.0%; conf 0.82 < 0.90, composite 50.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": null,
+  "conf": 0.82,
+  "comp": 50.8,
+  "executed": false
+ },
+ {
+  "coin": "ONDO",
+  "ts": "2026-09-25T07:56:19",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.94% beyond 2.0%; conf 0.82 < 0.90, composite 41.6 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.94,
+  "conf": 0.82,
+  "comp": 41.6,
+  "executed": false
+ },
+ {
+  "coin": "JUP",
+  "ts": "2026-09-25T08:26:25",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.84% beyond 2.0%; conf 0.85 < 0.90, composite 11.3 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.84,
+  "conf": 0.85,
+  "comp": 11.3,
+  "executed": false
+ },
+ {
+  "coin": "CHIP",
+  "ts": "2026-09-25T09:28:13",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.62% beyond 2.0%; conf 0.82 < 0.90, composite 34.1 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.62,
+  "conf": 0.82,
+  "comp": 34.1,
+  "executed": false
+ },
+ {
+  "coin": "SUI",
+  "ts": "2026-09-25T10:57:27",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.26% beyond 2.0%; conf 0.85 < 0.90, composite 36.1 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.26,
+  "conf": 0.85,
+  "comp": 36.1,
+  "executed": false
+ },
+ {
+  "coin": "LDO",
+  "ts": "2026-09-25T16:37:31",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.78% beyond 2.0%; conf 0.75 < 0.90, composite 26.9 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.78,
+  "conf": 0.75,
+  "comp": 26.9,
+  "executed": false
+ },
+ {
+  "coin": "WLD",
+  "ts": "2026-09-25T20:36:58",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.51% beyond 2.0%; conf 0.85 < 0.90, composite 36.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.51,
+  "conf": 0.85,
+  "comp": 36.8,
+  "executed": false
+ },
+ {
+  "coin": "ENA",
+  "ts": "2026-09-26T04:19:09",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.44% beyond 2.0%; conf 0.75 < 0.90, composite 18.6 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.44,
+  "conf": 0.75,
+  "comp": 18.6,
+  "executed": false
+ },
+ {
+  "coin": "TNSR",
+  "ts": "2026-09-26T12:49:47",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.11% beyond 2.0%; conf 0.75 < 0.90, composite 12.5 < 60)",
+  "tail": 3.11,
+  "conf": 0.75,
+  "comp": 12.5,
+  "executed": false
+ },
+ {
+  "coin": "DASH",
+  "ts": "2026-09-26T13:21:04",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.92% beyond 2.0%; conf 0.85 < 0.90, composite 36.6 < 60)",
+  "tail": 4.92,
+  "conf": 0.85,
+  "comp": 36.6,
+  "executed": false
+ },
+ {
+  "coin": "BRETT",
+  "ts": "2026-09-27T08:15:49",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.73% beyond 2.0%; conf 0.75 < 0.90, composite 44.7 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.73,
+  "conf": 0.75,
+  "comp": 44.7,
+  "executed": false
+ },
+ {
+  "coin": "SUI",
+  "ts": "2026-09-27T08:35:13",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.83% beyond 2.0%; conf 0.82 < 0.90, composite 30.0 < 60)",
+  "tail": 4.83,
+  "conf": 0.82,
+  "comp": 30.0,
+  "executed": false
+ },
+ {
+  "coin": "BRETT",
+  "ts": "2026-09-27T08:35:41",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.07% beyond 2.0%; conf 0.75 < 0.90, composite 29.7 < 60)",
+  "tail": 3.07,
+  "conf": 0.75,
+  "comp": 29.7,
+  "executed": false
+ },
+ {
+  "coin": "SUI",
+  "ts": "2026-09-27T08:56:05",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.02% beyond 2.0%; conf 0.82 < 0.90, composite 33.8 < 60)",
+  "tail": 5.02,
+  "conf": 0.82,
+  "comp": 33.8,
+  "executed": false
+ },
+ {
+  "coin": "SUI",
+  "ts": "2026-09-27T09:10:26",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.42% beyond 2.0%; conf 0.82 < 0.90, composite 35.0 < 60)",
+  "tail": 4.42,
+  "conf": 0.82,
+  "comp": 35.0,
+  "executed": false
+ },
+ {
+  "coin": "SUI",
+  "ts": "2026-09-27T09:16:09",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.73% beyond 2.0%; conf 0.78 < 0.90, composite 34.0 < 60)",
+  "tail": 2.73,
+  "conf": 0.78,
+  "comp": 34.0,
+  "executed": false
+ },
+ {
+  "coin": "GRAM",
+  "ts": "2026-09-27T11:07:23",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.20% beyond 2.0%; conf 0.78 < 0.90, composite 31.0 < 60)",
+  "tail": 2.2,
+  "conf": 0.78,
+  "comp": 31.0,
+  "executed": false
+ },
+ {
+  "coin": "AZTEC",
+  "ts": "2026-09-27T17:29:48",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -8.55% beyond 2.0%; conf 0.85 < 0.90, composite 38.1 < 60)",
+  "tail": 8.55,
+  "conf": 0.85,
+  "comp": 38.1,
+  "executed": false
+ },
+ {
+  "coin": "PURR",
+  "ts": "2026-09-27T18:13:38",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.69% beyond 2.0%; conf 0.78 < 0.90, composite 48.1 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.69,
+  "conf": 0.78,
+  "comp": 48.1,
+  "executed": false
+ },
+ {
+  "coin": "NEAR",
+  "ts": "2026-09-27T18:54:56",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.67% beyond 2.0%; conf 0.85 < 0.90, composite 30.8 < 60)",
+  "tail": 3.67,
+  "conf": 0.85,
+  "comp": 30.8,
+  "executed": false
+ },
+ {
+  "coin": "JUP",
+  "ts": "2026-09-27T21:43:45",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.70% beyond 2.0%; conf 0.78 < 0.90, composite 32.5 < 60)",
+  "tail": 4.7,
+  "conf": 0.78,
+  "comp": 32.5,
+  "executed": false
+ },
+ {
+  "coin": "JUP",
+  "ts": "2026-09-27T21:49:22",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -6.18% beyond 2.0%; conf 0.82 < 0.90, composite 35.7 < 60)",
+  "tail": 6.18,
+  "conf": 0.82,
+  "comp": 35.7,
+  "executed": false
+ },
+ {
+  "coin": "SEI",
+  "ts": "2026-09-28T00:23:22",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.12% beyond 2.0%; conf 0.85 < 0.90, composite 29.4 < 60)",
+  "tail": 4.12,
+  "conf": 0.85,
+  "comp": 29.4,
+  "executed": false
+ },
+ {
+  "coin": "0G",
+  "ts": "2026-09-29T00:47:33",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.47% beyond 2.0%; conf 0.82 < 0.90, composite 42.4 < 60)",
+  "tail": 3.47,
+  "conf": 0.82,
+  "comp": 42.4,
+  "executed": false
+ },
+ {
+  "coin": "LINK",
+  "ts": "2026-09-29T00:51:59",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.14% beyond 2.0%; conf 0.82 < 0.90, composite 34.2 < 60)",
+  "tail": 2.14,
+  "conf": 0.82,
+  "comp": 34.2,
+  "executed": false
+ },
+ {
+  "coin": "GRASS",
+  "ts": "2026-09-29T04:26:38",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -8.26% beyond 2.0%; conf 0.85 < 0.90, composite 44.1 < 60); composite escape closed on fresh-impulse class",
+  "tail": 8.26,
+  "conf": 0.85,
+  "comp": 44.1,
+  "executed": false
+ },
+ {
+  "coin": "IOTA",
+  "ts": "2026-09-29T07:37:52",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.25% beyond 2.0%; conf 0.70 < 0.90, composite 6.3 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.25,
+  "conf": 0.7,
+  "comp": 6.3,
+  "executed": false
+ },
+ {
+  "coin": "XLM",
+  "ts": "2026-09-29T11:54:20",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.34% beyond 2.0%; conf 0.82 < 0.90, composite 28.2 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.34,
+  "conf": 0.82,
+  "comp": 28.2,
+  "executed": false
+ },
+ {
+  "coin": "ZRO",
+  "ts": "2026-09-29T15:27:31",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.28% beyond 2.0%; conf 0.82 < 0.90, composite 38.0 < 60)",
+  "tail": 2.28,
+  "conf": 0.82,
+  "comp": 38.0,
+  "executed": false
+ },
+ {
+  "coin": "BERA",
+  "ts": "2026-09-29T20:59:27",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.08% beyond 2.0%; conf 0.85 < 0.90, composite 34.3 < 60)",
+  "tail": 2.08,
+  "conf": 0.85,
+  "comp": 34.3,
+  "executed": false
+ },
+ {
+  "coin": "ZRO",
+  "ts": "2026-09-30T01:00:33",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.93% beyond 2.0%; conf 0.82 < 0.90, composite 41.7 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.93,
+  "conf": 0.82,
+  "comp": 41.7,
+  "executed": false
+ },
+ {
+  "coin": "LIT",
+  "ts": "2026-09-30T01:55:38",
+  "side": "short",
+  "reason": "timesfm_tail_trigger (short entry, adverse q-path max of first 12 steps = +7.24% beyond 2.0%; conf 0.75 < 0.90, composite 28.0 < 60)",
+  "tail": null,
+  "conf": 0.75,
+  "comp": 28.0,
+  "executed": false
+ },
+ {
+  "coin": "NEAR",
+  "ts": "2026-09-30T10:36:44",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.32% beyond 2.0%; conf 0.85 < 0.90, composite 3.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.32,
+  "conf": 0.85,
+  "comp": 3.8,
+  "executed": false
+ },
+ {
+  "coin": "DOGE",
+  "ts": "2026-09-30T12:33:43",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.30% beyond 2.0%; conf 0.82 < 0.90, composite 55.7 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.3,
+  "conf": 0.82,
+  "comp": 55.7,
+  "executed": false
+ },
+ {
+  "coin": "HYPE",
+  "ts": "2026-09-30T17:06:33",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.98% beyond 2.0%; conf 0.75 < 0.90, composite 50.7 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.98,
+  "conf": 0.75,
+  "comp": 50.7,
+  "executed": false
+ },
+ {
+  "coin": "MON",
+  "ts": "2026-09-30T23:47:02",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.28% beyond 2.0%; conf 0.82 < 0.90, composite 37.9 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.28,
+  "conf": 0.82,
+  "comp": 37.9,
+  "executed": false
+ },
+ {
+  "coin": "MON",
+  "ts": "2026-10-01T00:24:09",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.53% beyond 2.0%; conf 0.78 < 0.90, composite 44.0 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.53,
+  "conf": 0.78,
+  "comp": 44.0,
+  "executed": false
+ },
+ {
+  "coin": "STX",
+  "ts": "2026-10-01T01:43:52",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.35% beyond 2.0%; conf 0.82 < 0.90, composite 40.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.35,
+  "conf": 0.82,
+  "comp": 40.8,
+  "executed": false
+ },
+ {
+  "coin": "ENA",
+  "ts": "2026-10-01T04:25:46",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.13% beyond 2.0%; conf 0.82 < 0.90, composite 33.1 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.13,
+  "conf": 0.82,
+  "comp": 33.1,
+  "executed": false
+ },
+ {
+  "coin": "ENA",
+  "ts": "2026-10-01T04:52:16",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.83% beyond 2.0%; conf 0.75 < 0.90, composite 30.6 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.83,
+  "conf": 0.75,
+  "comp": 30.6,
+  "executed": false
+ },
+ {
+  "coin": "ENA",
+  "ts": "2026-10-01T04:55:44",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.83% beyond 2.0%; conf 0.85 < 0.90, composite 31.9 < 60)",
+  "tail": 2.83,
+  "conf": 0.85,
+  "comp": 31.9,
+  "executed": false
+ },
+ {
+  "coin": "ZRO",
+  "ts": "2026-10-01T16:23:44",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.65% beyond 2.0%; conf 0.78 < 0.90, composite 31.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.65,
+  "conf": 0.78,
+  "comp": 31.8,
+  "executed": false
+ },
+ {
+  "coin": "RESOLV",
+  "ts": "2026-10-02T01:11:41",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.14% beyond 2.0%; conf 0.85 < 0.90, composite 42.2 < 60); composite escape closed on fresh-impulse class",
+  "tail": 3.14,
+  "conf": 0.85,
+  "comp": 42.2,
+  "executed": false
+ },
+ {
+  "coin": "ZRO",
+  "ts": "2026-10-02T05:12:07",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.78% beyond 2.0%; conf 0.85 < 0.90, composite 32.1 < 60)",
+  "tail": 3.78,
+  "conf": 0.85,
+  "comp": 32.1,
+  "executed": false
+ },
+ {
+  "coin": "ZRO",
+  "ts": "2026-10-02T06:27:31",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -3.13% beyond 2.0%; conf 0.78 < 0.90, composite 34.9 < 60)",
+  "tail": 3.13,
+  "conf": 0.78,
+  "comp": 34.9,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T07:17:24",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -7.97% beyond 2.0%; conf 0.85 < 0.90, composite 43.7 < 60); composite escape closed on fresh-impulse class",
+  "tail": 7.97,
+  "conf": 0.85,
+  "comp": 43.7,
+  "executed": false
+ },
+ {
+  "coin": "PUMP",
+  "ts": "2026-10-02T07:35:52",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.70% beyond 2.0%; conf 0.78 < 0.90, composite 44.1 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.7,
+  "conf": 0.78,
+  "comp": 44.1,
+  "executed": false
+ },
+ {
+  "coin": "APE",
+  "ts": "2026-10-02T12:41:36",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.17% beyond 2.0%; conf 0.85 < 0.90, composite 46.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.17,
+  "conf": 0.85,
+  "comp": 46.8,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T15:23:12",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -6.17% beyond 2.0%; conf 0.78 < 0.90, composite 31.7 < 60)",
+  "tail": 6.17,
+  "conf": 0.78,
+  "comp": 31.7,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T15:30:29",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -7.51% beyond 2.0%; conf 0.78 < 0.90, composite 32.3 < 60)",
+  "tail": 7.51,
+  "conf": 0.78,
+  "comp": 32.3,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T15:38:26",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -7.61% beyond 2.0%; conf 0.78 < 0.90, composite 32.9 < 60)",
+  "tail": 7.61,
+  "conf": 0.78,
+  "comp": 32.9,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T15:46:21",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -7.56% beyond 2.0%; conf 0.72 < 0.90, composite 33.4 < 60)",
+  "tail": 7.56,
+  "conf": 0.72,
+  "comp": 33.4,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T16:07:20",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.44% beyond 2.0%; conf 0.82 < 0.90, composite 36.1 < 60)",
+  "tail": 5.44,
+  "conf": 0.82,
+  "comp": 36.1,
+  "executed": false
+ },
+ {
+  "coin": "SAND",
+  "ts": "2026-10-02T16:13:37",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -5.19% beyond 2.0%; conf 0.82 < 0.90, composite 36.7 < 60)",
+  "tail": 5.19,
+  "conf": 0.82,
+  "comp": 36.7,
+  "executed": false
+ },
+ {
+  "coin": "MINA",
+  "ts": "2026-10-03T01:16:04",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -4.13% beyond 2.0%; conf 0.82 < 0.90, composite 43.2 < 60); composite escape closed on fresh-impulse class",
+  "tail": 4.13,
+  "conf": 0.82,
+  "comp": 43.2,
+  "executed": false
+ },
+ {
+  "coin": "WLD",
+  "ts": "2026-10-03T02:25:14",
+  "side": "long",
+  "reason": "timesfm_tail_trigger (long entry, adverse q-path min of first 12 steps = -2.72% beyond 2.0%; conf 0.82 < 0.90, composite 33.8 < 60); composite escape closed on fresh-impulse class",
+  "tail": 2.72,
+  "conf": 0.82,
+  "comp": 33.8,
+  "executed": false
+ },
+ {
+  "coin": "PONS",
+  "ts": "2026-10-03T07:04:01",
+  "side": "short",
+  "reason": "timesfm_tail_trigger (short entry, adverse q-path max of first 12 steps = +2.35% beyond 2.0%; conf 0.75 < 0.90, composite 0.0 < 60)",
+  "tail": null,
+  "conf": 0.75,
+  "comp": 0.0,
+  "executed": false
+ }
+]
