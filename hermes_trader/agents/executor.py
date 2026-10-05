@@ -2902,6 +2902,20 @@ _RECENTLY_CLOSED_WINDOW_S = 600.0
 _recently_closed_full: Dict[str, float] = {}
 
 
+def was_recently_booked_close(coin: str, side: str, entry_px: float) -> bool:
+    """True when close_position_market booked a FULL close for this exact
+    position (coin/side/entry_px) within the dedupe window. The stale-settle
+    path consults this so a fill already booked by the executor's flatten is
+    never booked a second time as an exchange_close — the actual §B.36 shape
+    on 2026-10-03 was killswitch_daily_loss (20:12:20) + stale-settle
+    exchange_close (20:17:42) for the SAME fill."""
+    try:
+        key = f"{coin}_{side}_{float(entry_px):.10g}"
+    except (TypeError, ValueError):
+        return False
+    return (time.monotonic() - _recently_closed_full.get(key, 0.0)) < _RECENTLY_CLOSED_WINDOW_S
+
+
 @_serialized
 def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
     """Market-close any open perp position for `coin`. Deregisters the DSL tracker on success.
