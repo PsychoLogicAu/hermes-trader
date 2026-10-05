@@ -1119,9 +1119,18 @@ while True:
         # above the release band and clear the halt early; a flat flatten at
         # T would pin the equity-based daily PnL red and make early release
         # unreachable. pct=0 disables the gate, halt AND flatten.
-        from hermes_trader.agents.risk_gates import flatten_daily_kill_usd
-        _kill_thr = flatten_daily_kill_usd(_cfg, equity)  # 0 = disabled
-        if _kill_thr > 0 and equity > 0 and positions and daily_pnl <= -_kill_thr:
+        # 2026-10-03 (first-ever fire, on a phantom -$948.16): the decision now
+        # goes through the pure hard_killswitch_should_fire(), which additionally
+        # refuses to act while memory's plausibility filter has an outstanding
+        # REJECTED equity read (clean_read=False) — a degraded aggregate can
+        # fabricate a catastrophic daily PnL. And the flatten now ARMS the
+        # daily-halt timer: the 10-03 kill flattened the book but left no halt,
+        # so the bot opened a new position 2 minutes later.
+        from hermes_trader.agents.risk_gates import hard_killswitch_should_fire
+        _fire, _kill_thr = hard_killswitch_should_fire(
+            _cfg, equity, positions, daily_pnl,
+            clean_read=not memory.last_read_suspect())
+        if _fire:
             logger.warning(
                 f"[killswitch] HARD daily-loss floor breached: PnL ${daily_pnl:.2f} "
                 f"<= -${_kill_thr:.2f} (equity-relative) — flattening {len(positions)} open "

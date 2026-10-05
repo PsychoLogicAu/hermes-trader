@@ -5,7 +5,7 @@ import pytest
 
 from hermes_trader.agents.risk_gates import (
     GateContext, daily_loss_kill_switch, effective_daily_kill_usd,
-    flatten_daily_kill_usd)
+    flatten_daily_kill_usd, hard_killswitch_should_fire)
 
 
 def _ctx(daily_pnl=0.0, equity=100.0):
@@ -93,6 +93,47 @@ def test_halt_timer_blocks_even_after_partial_recovery():
     r = daily_loss_kill_switch(_ctx(daily_pnl=-4.0), 9.0, halt_remaining_min=120)
     assert r["pass"] is False
     assert "halt active" in r["reason"]
+
+
+# ── hard_killswitch_should_fire (heartbeat HARD flatten decision) ───────────
+
+def test_hard_killswitch_fires_on_clean_breach():
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0,
+           "daily_kill_min_usd": 8}
+    # equity 954 -> base clamp $20, flatten thr 25; pnl -30 breaches
+    fire, thr = hard_killswitch_should_fire(cfg, 954.0, [{"position": {}}],
+                                            -30.0, clean_read=True)
+    assert fire is True and thr == 25.0
+
+
+def test_hard_killswitch_no_fire_on_suspect_read():
+    """2026-10-03 replay: phantom -$948.16 from a degraded aggregate read.
+    With the plausibility filter rejecting the read (clean_read=False), the
+    HARD flatten must NOT fire no matter how deep the phantom PnL is."""
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0,
+           "daily_kill_min_usd": 8}
+    fire, thr = hard_killswitch_should_fire(cfg, 6.19, [{"position": {}}],
+                                            -948.16, clean_read=False)
+    assert fire is False
+
+
+def test_hard_killswitch_no_fire_when_disabled_or_flat():
+    assert hard_killswitch_should_fire({}, 954.0, [{"position": {}}],
+                                       -999.0, clean_read=True)[0] is False
+    # no open positions -> nothing to flatten (idempotence after a fire)
+    cfg = {"daily_kill_pct_of_equity": 0.20}
+    assert hard_killswitch_should_fire(cfg, 954.0, [], -999.0,
+                                       clean_read=True)[0] is False
+    # degraded equity<=0 read -> never fires (existing guard preserved)
+    assert hard_killswitch_should_fire(cfg, 0.0, [{"position": {}}], -999.0,
+                                       clean_read=True)[0] is False
+
+
+def test_hard_killswitch_no_fire_above_threshold():
+    cfg = {"daily_kill_pct_of_equity": 0.20, "daily_kill_cap_usd": 20.0}
+    fire, thr = hard_killswitch_should_fire(cfg, 954.0, [{"position": {}}],
+                                            -24.0, clean_read=True)
+    assert fire is False and thr == 25.0
 
 
 # ── halt timer arm / clear / expiry (memory) ───────────────────────────────
