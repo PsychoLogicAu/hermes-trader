@@ -1781,6 +1781,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         atr_stop_floor_pct=float(_atr_cfg.get("floor_pct", 1.0)),
         atr_stop_ceiling_pct=float(_atr_cfg.get("ceiling_pct", 4.0)),
         stale_flat_timeout_minutes=float(dsl_config.get("stale_flat_timeout_minutes", 0.0) or 0.0),
+        stale_flat_deep_release=dict(dsl_config.get("stale_flat_deep_release", {}) or {}),
         consecutive_breaches_required=int(dsl_config.get("consecutive_breaches_required", 1) or 1),
         noise_band_enabled=bool(_noise_cfg.get("enabled", False)),
         noise_band_atr_mult=float(_noise_cfg.get("atr_mult", 1.0)),
@@ -2123,6 +2124,35 @@ def _ai_close_slot_defer_check(coin: str) -> Optional[Dict[str, Any]]:
             if worst is None or peak_pct < worst["peak_pct"]:
                 worst = {"peak_pct": peak_pct, "protect_pct": pol.protect_pct}
         assert worst is not None
+        # ── Trend-release escape (B.37-A, 2026-10-07) ─────────────────
+        # "Never armed" tests PEAK profit, not direction of travel: a flat
+        # drifter and a steady bleeder read identically. ADA 2026-10-06 hit
+        # the guard's registered die-trigger — 97 DEFERRED lines while the
+        # LLM insisted CLOSE at -0.9% -> -4.0%, and the only deterministic
+        # exit left was the -5% exchange stop (-$1.36 vs ~-$0.30 early cut).
+        # n=36 replay (scratch/_b37_cf_replay_1007.py): releasing LLM
+        # jurisdiction once the mark is deeply negative beats pure defer at
+        # every depth -1.5..-3.0 (net -12.0..-14.1 vs -15.1); -2.0 chosen
+        # as plateau midpoint. Config: ai_close_slot_defer.trend_release
+        # {enabled, depth_pct}; depth_pct<=0 or missing = clause inert
+        # (byte-identical to pre-change guard).
+        rel_cfg = cfg.get("trend_release") or {}
+        if bool(rel_cfg.get("enabled", False)):
+            _depth = float(rel_cfg.get("depth_pct", 0.0) or 0.0)
+            if _depth > 0:
+                for t in trackers:
+                    _mark = getattr(t, "last_mark_px", None)
+                    if _mark is None:
+                        continue  # no fresh mark — fail-safe: guard stands
+                    _upct = t._unrealized_pct(_mark)
+                    if _upct <= -_depth:
+                        logger.info(
+                            f"[route_verdict] {coin}: ai_close TREND-RELEASED "
+                            f"(never armed but unrealized {_upct:+.2f}% <= "
+                            f"-{_depth:.2f}% spot) — deep bleeder, LLM "
+                            f"jurisdiction restored."
+                        )
+                        return None
         return {
             "shadow": bool(cfg.get("shadow_mode", True)),
             "used": used, "cap": cap, "floor": floor,
