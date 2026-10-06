@@ -45,11 +45,15 @@ def clear_book():
     _active_positions.clear()
 
 
-def _tracker(coin, entry=100.0, peak=100.0, side="long", protect=1.5):
+def _tracker(coin, entry=100.0, peak=100.0, side="long", protect=1.5,
+             mark_peak=None):
     from hermes_trader.agents.dsl_exit import ExitPolicy
     t = DSLTracker(coin, side, entry, entry_time=0.0,
                    policy=ExitPolicy(protect_pct=protect))
     t.peak_px = peak
+    # mark_peak_px = best SAMPLED mark (what the guard tests); defaults to
+    # peak so existing peak-based tests keep their intent.
+    t.mark_peak_px = peak if mark_peak is None else mark_peak
     return t
 
 
@@ -122,6 +126,41 @@ def test_short_never_armed_defers(cfg):
     cfg(ai_close_slot_defer={"shadow_mode": False})
     # short: peak BELOW entry means profit; peak==entry -> 0% < protect
     _active_positions["FOO_short"] = _tracker("FOO", side="short", peak=100.0)
+    res, calls = route()
+    assert res["action"] == "none"
+    assert calls == []
+
+
+def test_wick_armed_but_mark_never_armed_defers(cfg):
+    """CHIP 2026-10-06 seam: candle-ratcheted peak_px >= protect (wick) while
+    the best sampled mark stayed below protect — the phase-2 floor never
+    armed, so the guard must treat the position as never-armed and defer."""
+    cfg(ai_close_slot_defer={"shadow_mode": False})
+    # protect 1.0: wick to exactly +1.0% (peak_px), best mark only +0.77%
+    _active_positions["FOO_long"] = _tracker(
+        "FOO", peak=101.0, mark_peak=100.77, protect=1.0)
+    res, calls = route()
+    assert res["action"] == "none"
+    assert "mark peak" in res["deferred_reason"]
+    assert calls == []
+
+
+def test_mark_armed_closes_even_when_enforced(cfg):
+    """A sampled mark >= protect means the floor really armed — LLM
+    jurisdiction stands even if mark_peak and peak_px agree."""
+    cfg(ai_close_slot_defer={"shadow_mode": False})
+    _active_positions["FOO_long"] = _tracker(
+        "FOO", peak=101.2, mark_peak=101.0, protect=1.0)
+    res, calls = route()
+    assert res["action"] == "close"
+    assert calls == ["FOO"]
+
+
+def test_short_wick_seam_defers(cfg):
+    cfg(ai_close_slot_defer={"shadow_mode": False})
+    # short: wick down to -1.0% (peak_px=99.0) but best mark only 99.25
+    _active_positions["FOO_short"] = _tracker(
+        "FOO", side="short", peak=99.0, mark_peak=99.25, protect=1.0)
     res, calls = route()
     assert res["action"] == "none"
     assert calls == []

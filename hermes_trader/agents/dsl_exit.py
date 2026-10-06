@@ -191,6 +191,16 @@ class DSLTracker:
 
         # State
         self.peak_px = entry_px
+        # Best price seen via SAMPLED MARKS only (every check() tick) — never
+        # ratcheted from candle extremes. `peak_px` includes intrabar wicks
+        # (ratchet_peak, GRASS 2026-08-26), so "peak_px >= protect_pct" does
+        # NOT mean the phase-2 floor ever armed: arming happens in check() on
+        # the sampled mark. CHIP 2026-10-06: wick ratcheted peak to exactly
+        # protect (1.0%) while the best mark was +0.77%, so the ai_close
+        # slot-defer guard (executor._ai_close_slot_defer_check) read a wick
+        # as "armed" and let an LLM stale-close through. Consumers that need
+        # the same arming semantics as check() must use mark_peak_px.
+        self.mark_peak_px = entry_px
         self.consecutive_breaches = 0
         self._last_floor: Optional[float] = None
         # Last-seen exchange position size (abs szi). 0.0 = unknown (legacy
@@ -221,8 +231,10 @@ class DSLTracker:
         self.size = float(new_size)
         if self.is_long():
             self.peak_px = max(self.peak_px, self.entry_px)
+            self.mark_peak_px = max(self.mark_peak_px, self.entry_px)
         else:
             self.peak_px = min(self.peak_px, self.entry_px)
+            self.mark_peak_px = min(self.mark_peak_px, self.entry_px)
 
     def is_long(self) -> bool:
         return self.side == "long"
@@ -301,6 +313,13 @@ class DSLTracker:
         elif not is_long and mark_px < self.peak_px:
             self.peak_px = mark_px
             peak_changed = True
+        # Mark-only peak (never wick-ratcheted) — the arming witness for
+        # consumers that must match check()'s phase-2 arming semantics
+        # (ai_close slot-defer guard). See mark_peak_px in __init__.
+        if is_long and mark_px > self.mark_peak_px:
+            self.mark_peak_px = mark_px
+        elif not is_long and mark_px < self.mark_peak_px:
+            self.mark_peak_px = mark_px
 
         # ── Effective max-loss in SPOT % terms ───────────────────────
         # Two thresholds combine into one effective floor:
@@ -544,6 +563,7 @@ def _tracker_to_dict(t: DSLTracker) -> Dict[str, Any]:
         "entry_time": t.entry_time,
         "entry_atr_pct": t.entry_atr_pct,
         "peak_px": t.peak_px,
+        "mark_peak_px": t.mark_peak_px,
         "consecutive_breaches": t.consecutive_breaches,
         "last_floor": t._last_floor,
         "policy": asdict(t.policy),
@@ -583,6 +603,10 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
                    leverage=int(d.get("leverage", 1) or 1),
                    entry_atr_pct=float(d.get("entry_atr_pct", 0.0) or 0.0))
     t.peak_px = float(d.get("peak_px", d["entry_px"]))
+    # Legacy state files predate mark_peak_px — fall back to entry_px (the
+    # conservative choice: a pre-existing position reads as never-armed to the
+    # ai_close slot-defer guard until the next check() tick re-seeds it).
+    t.mark_peak_px = float(d.get("mark_peak_px", d["entry_px"]))
     # Legacy state files predate size tracking — 0.0 means "adopt silently on
     # the next rehydrate" (see DSLTracker.size).
     t.size = float(d.get("size", 0.0) or 0.0)

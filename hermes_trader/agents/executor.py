@@ -2103,15 +2103,21 @@ def _ai_close_slot_defer_check(coin: str) -> Optional[Dict[str, Any]]:
         floor = int(dsl_cfg.get("stale_flat_min_positions", 3) or 0)
         if used >= floor:
             return None  # contended book — LLM close is legitimate
-        # NEVER-ARMED test, same as the stale-flat timeout: peak profit
-        # below protect_pct for every tracker on this coin.
+        # NEVER-ARMED test: peak profit below protect_pct for every tracker
+        # on this coin. Uses mark_peak_px (best SAMPLED mark), not peak_px:
+        # peak_px is wick-ratcheted from candle extremes, but the phase-2
+        # floor only ever arms in check() on a sampled mark. CHIP 2026-10-06:
+        # a wick ratcheted peak_px to exactly protect (1.0%) while the best
+        # mark was +0.77% — the floor had never armed, yet the old peak_px
+        # test read "armed" and let an LLM stale-close through.
         worst: Optional[Dict[str, Any]] = None
         for t in trackers:
             pol = t.policy
+            mark_peak = getattr(t, "mark_peak_px", t.peak_px)
             if t.is_long():
-                peak_pct = (t.peak_px - t.entry_px) / t.entry_px * 100
+                peak_pct = (mark_peak - t.entry_px) / t.entry_px * 100
             else:
-                peak_pct = (t.entry_px - t.peak_px) / t.entry_px * 100
+                peak_pct = (t.entry_px - mark_peak) / t.entry_px * 100
             if peak_pct >= pol.protect_pct:
                 return None  # armed at least once — LLM jurisdiction stands
             if worst is None or peak_pct < worst["peak_pct"]:
@@ -2124,7 +2130,7 @@ def _ai_close_slot_defer_check(coin: str) -> Optional[Dict[str, Any]]:
             "verb": ("closing anyway (shadow)" if cfg.get("shadow_mode", True)
                      else "deferring to"),
             "reason": (f"ai_close_slot_defer: slots {used}/{cap} < floor {floor}, "
-                       f"never armed (peak {worst['peak_pct']:+.2f}% < "
+                       f"never armed (mark peak {worst['peak_pct']:+.2f}% < "
                        f"protect {worst['protect_pct']:.2f}%)"),
         }
     except Exception as exc:  # fail-safe: never block a close on guard bugs
@@ -2182,7 +2188,7 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             logger.warning(
                 f"[route_verdict] {coin}: ai_close {_mode} "
                 f"(slots {_defer['used']}/{_defer['cap']} in use < contention "
-                f"floor {_defer['floor']}, never armed: peak "
+                f"floor {_defer['floor']}, never armed: mark peak "
                 f"{_defer['peak_pct']:+.2f}% < protect {_defer['protect_pct']:.2f}%)"
                 f" — {_defer['verb']} deterministic exits keep ownership. "
                 f"LLM reasoning: {_reason[:160]}"
