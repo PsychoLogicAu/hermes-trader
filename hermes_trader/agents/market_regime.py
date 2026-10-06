@@ -499,3 +499,44 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     drift = (closes[-1] / closes[0] - 1) * 100
     _tape_cache = ({"vol": vol, "drift": drift}, now)
     return _tape_cache[0]
+
+
+# Per-coin tape cache for the quiet_tape momentum-release clause
+# (2026-10-06, WATCHLIST §B.17). Gaps are NOT cached (next call retries).
+_coin_tape_cache: Dict[str, Tuple[Optional[Dict[str, float]], float]] = {}
+
+
+def coin_tape_activity(coin: str, force: bool = False) -> Optional[Dict[str, float]]:
+    """Trailing-24h activity for ONE coin: {"vol": %, "drift": %}.
+
+    Identical contract to ``btc_tape_activity`` (vol = pstdev of 5m
+    log-returns × sqrt(288) × 100 dailyized; drift = net % over the ~24h
+    window; lookback-only; None on a data gap or < ``_TAPE_MIN_BARS`` bars)
+    but computed on the coin's own candles. Cached per coin for
+    ``_TAPE_TTL_S``; ``force=True`` bypasses the cache (tests / operator).
+
+    Consumed by the quiet_tape gate's momentum-release clause — the rip
+    accrual (scratch/_quiet_tape_rip_accrual.py, 16 sole-block episodes /
+    13 ripped) showed the gate's blind spot is the COIN's own momentum:
+    every ripped episode sat on a coin already moving in the called
+    direction while the BTC/alt tape read quiet."""
+    now = time.time()
+    hit = _coin_tape_cache.get(coin)
+    if not force and hit is not None and (now - hit[1]) < _TAPE_TTL_S:
+        return hit[0]
+    try:
+        candles = fetch_hl_candles(coin, interval="5m", count=290)
+    except Exception as e:
+        logger.warning(f"[regime] coin-tape fetch failed for {coin}: {e}")
+        return None
+    if not candles:
+        return None
+    closes = [float(c.c) for c in candles if float(c.c) > 0]
+    if len(closes) < _TAPE_MIN_BARS:
+        return None
+    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    vol = statistics.pstdev(rets) * math.sqrt(288) * 100
+    drift = (closes[-1] / closes[0] - 1) * 100
+    out = {"vol": vol, "drift": drift}
+    _coin_tape_cache[coin] = (out, now)
+    return out

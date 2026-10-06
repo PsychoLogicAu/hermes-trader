@@ -1513,6 +1513,35 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): "
             f"{_rel_txt} — an OR merge would have BLOCKED")
 
+    # Quiet-tape MOMENTUM-RELEASE accrual (2026-10-06, WATCHLIST §B.17):
+    # the broad tape read quiet (block) but the COIN's own trail24h read is
+    # loud in the called direction. Shadow mode logs the counterfactual so
+    # released-vs-saved prices out-of-sample against the same 24h-forward
+    # join the daily report already runs; live mode releases the entry and
+    # logs the release. Join key: `quiet_tape_momentum` in gate_results.
+    _mom = _qt.get("momentum") or {}
+    if _mom.get("fires"):
+        _mr = _mom.get("reads") or {}
+        _mt = _mom.get("thresholds") or {}
+        _mom_txt = (f"coin trail24h aligned drift {_mr.get('aligned_drift', 0):+.2f}% "
+                    f"vs bar {_mt.get('aligned_drift_pct', 0):.2f}% OR vol "
+                    f"{_mr.get('vol', 0):.2f}% vs bar {_mt.get('coin_vol_pct', 0):.2f}%")
+        if _mom.get("live"):
+            logger.warning(
+                f"[gate][ACC] quiet_tape_momentum RELEASED "
+                f"{analysis['coin']} {trade_side.upper()} "
+                f"(conf {analysis['confidence']:.2f}, composite "
+                f"{analysis.get('composite_score', 0):.1f}): {_mom_txt} — "
+                f"quiet_tape block overridden by the momentum-release clause")
+        else:
+            logger.warning(
+                f"[gate][SHADOW] quiet_tape_momentum WOULD HAVE RELEASED "
+                f"{analysis['coin']} {trade_side.upper()} "
+                f"(conf {analysis['confidence']:.2f}, composite "
+                f"{analysis.get('composite_score', 0):.1f}): {_mom_txt} — "
+                f"NOT releasing (shadow-only); the entry stays blocked by "
+                f"quiet_tape")
+
     # TimesFM mirror-leg shadow accruals: the timesfm-alone per-forecaster
     # counterfactuals (the AND leg is the forecast_agreement_veto line
     # below). mismatch stays SHADOW-ONLY by construction. tail_trigger is

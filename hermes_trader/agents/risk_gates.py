@@ -1583,6 +1583,52 @@ def quiet_tape_gate(
         blocked = bool(live_eval) and all(r["would_block"] for r in live_eval)
     else:  # "or"
         blocked = any(r["would_block"] and r["live"] for r in evaluated.values())
+    _blocked_pre_momentum = blocked
+
+    # ── Momentum-release clause (2026-10-06, WATCHLIST §B.17) ─────────
+    # The rip accrual (scratch/_quiet_tape_rip_accrual.py re-run 2026-10-06:
+    # 111 blocks, 32 sole-blocks, 16 episodes, 13 ripped) showed the gate's
+    # blind spot: every ripped episode sat on a coin ALREADY moving in the
+    # LLM's called direction (side-aligned trail24h drift +12…+19%, coin
+    # vol 7–10%) while the BTC/alt tape read quiet. The clause releases a
+    # quiet_tape block when the COIN's own trail24h read is loud in the
+    # called direction: side-aligned |drift| >= `aligned_drift_pct` OR
+    # coin vol >= `coin_vol_pct` (in-sample sweep: A=12/V=8 catches 11/13
+    # rips at the cost of 3 saves; n=16 is thin, so SHADOW-FIRST — the
+    # clause logs WOULD-HAVE-RELEASED accruals until ~15 more sole-block
+    # episodes price it out-of-sample).
+    # Config: `momentum_release: {enabled, shadow_mode, aligned_drift_pct,
+    # coin_vol_pct}` under quiet_tape_gate (either config shape). Absent or
+    # disabled = clause inert (byte-identical legacy behaviour). A coin-tape
+    # data gap is no opinion — it can never release a block.
+    momentum = None
+    mcfg = cfg.get("momentum_release") or {}
+    if blocked and bool(mcfg.get("enabled", False)):
+        from hermes_trader.agents.market_regime import coin_tape_activity
+        _A = float(mcfg.get("aligned_drift_pct", 12.0) or 0.0)
+        _V = float(mcfg.get("coin_vol_pct", 8.0) or 0.0)
+        _ct = coin_tape_activity(ctx.coin)
+        if _ct is not None and _A > 0 and _V > 0:
+            # side-aligned drift: long wants drift >= +A, short <= -A
+            _ad = _ct["drift"] if ctx.trade_side == "long" else -_ct["drift"]
+            _fires = _ad >= _A or _ct["vol"] >= _V
+            _live = not bool(mcfg.get("shadow_mode", True))
+            momentum = {
+                "fires": _fires,
+                "live": _live,
+                "reads": {"vol": round(float(_ct["vol"]), 4),
+                          "drift": round(float(_ct["drift"]), 4),
+                          "aligned_drift": round(float(_ad), 4)},
+                "thresholds": {"aligned_drift_pct": _A, "coin_vol_pct": _V},
+            }
+            if _fires:
+                momentum["reason"] = (
+                    f"quiet_tape_momentum (coin {ctx.coin} trail24h "
+                    f"aligned drift {_ad:+.2f}% vs bar {_A:.2f}% OR coin vol "
+                    f"{_ct['vol']:.2f}% vs bar {_V:.2f}% — coin is loud in "
+                    f"the called direction while the broad tape reads quiet)")
+                if _live:
+                    blocked = False  # release the entry
 
     shadow_fired = [r for r in evaluated.values() if r["would_block"] and not r["live"]]
     live_fired = [r for r in evaluated.values() if r["would_block"] and r["live"]]
@@ -1590,7 +1636,9 @@ def quiet_tape_gate(
     # while ≥1 LIVE variant would have blocked alone. Under OR this is the
     # same set as `live_fired` minus the blocked case; under AND it is the
     # released cohort. Always computed — cheap, and it is the join key.
-    released_by_merge = (not blocked) and bool(live_fired)
+    # NOTE: computed from the PRE-momentum-release verdict (the momentum
+    # clause has its own `momentum` accrual key; the two must not conflate).
+    released_by_merge = (not _blocked_pre_momentum) and bool(live_fired)
 
     reason = " ; ".join(r["reason"] for r in evaluated.values() if r["would_block"])
     out: Dict[str, Any] = {"pass": not blocked}
@@ -1615,6 +1663,13 @@ def quiet_tape_gate(
             "reads": None,  # data gap — no opinion
         }
     out["merge"] = merge
+    if momentum is not None:
+        # Momentum-release accrual key (rides gate_results → Trade result
+        # JSON; the executor logs `quiet_tape_momentum WOULD HAVE RELEASED`
+        # when fires && shadow). `blocked_pre` marks the pre-clause verdict
+        # so the join can tell a shadow clause from a live release.
+        momentum["blocked_pre"] = _blocked_pre_momentum
+        out["momentum"] = momentum
     if released_by_merge:
         out["released_by_merge"] = True
         out["released_reasons"] = [r["reason"] for r in live_fired]
