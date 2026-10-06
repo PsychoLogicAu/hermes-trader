@@ -515,3 +515,148 @@ def test_btc_tape_activity_insufficient_history_returns_none():
     finally:
         market_regime.fetch_hl_candles = orig
         market_regime._tape_cache = (None, 0.0)
+
+
+# ── Momentum-release clause (2026-10-06, WATCHLIST §B.17) ──────────────
+
+CFG_MOM_SHADOW = {
+    "btc": {"enabled": True, "shadow_mode": False, "vol_pct": 1.5, "drift_pct": 2.0},
+    "alt": {"enabled": True, "shadow_mode": False, "vol_pct": 4.5, "drift_pct": 2.0},
+    "merge": "and",
+    "momentum_release": {"enabled": True, "shadow_mode": True,
+                         "aligned_drift_pct": 12.0, "coin_vol_pct": 8.0},
+}
+CFG_MOM_LIVE = {**CFG_MOM_SHADOW,
+                "momentum_release": {"enabled": True, "shadow_mode": False,
+                                     "aligned_drift_pct": 12.0, "coin_vol_pct": 8.0}}
+
+
+def _run_mom(gate_cfg, coin_tape, trade_side="long"):
+    """Run with quiet btc+alt tapes and the coin tape monkeypatched."""
+    from hermes_trader.agents import market_regime
+    orig_coin = market_regime.coin_tape_activity
+    market_regime.coin_tape_activity = (lambda coin, force=False: coin_tape)
+    try:
+        return _run(gate_cfg, _tape(1.0, 0.5), _tape(2.0, 0.5),
+                    ctx=_ctx(trade_side=trade_side))
+    finally:
+        market_regime.coin_tape_activity = orig_coin
+
+
+def test_momentum_absent_config_is_inert():
+    """No momentum_release key -> identical legacy block, no momentum key."""
+    r = _run({"btc": {"enabled": True, "shadow_mode": False, "vol_pct": 1.5,
+                      "drift_pct": 2.0},
+              "alt": {"enabled": True, "shadow_mode": False, "vol_pct": 4.5,
+                      "drift_pct": 2.0},
+              "merge": "and"}, _tape(1.0, 0.5), _tape(2.0, 0.5))
+    assert r["pass"] is False and "momentum" not in r
+
+
+def test_momentum_disabled_is_inert():
+    cfg = {**CFG_MOM_LIVE, "momentum_release": {"enabled": False}}
+    r = _run_mom(cfg, {"vol": 10.0, "drift": 15.0})
+    assert r["pass"] is False and "momentum" not in r
+
+
+def test_momentum_shadow_fires_but_still_blocks():
+    """Coin loud in the called direction, clause SHADOW: block stands,
+    accrual record rides along with fires=True/live=False."""
+    r = _run_mom(CFG_MOM_SHADOW, {"vol": 7.0, "drift": 15.0})
+    assert r["pass"] is False
+    m = r["momentum"]
+    assert m["fires"] is True and m["live"] is False
+    assert m["reads"]["aligned_drift"] == 15.0
+    assert "quiet_tape_momentum" in m["reason"]
+
+
+def test_momentum_shadow_not_fired_still_blocks():
+    r = _run_mom(CFG_MOM_SHADOW, {"vol": 5.0, "drift": 3.0})
+    assert r["pass"] is False
+    assert r["momentum"]["fires"] is False
+
+
+def test_momentum_live_release_long():
+    r = _run_mom(CFG_MOM_LIVE, {"vol": 7.0, "drift": 15.0})
+    assert r["pass"] is True
+    assert r["momentum"]["fires"] is True and r["momentum"]["live"] is True
+
+
+def test_momentum_live_release_short_side_alignment():
+    """SHORT on a coin that FELL 15% (drift -15) is aligned -> release."""
+    r = _run_mom(CFG_MOM_LIVE, {"vol": 7.0, "drift": -15.0}, trade_side="short")
+    assert r["pass"] is True
+    assert r["momentum"]["reads"]["aligned_drift"] == 15.0
+
+
+def test_momentum_short_against_drift_does_not_release():
+    """SHORT on a coin that ROSE 15% is NOT aligned; vol 7 < 8 -> stays blocked."""
+    r = _run_mom(CFG_MOM_LIVE, {"vol": 7.0, "drift": 15.0}, trade_side="short")
+    assert r["pass"] is False
+    assert r["momentum"]["fires"] is False
+
+
+def test_momentum_vol_axis_releases():
+    """Aligned drift below bar but coin vol >= bar -> release (OR semantics)."""
+    r = _run_mom(CFG_MOM_LIVE, {"vol": 9.0, "drift": 2.0})
+    assert r["pass"] is True and r["momentum"]["fires"] is True
+
+
+def test_momentum_coin_gap_never_releases():
+    """Coin-tape data gap = no opinion: the block stands, no momentum key."""
+    r = _run_mom(CFG_MOM_LIVE, None)
+    assert r["pass"] is False and "momentum" not in r
+
+
+def test_momentum_only_evaluated_when_blocked():
+    """Loud broad tape (no block) -> coin tape never fetched, no key."""
+    from hermes_trader.agents import market_regime
+    called = {"n": 0}
+
+    def _spy(coin, force=False):
+        called["n"] += 1
+        return {"vol": 10.0, "drift": 15.0}
+
+    orig = market_regime.coin_tape_activity
+    market_regime.coin_tape_activity = _spy
+    try:
+        r = _run(CFG_MOM_LIVE, _tape(3.0, 5.0), _tape(6.0, 5.0))
+    finally:
+        market_regime.coin_tape_activity = orig
+    assert r["pass"] is True and called["n"] == 0 and "momentum" not in r
+
+
+def test_momentum_release_does_not_pollute_merge_accrual():
+    """A live momentum release must NOT set released_by_merge (that key is
+    the OR-vs-AND counterfactual, computed pre-clause)."""
+    r = _run_mom(CFG_MOM_LIVE, {"vol": 7.0, "drift": 15.0})
+    assert r["pass"] is True
+    assert not r.get("released_by_merge")
+
+
+def test_coin_tape_activity_math_on_synthetic_candles():
+    """Same math contract as btc_tape_activity, per coin."""
+    from hermes_trader.agents import market_regime
+
+    s = 0.0
+    closes = [100.0]
+    for i in range(1, 251):
+        s += 0.005 if i % 2 == 0 else -0.005
+        closes.append(100.0 * math.exp(s))
+    candles = [_FakeCandle(c) for c in closes]
+    orig = market_regime.fetch_hl_candles
+    market_regime.fetch_hl_candles = (lambda coin, interval="5m", count=100, fresh=False: candles)
+    market_regime._coin_tape_cache.clear()
+    try:
+        tape = market_regime.coin_tape_activity("TESTCOIN", force=True)
+        assert tape is not None
+        assert abs(tape["vol"] - 0.005 * math.sqrt(288) * 100) < 0.05, tape
+        assert abs(tape["drift"]) < 0.01, tape
+        # cached per coin: second call must not refetch
+        market_regime.fetch_hl_candles = (
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("refetched")))
+        tape2 = market_regime.coin_tape_activity("TESTCOIN")
+        assert tape2 is tape or tape2 == tape
+    finally:
+        market_regime.fetch_hl_candles = orig
+        market_regime._coin_tape_cache.clear()
