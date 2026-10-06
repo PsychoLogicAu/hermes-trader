@@ -1213,6 +1213,68 @@ def _duelist_verdict(
         return None
 
 
+def _duelist_close_exit_accrual(
+    coin: str,
+    duelist_row: Dict[str, Any],
+    open_positions: List[Dict[str, Any]],
+) -> None:
+    """B.10 shadow accrual — duelist exit-voice (log-only, never acts).
+
+    When the A/B duelist calls CLOSE on a HELD coin and the primary does not
+    close it, log a WOULD-HAVE-CLOSED line so the counterfactual accrues
+    forward (design + in-sample replay: .hermes/WATCHLIST.md §B.10 — 32
+    held-CLOSEs, would-have-exit +$78.48 vs actual −$186.50; n=32 is not
+    decision-grade, hence shadow-first per house pattern).
+
+    The close-guard in parse_verdict already downgrades CLOSE-on-unheld to
+    PASS, so a recorded CLOSE implies held — the open_positions check here is
+    defensive only. Every firing is logged (no conf cutoff in code): the
+    trigger variants (a) conf>=0.85, (b) 2-of-3 consecutive, (c) conf>=0.70
+    AND peak<1% are priced OFFLINE from the logged fields, per the design.
+
+    Fields on the line are what the join needs: dl_conf, position age, spot
+    vs entry, one-way peak, entry/mark prices for exact next-5m-open pricing
+    (HL 5m candles fetched by the join script from the line's timestamp), and
+    perception_id to tie back to the duel row / prompt archive.
+
+    Never raises: this is observability inside the research loop — a broken
+    accrual must never cost a trade.
+    """
+    try:
+        if str(duelist_row.get("duelist_verdict") or "") != "CLOSE":
+            return
+        held = next((p for p in (open_positions or []) if p.get("coin") == coin), None)
+        if held is None:
+            return
+        side = str(held.get("side") or "?")
+        conf = float(duelist_row.get("duelist_confidence") or 0.0)
+        age_s = spot_s = peak_s = basis_s = mark_s = "n/a"
+        try:
+            from hermes_trader.agents import dsl_exit as _dslx
+            trk = _dslx._active_positions.get(f"{coin}_{side}")
+            if trk is not None and trk.entry_px:
+                e = float(trk.entry_px)
+                pk = float(trk.peak_px or e)
+                age_s = f"{int((time.time() - trk.entry_time) // 60)}min"
+                peak_pct = ((pk - e) / e * 100) if side == "long" else ((e - pk) / e * 100)
+                peak_s = f"{peak_pct:+.2f}%"
+                basis_s = f"{e:.6g}"
+                m = float(getattr(trk, "last_mark_px", None) or 0.0)
+                if m > 0:
+                    spot_pct = ((m - e) / e * 100) if side == "long" else ((e - m) / e * 100)
+                    spot_s = f"{spot_pct:+.2f}%"
+                    mark_s = f"{m:.6g}"
+        except Exception:  # noqa: BLE001 — tracker read is best-effort
+            pass
+        logger.info(
+            f"[gate][SHADOW] duelist_close_exit WOULD HAVE CLOSED {coin} {side}: "
+            f"dl_conf {conf:.2f}, position age {age_s}, spot {spot_s}, peak {peak_s}, "
+            f"entry {basis_s}, mark {mark_s}, pid {duelist_row.get('perception_id', 'unknown')}"
+        )
+    except Exception as e:  # noqa: BLE001 — accrual must never break the loop
+        logger.debug(f"[research] duelist_close_exit accrual failed for {coin}: {e}")
+
+
 # Code default for the PRIMARY slot's sampling — exactly what was sent before
 # this became configurable (temperature 0.1 ONLY; adding keys would itself
 # change behavior). The live value is hot-tunable via the agent config's
@@ -1612,6 +1674,12 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         held_coins=held_coins,
     )
     if duelist_row is not None:
+        # B.10 shadow accrual: duelist CLOSE on a held coin that the primary
+        # did NOT close -> log the counterfactual (log-only, never acts).
+        # Skipped when the primary also said CLOSE — that split is not a
+        # would-have-closed case (the position closes anyway).
+        if parsed["verdict"] != "CLOSE":
+            _duelist_close_exit_accrual(coin, duelist_row, open_positions)
         try:
             from hermes_trader.session_log import append as _log_event
             _log_event({
