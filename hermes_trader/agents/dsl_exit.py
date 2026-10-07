@@ -127,6 +127,14 @@ class ExitPolicy:
     # trackers the position keeps its protect/stop/hard-timeout exits and
     # rides. 0 restores unconditional behavior.
     stale_flat_min_positions: int = 3
+    # Deep-negative stale-flat SHADOW clause (B.37-B, 2026-10-07): when the
+    # book is BELOW the contention floor the stale-flat timeout above never
+    # fires, so a never-armed deep bleeder rides to the max_loss stop (the
+    # ADA 2026-10-06 shape). This clause logs what a deep-negative cut would
+    # have done — shadow accrual only, never exits (replay n=36: net-negative
+    # at every depth; A live first, revisit with accrual data). Shape:
+    # {"enabled": bool, "depth_pct": float}; {} = inert.
+    stale_flat_deep_release: Dict[str, Any] = field(default_factory=dict)
     phase2_tiers: List[RetraceTier] = field(default_factory=lambda: [
         RetraceTier(5.0, 0.30),   # 5% profit → give back 30%
         RetraceTier(10.0, 0.40),  # 10% profit → lock tighter, give back 40%
@@ -366,6 +374,38 @@ class DSLTracker:
                     unrealized_pct=upct,
                 )
 
+        # ── Deep-negative stale-flat SHADOW (B.37-B, 2026-10-07) ──────
+        # The contention-floor gate above means an uncontended never-armed
+        # bag rides to the max_loss stop even when it is deeply negative
+        # (the ADA shape). Candidate fix: fire the stale-flat cut on an
+        # UNCONTENDED book when the mark is beyond `deep_release_pct` spot.
+        # n=36 replay (scratch/_b37_cf_replay_1007.py): net-NEGATIVE at every
+        # depth -1.0..-2.5 vs pure defer (the age gate cuts recovering bags,
+        # and clause A fires earlier on the same trades) — so this ships
+        # SHADOW ONLY: log what it would have done, accrue the counterfactual,
+        # never exit. Config: dsl_exit.stale_flat_deep_release
+        # {enabled, depth_pct}; inert when missing.
+        _deep_cfg = getattr(pol, "stale_flat_deep_release", None) or {}
+        if (bool(_deep_cfg.get("enabled", False))
+                and pol.stale_flat_timeout_minutes > 0
+                and elapsed_min >= pol.stale_flat_timeout_minutes
+                and len(_active_positions) < _stale_min_pos):
+            _deep = float(_deep_cfg.get("depth_pct", 0.0) or 0.0)
+            if _deep > 0 and upct <= -_deep:
+                if is_long:
+                    _peak = (self.peak_px - self.entry_px) / self.entry_px * 100
+                else:
+                    _peak = (self.entry_px - self.peak_px) / self.entry_px * 100
+                if _peak < pol.protect_pct:
+                    logger.warning(
+                        f"[dsl][SHADOW] stale_flat_deep_release WOULD HAVE "
+                        f"EXITED {self.coin}_{self.side} at {mark_px} "
+                        f"({elapsed_min:.0f}min, unrealized {upct:+.2f}% <= "
+                        f"-{_deep:.2f}%, peak {_peak:.2f}% < protect "
+                        f"{pol.protect_pct}%, book {len(_active_positions)}/"
+                        f"{_stale_min_pos} uncontended) — NOT exiting "
+                        f"(shadow accrual, B.37-B)")
+
         # ── Hard timeout ──────────────────────────────────────────────
         if elapsed_min >= pol.hard_timeout_minutes:
             return self._verdict(
@@ -591,6 +631,7 @@ def _tracker_from_dict(d: Dict[str, Any]) -> DSLTracker:
         atr_stop_enabled=pol_raw.get("atr_stop_enabled", ExitPolicy.atr_stop_enabled),
         stale_flat_timeout_minutes=pol_raw.get("stale_flat_timeout_minutes", 0.0),
         stale_flat_min_positions=int(pol_raw.get("stale_flat_min_positions", 3) or 0),
+        stale_flat_deep_release=dict(pol_raw.get("stale_flat_deep_release", {}) or {}),
         atr_stop_mult=pol_raw.get("atr_stop_mult", ExitPolicy.atr_stop_mult),
         atr_stop_floor_pct=pol_raw.get("atr_stop_floor_pct", ExitPolicy.atr_stop_floor_pct),
         atr_stop_ceiling_pct=pol_raw.get("atr_stop_ceiling_pct", ExitPolicy.atr_stop_ceiling_pct),
@@ -740,6 +781,7 @@ def _policy_from_config() -> ExitPolicy:
             atr_stop_ceiling_pct=float(atr_cfg.get("ceiling_pct", ExitPolicy.atr_stop_ceiling_pct)),
             stale_flat_timeout_minutes=float(dsl.get("stale_flat_timeout_minutes", 0.0) or 0.0),
             stale_flat_min_positions=int(dsl.get("stale_flat_min_positions", 3) or 0),
+            stale_flat_deep_release=dict(dsl.get("stale_flat_deep_release", {}) or {}),
             consecutive_breaches_required=int(dsl.get("consecutive_breaches_required", 1) or 1),
             noise_band_enabled=bool(noise_cfg.get("enabled", False)),
             noise_band_atr_mult=float(noise_cfg.get("atr_mult", ExitPolicy.noise_band_atr_mult)),

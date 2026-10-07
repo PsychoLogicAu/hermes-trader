@@ -175,3 +175,79 @@ def test_fail_safe_on_config_read_failure(monkeypatch):
     res, calls = route()
     assert res["action"] == "close"
     assert calls == ["FOO"]
+
+
+# ── B.37-A trend-release escape (2026-10-07, ADA die-trigger follow-up) ──
+
+def _tracker_marked(coin, mark, **kw):
+    t = _tracker(coin, **kw)
+    t.last_mark_px = mark
+    return t
+
+
+def test_trend_release_disabled_by_default_defers_deep_bleeder(cfg):
+    """No trend_release key = byte-identical pre-change guard: a deep
+    bleeder still defers (the ADA shape stays deferred until the clause is
+    armed in config)."""
+    cfg(ai_close_slot_defer={"shadow_mode": False})
+    _active_positions["FOO_long"] = _tracker_marked("FOO", 97.0)  # -3% mark
+    res, calls = route()
+    assert res["action"] == "none"
+    assert calls == []
+
+
+def test_trend_release_fires_on_deep_bleeder(cfg):
+    """enabled + mark <= -depth: LLM jurisdiction restored, close proceeds."""
+    cfg(ai_close_slot_defer={"shadow_mode": False,
+                             "trend_release": {"enabled": True,
+                                               "depth_pct": 2.0}})
+    _active_positions["FOO_long"] = _tracker_marked("FOO", 97.5)  # -2.5%
+    res, calls = route()
+    assert res["action"] == "close"
+    assert calls == ["FOO"]
+
+
+def test_trend_release_shallow_bag_still_defers(cfg):
+    """Mark inside the depth bar (-1.0% > -2.0%): guard keeps ownership —
+    the ZRO-type shallow drifter protection is untouched."""
+    cfg(ai_close_slot_defer={"shadow_mode": False,
+                             "trend_release": {"enabled": True,
+                                               "depth_pct": 2.0}})
+    _active_positions["FOO_long"] = _tracker_marked("FOO", 99.0)  # -1.0%
+    res, calls = route()
+    assert res["action"] == "none"
+    assert calls == []
+
+
+def test_trend_release_short_side(cfg):
+    cfg(ai_close_slot_defer={"shadow_mode": False,
+                             "trend_release": {"enabled": True,
+                                               "depth_pct": 2.0}})
+    # short bleeding = mark ABOVE entry
+    _active_positions["FOO_short"] = _tracker_marked(
+        "FOO", 102.5, side="short")
+    res, calls = route()
+    assert res["action"] == "close"
+    assert calls == ["FOO"]
+
+
+def test_trend_release_no_fresh_mark_fails_safe(cfg):
+    """last_mark_px never set (tracker never checked) -> clause inert,
+    guard stands."""
+    cfg(ai_close_slot_defer={"shadow_mode": False,
+                             "trend_release": {"enabled": True,
+                                               "depth_pct": 2.0}})
+    _active_positions["FOO_long"] = _tracker("FOO", peak=100.0)
+    res, calls = route()
+    assert res["action"] == "none"
+    assert calls == []
+
+
+def test_trend_release_depth_zero_inert(cfg):
+    cfg(ai_close_slot_defer={"shadow_mode": False,
+                             "trend_release": {"enabled": True,
+                                               "depth_pct": 0}})
+    _active_positions["FOO_long"] = _tracker_marked("FOO", 95.0)
+    res, calls = route()
+    assert res["action"] == "none"
+    assert calls == []
