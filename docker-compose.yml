@@ -12,6 +12,10 @@ services:
       # Directory mount per the EBUSY rule; the file is pre-created host-side
       # (scripts/build.sh) so append-only writes work.
       - ./duel-logs:/app/duel-logs:rw
+      # Decision-voice observer log (decision_voice.py appends; HERMES_DV_FILE
+      # below) — same directory-mount pattern as duel-logs: the shadow
+      # accrual must survive rebuilds/recreates or the offline join has no data.
+      - ./dv-logs:/app/dv-logs:rw
       # Persistent HF model cache so Chronos-2 loads from disk (no re-download
       # on rebuild/restart). Seeded from the container on first use.
       - ./hf-cache:/home/trader/.cache/huggingface:rw
@@ -32,6 +36,9 @@ services:
       # Model-duel A/B log — on a bind mount so it survives rebuilds
       # (default ~/.hermes-trader-duel.jsonl sits on the writable layer).
       - HERMES_DUEL_FILE=/app/duel-logs/hermes-trader-duel.jsonl
+      # Decision-voice shadow log — same reason (clef-gate accrual join reads
+      # this after recreates).
+      - HERMES_DV_FILE=/app/dv-logs/hermes-trader-dv.jsonl
     networks:
       - llama-net
     restart: unless-stopped
