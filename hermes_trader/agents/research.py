@@ -28,6 +28,7 @@ from hermes_trader.agents.duel_store import (
     slot_get,
 )
 from hermes_trader.agents import prompt_log
+from hermes_trader.agents.decision_voice import decision_voice_verdict
 from hermes_trader.agents.memory import memory
 from hermes_trader.agents.prior_calls import build_prior_call_block
 from hermes_trader.agents.rvol_context import build_rvol_block
@@ -1673,6 +1674,37 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         primary_server_ms=primary_server_ms,
         held_coins=held_coins,
     )
+    # Decision-voice observer (2026-10-07): a DIFFERENT CLASS of LLM call —
+    # a decision model (Cloudflare Clef family) answering a typed
+    # state+questions schema via llama.cpp's /v1/systemone, probabilities in
+    # one forward pass, no text generation, no parse_verdict. Shadow-only
+    # like the duelist: recorded, never gates, never executes. Dormant when
+    # no endpoint/model is named (decision_voice.py). Runs AFTER the primary
+    # verdict, so an outage can never delay or break execution.
+    wr_dv = wr  # the same win-rate snapshot the system prompt used
+    dv_row = decision_voice_verdict(
+        coin, perception, tf1h, tf4h, tf1d,
+        funding_raw, news, open_positions,
+        wr_dv.get("rate", 0), int(wr_dv.get("total", 0)),
+        parsed["verdict"], parsed["confidence"],
+        primary_ms=primary_ms,
+    )
+    if dv_row is not None:
+        try:
+            from hermes_trader.session_log import append as _log_event_dv
+            _log_event_dv({
+                "event": "decision_voice", "coin": coin,
+                "primary_verdict": dv_row["primary_verdict"],
+                "dv_verdict": dv_row["dv_verdict"],
+                "dv_model": dv_row["dv_model"],
+                "agree": dv_row["dv_verdict"] == dv_row["primary_verdict"],
+                "dv_confidence": dv_row["dv_confidence"],
+                "dv_ms": dv_row["dv_ms"],
+                "dv_server_ms": dv_row["dv_server_ms"],
+            })
+        except Exception:
+            pass
+
     if duelist_row is not None:
         # B.10 shadow accrual: duelist CLOSE on a held coin that the primary
         # did NOT close -> log the counterfactual (log-only, never acts).
@@ -1741,6 +1773,20 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 "side": duelist_row["duelist_side"],
             }
             if duelist_row is not None else None
+        ),
+        # Decision-voice verdict at entry (None when disabled/failed). Same
+        # join purpose as duelist_at_entry: the executor snapshots it into
+        # the entry context so the close row attributes the same trade to
+        # the decision model. Verdict-level only — the raw per-option
+        # probabilities live in the DV JSONL.
+        "decision_voice_at_entry": (
+            {
+                "model": dv_row["dv_model"],
+                "verdict": dv_row["dv_verdict"],
+                "confidence": dv_row["dv_confidence"],
+                "side": dv_row["dv_side"],
+            }
+            if dv_row is not None else None
         ),
         "created_at": int(time.time() * 1000),
         # Carry forward so risk gates can read own-coin signal strength.
