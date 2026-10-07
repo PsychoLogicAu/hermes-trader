@@ -313,6 +313,8 @@ def test_research_records_dv_row(_dv_on, monkeypatch, tmp_path):
         "model": "clef-flash", "verdict": "LONG",
         "confidence": a["decision_voice_at_entry"]["confidence"],
         "side": "long",
+        # Change-1 scalars must ride the whitelist (2026-08 pitfall).
+        "trap": 0.1, "close_now": None,
     }
     rows = [json.loads(l) for l in tmp_path.joinpath("dv.jsonl").read_text().splitlines()]
     assert len(rows) == 1

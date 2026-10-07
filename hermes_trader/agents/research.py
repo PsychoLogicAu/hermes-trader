@@ -1276,6 +1276,92 @@ def _duelist_close_exit_accrual(
         logger.debug(f"[research] duelist_close_exit accrual failed for {coin}: {e}")
 
 
+def _dv_close_exit_accrual(
+    coin: str,
+    dv_row: Dict[str, Any],
+    open_positions: List[Dict[str, Any]],
+) -> None:
+    """Decision-voice close_veto shadow accrual (clef-gate scope Change 3,
+    log-only, never acts — mirrors _duelist_close_exit_accrual).
+
+    The dv observer already answers `close_now` (noul) on EVERY scan for a
+    HELD coin (the question is only asked when held — the phantom-CLOSE class
+    stays structurally impossible), so this check is free: no new endpoint
+    call, no dsl_exit import cycle.
+
+    Fires when: held AND close_now >= threshold AND the primary did NOT say
+    CLOSE (a primary CLOSE closes the position anyway — not a split).
+    grace_minutes suppresses the line on young positions (don't fight fresh
+    entries; mirrors the dsl grace).
+
+    Config `decision_voice_gate.close_veto` {shadow_mode, threshold,
+    grace_minutes} — hot read. shadow_mode false is the PROMOTION step and
+    not implemented here by design: promotion injects a synthetic CLOSE via
+    the AI-CLOSE execution path (executor verdict=="CLOSE"), tagged
+    close_source "dv" — that lands with the offline join's verdict, not now.
+    Every firing logs the raw close_now so all threshold variants are priced
+    offline. Never raises.
+    """
+    try:
+        from hermes_trader.agents.config_store import read_agent_config
+        gate = (read_agent_config().get("decision_voice_gate") or {})
+        if not bool(gate.get("enabled", False)):
+            return
+        cv = gate.get("close_veto") or {}
+        held = next((p for p in (open_positions or [])
+                     if p.get("coin") == coin), None)
+        if held is None:
+            return
+        close_p = dv_row.get("dv_close_now")
+        if close_p is None:
+            return
+        close_p = float(close_p)
+        threshold = float(cv.get("threshold", 0.50))
+        if close_p < threshold:
+            return
+        side = str(held.get("side") or "?")
+        age_s = spot_s = peak_s = basis_s = mark_s = "n/a"
+        try:
+            from hermes_trader.agents import dsl_exit as _dslx
+            trk = _dslx._active_positions.get(f"{coin}_{side}")
+            if trk is not None and trk.entry_px:
+                e = float(trk.entry_px)
+                pk = float(trk.peak_px or e)
+                age_min = (time.time() - trk.entry_time) // 60
+                grace = float(cv.get("grace_minutes", 90))
+                if age_min < grace:
+                    return  # young position — don't fight fresh entries
+                age_s = f"{int(age_min)}min"
+                peak_pct = ((pk - e) / e * 100) if side == "long" else ((e - pk) / e * 100)
+                peak_s = f"{peak_pct:+.2f}%"
+                basis_s = f"{e:.6g}"
+                m = float(getattr(trk, "last_mark_px", None) or 0.0)
+                if m > 0:
+                    spot_pct = ((m - e) / e * 100) if side == "long" else ((e - m) / e * 100)
+                    spot_s = f"{spot_pct:+.2f}%"
+                    mark_s = f"{m:.6g}"
+        except Exception:  # noqa: BLE001 — tracker read is best-effort
+            pass
+        if not bool(cv.get("shadow_mode", True)):
+            # Promotion not wired yet (see docstring): log LOUDLY that the
+            # condition fired with shadow off, but still do not act — the
+            # synthetic-CLOSE injection rides a separate reviewed change.
+            logger.warning(
+                f"[gate] dv_close_veto FIRED (shadow OFF, action NOT wired) "
+                f"{coin} {side}: close_now {close_p:.2f} >= {threshold:.2f}, "
+                f"age {age_s}, spot {spot_s}, peak {peak_s}, entry {basis_s}, "
+                f"mark {mark_s}, pid {dv_row.get('perception_id', 'unknown')}")
+            return
+        logger.info(
+            f"[gate][SHADOW] dv_close_veto WOULD HAVE CLOSED {coin} {side}: "
+            f"close_now {close_p:.2f} >= {threshold:.2f}, position age {age_s}, "
+            f"spot {spot_s}, peak {peak_s}, entry {basis_s}, mark {mark_s}, "
+            f"pid {dv_row.get('perception_id', 'unknown')}"
+        )
+    except Exception as e:  # noqa: BLE001 — accrual must never break the loop
+        logger.debug(f"[research] dv_close_veto accrual failed for {coin}: {e}")
+
+
 # Code default for the PRIMARY slot's sampling — exactly what was sent before
 # this became configurable (temperature 0.1 ONLY; adding keys would itself
 # change behavior). The live value is hot-tunable via the agent config's
@@ -1690,6 +1776,11 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         primary_ms=primary_ms,
     )
     if dv_row is not None:
+        # clef-gate scope Change 3: dv close_now exit check (log-only shadow
+        # accrual, mirrors the B.10 duelist line). Skipped when the primary
+        # also said CLOSE — that split is not a would-have-closed case.
+        if parsed["verdict"] != "CLOSE":
+            _dv_close_exit_accrual(coin, dv_row, open_positions)
         try:
             from hermes_trader.session_log import append as _log_event_dv
             _log_event_dv({
@@ -1785,6 +1876,12 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 "verdict": dv_row["dv_verdict"],
                 "confidence": dv_row["dv_confidence"],
                 "side": dv_row["dv_side"],
+                # SCALARS the live gates read (clef-gate scope Change 1).
+                # WHITELIST REGRESSION POINT: a field not listed here
+                # silently never reaches the executor (2026-08 pitfall —
+                # duelist_at_entry lost its fields the same way).
+                "trap": dv_row["dv_trap"],
+                "close_now": dv_row["dv_close_now"],
             }
             if dv_row is not None else None
         ),

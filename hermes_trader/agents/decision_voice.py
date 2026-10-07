@@ -529,6 +529,14 @@ def decision_voice_verdict(
             "dv_verdict": parsed["verdict"],
             "dv_confidence": parsed["confidence"],
             "dv_side": parsed["side"],
+            # The two SCALARS the live gates read (2026-10-07 clef-gate scope,
+            # .hermes/plans/2026-10-07-clef-gate-close-voice-scope.md Change 1).
+            # These must ride the analysis whitelist + the executor entry
+            # context too — a field not in the whitelist silently never
+            # reaches the executor (the 2026-08 pitfall). Raw probabilities
+            # stay in `dv_answers` for offline threshold pricing.
+            "dv_trap": float((answers.get("trap") or {}).get("noul", 0.0)),
+            "dv_close_now": (answers.get("close_now") or {}).get("noul"),
             "dv_news_risk": parsed["news_risk"],
             "dv_reasoning": parsed["reasoning"][:300],
             "dv_answers": answers,
