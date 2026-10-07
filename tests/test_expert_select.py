@@ -312,6 +312,30 @@ def test_cached_signal_carries_raw_candidate_medians(monkeypatch):
     assert all(len(p) == H for p in sig.candidate_medians.values())
 
 
+def test_cached_signal_carries_per_model_tails_pct(monkeypatch):
+    """C.21: the cache also carries per-model q10/q90 paths in PCT space —
+    the favorable-tail accrual's complete record (the survey showed the
+    size-up tilt lives in the per-model tail, diluted by the mixture)."""
+    _patch_cfg(monkeypatch, _cfg_block())
+    _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
+    monkeypatch.setattr(es, "_select_with_llm",
+                        lambda prompt, names: ("mixture", "ok"))
+    sig = es._compute("X", "long")
+    assert sig.error is None
+    assert set(sig.candidate_q90_pct) == {"chronos", "timesfm"}
+    assert all(len(p) == H for p in sig.candidate_q90_pct.values())
+    assert all(len(p) == H for p in sig.candidate_q10_pct.values())
+    last = 100.0 + 0.5 * 77
+    # timesfm fake: median +0.9/bar, q90 = median + 0.4*width (width 2.0)
+    exp_q90 = [(last + 0.9 * (i + 1) + 0.8 - last) / last * 100
+               for i in range(H)]
+    assert sig.candidate_q90_pct["timesfm"] == pytest.approx(exp_q90)
+    # q10 below q90 at every step (frame sanity, pct space)
+    for a, b in zip(sig.candidate_q10_pct["timesfm"],
+                    sig.candidate_q90_pct["timesfm"]):
+        assert a < b
+
+
 # ── CV replay ───────────────────────────────────────────────────────────────
 def test_cv_mae_ranking_orders_models(monkeypatch):
     """CV replay: forecast the last H bars from the context ending H bars

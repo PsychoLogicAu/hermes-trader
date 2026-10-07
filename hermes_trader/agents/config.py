@@ -97,6 +97,13 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         # the would-be notional haircut WITHOUT applying it (never touches
         # trade_notional). Accrual-only until the n>=15 pullweight re-judge.
         "divergent_sizing_shadow": {"enabled": False, "haircut": 0.5},
+        # C.21 (2026-10-08): favorable-tail ACCRUAL — the size-up counterpart
+        # of the divergent haircut. When enabled, every executed entry logs the
+        # per-model favorable-tail score (max q90[:6] long / -min q10[:6]
+        # short, pp) WITHOUT touching size. threshold_pp marks the survey's
+        # top-decile class (~4pp) as hot= in the line. Accrual-only until the
+        # n>=40 cross-regime re-judge (see WATCHLIST C.21).
+        "fav_tail_shadow": {"enabled": False, "threshold_pp": 4.0},
         # Daily giveback lock — once day peaks, no new entries if PnL retraces > halt_pct
         "daily_giveback_halt_pct": 0.0,
         "daily_giveback_min_peak_usd": 20.0,
