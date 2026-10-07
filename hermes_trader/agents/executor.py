@@ -1638,6 +1638,49 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     except Exception as _dss_e:  # accrual must never break the execution path
         logger.debug(f"[executor] divergent_sizing shadow accrual failed: {_dss_e}")
 
+    # Favorable-tail shadow accrual (WATCHLIST §C.21, owner go 2026-10-08):
+    # the size-up counterpart of the divergent haircut. The 2026-10-07 week
+    # survey (scratch/eval/expert_week/score_upsize.py, n=580 side-matched
+    # anchors) found the PER-MODEL favorable tail marks opportunity: top
+    # decile of max q90[:6] (long) / -min q10[:6] (short) realized +0.6..1.2pp
+    # mean end-return and 52-66% win vs +0.10pp / 46% baseline — chronos and
+    # timesfm strongest, the re-centered mixture DILUTES the tilt. Caveat:
+    # one chop week, n=58/decile, rank-corr only ~0.05 (a threshold signal,
+    # not a dial). This logs the per-model fav-score on every executed entry
+    # WITHOUT touching size; re-judge bar in the watchlist (n>=40 entries,
+    # across both chop and trend regimes, tilt must survive before any
+    # 1.5x nudge is proposed — never 2x on this evidence class).
+    # Config `fav_tail_shadow.enabled` (default False).
+    try:
+        _fts = config.get("fav_tail_shadow", {}) or {}
+        if bool(_fts.get("enabled", False)):
+            from hermes_trader.agents.expert_select import peek_expert_select
+            _esig = peek_expert_select(analysis["coin"])
+            if _esig is not None:
+                _K = 6
+                _long = str(trade_side).lower() == "long"
+                _src = (_esig.candidate_q90_pct if _long
+                        else _esig.candidate_q10_pct)
+                _parts = []
+                _hot = []
+                for _m, _path in sorted(_src.items()):
+                    if not _path:
+                        continue
+                    _w = _path[:_K]
+                    _fav = max(_w) if _long else -min(_w)
+                    _parts.append(f"{_m}={_fav:+.2f}")
+                    if _fav >= float(_fts.get("threshold_pp", 4.0)):
+                        _hot.append(_m)
+                if _parts:
+                    logger.warning(
+                        f"[gate][ACC] fav_tail {analysis['coin']} "
+                        f"{trade_side.upper()} fav6pp[{','.join(_parts)}] "
+                        f"conf {analysis['confidence']:.2f} "
+                        f"hot={','.join(_hot) if _hot else '-'} "
+                        f"(accrual-only, size NOT changed)")
+    except Exception as _fts_e:  # accrual must never break the execution path
+        logger.debug(f"[executor] fav_tail shadow accrual failed: {_fts_e}")
+
     if gate_output["blocked"]:
         # ── Capital-rotation (Phase-1 lever) — SHADOW by default ─────────────
         # Phase-1 finding: 94% of missed movers die at the 300% cap / max_concurrent

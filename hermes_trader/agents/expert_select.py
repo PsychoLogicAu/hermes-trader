@@ -165,6 +165,14 @@ class ExpertSelectSignal:
     # complete record for the per-model median-MAE join. (CV preds live in
     # the CV cache entry under "preds".)
     candidate_medians: Dict[str, List[float]] = field(default_factory=dict)
+    # Raw per-model q10/q90 paths (% vs context_last, len == horizon) — the
+    # complete record for the favorable-tail accrual (WATCHLIST §C.21): the
+    # 2026-10-07 survey found the size-up tilt lives in the PER-MODEL
+    # favorable tail (max q90[:6] long / -min q10[:6] short; chronos/timesfm
+    # top-decile +1pp end-ret vs +0.10 baseline) and the mixture DILUTES it,
+    # so per-model tails are required, not the re-centered mixture's.
+    candidate_q10_pct: Dict[str, List[float]] = field(default_factory=dict)
+    candidate_q90_pct: Dict[str, List[float]] = field(default_factory=dict)
 
 
 # ── Per-coin cache (TTL-based; stores the full signal, not just the value) ────
@@ -581,6 +589,12 @@ def _compute(coin: str, side: str) -> ExpertSelectSignal:
         candidates={m: (s.error or "ok") for m, s in live.items()},
         candidate_medians={m: list(s.median[:horizon])
                            for m, s in live.items() if s.median},
+        candidate_q10_pct={m: pct(list(s.quantiles["0.1"][:horizon]))
+                           for m, s in live.items()
+                           if s.quantiles and s.quantiles.get("0.1")},
+        candidate_q90_pct={m: pct(list(s.quantiles["0.9"][:horizon]))
+                           for m, s in live.items()
+                           if s.quantiles and s.quantiles.get("0.9")},
         # A non-"ok" note (LLM parse-fail / endpoint error) is the diagnostic
         # that the selection degraded to mixture — record it. Only a clean
         # pick ("ok") or a pre-LLM "not diverse" skip is error-free.
