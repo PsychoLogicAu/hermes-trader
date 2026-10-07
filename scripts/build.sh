@@ -27,7 +27,7 @@ echo "[build] container user will be ${USER_ID}:${GROUP_ID} (host user: $(id -un
 # If a dir is missing, Docker auto-creates it as root:root on `up` and the
 # container crash-loops with PermissionError. Fix that up front.
 BAD=0
-for dir in trader-logs hf-cache agent-state duel-logs; do
+for dir in trader-logs hf-cache agent-state duel-logs dv-logs; do
   if [ ! -d "$dir" ]; then
     echo "[build] creating $dir"
     mkdir -p "$dir"
@@ -46,5 +46,7 @@ fi
 # Pre-create the duel log file so the container's append writes never race a
 # fresh-inode creation (same rationale as the directory pre-flight above).
 touch duel-logs/hermes-trader-duel.jsonl
+# Same for the decision-voice shadow log (clef-gate accrual; HERMES_DV_FILE).
+touch dv-logs/hermes-trader-dv.jsonl
 
 docker compose build "$@" --build-arg USER_ID="$USER_ID" --build-arg GROUP_ID="$GROUP_ID" hermes-trader

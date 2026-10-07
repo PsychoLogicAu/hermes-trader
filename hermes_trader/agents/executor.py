@@ -856,6 +856,24 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _attach_expert_select_to_result(result, coin, side)
             return result
 
+    # Decision-voice entry trap-veto (clef-gate scope Change 2) — same site
+    # and same forensics path as the runner gate; shadow_mode logs the
+    # would-be-block and lets the trade through (decision_voice.py observer
+    # must be armed for this to ever see a trap scalar; fail-open without it).
+    dv_block = _dv_trap_veto_reason(analysis, config)
+    if dv_block:
+        coin = analysis.get("coin") or "unknown"
+        side = analysis.get("side", "long") or "long"
+        result = {
+            "executed": False, "mode": mode,
+            "analysis_id": analysis["id"], "reason": dv_block,
+        }
+        _attach_chronos_to_result(result, coin, side)
+        _attach_timesfm_to_result(result, coin, side)
+        _attach_tirex_to_result(result, coin, side)
+        _attach_expert_select_to_result(result, coin, side)
+        return result
+
     # Idempotency: don't double-execute
     already = next(
         (t for t in memory.get_recent_trades(100)
@@ -1868,6 +1886,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             # A/B duelist: the second model's verdict on the SAME prompt, so the
             # close row can score it on this exact trade. None when disabled.
             "duelist": analysis.get("duelist_at_entry"),
+            # Decision voice (Clef-family): its verdict + trap/close_now scalars
+            # at entry, so the close row can price the dv counterfactuals on
+            # this exact trade (clef-gate scope Change 1 — the whitelist must
+            # carry trap/close_now or they never reach here).
+            "decision_voice": analysis.get("decision_voice_at_entry"),
             # Join key back to the perception (+ the duel log row that holds
             # both models' full reasoning for this trade).
             "perception_id": analysis.get("perception_id"),
@@ -2940,6 +2963,59 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     return ""
 
 
+def _dv_trap_veto_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
+    """Decision-voice entry trap-veto (clef-gate scope Change 2).
+
+    The Clef-family decision voice (decision_voice.py, /v1/systemone) answers
+    a `trap` noul per scan — "is ENTERING this setup right now actively
+    dangerous". Evidence: WATCHLIST §C.19 gauntlet + overlay costing — trap
+    >= 0.40 veto removes -$3.98 of the gated walk book's -$4.68 (clef as
+    ENTRY DECIDER was rejected; as trap-veto it is the whole win).
+
+    Config `decision_voice_gate.trap_veto`:
+      shadow_mode true  -> log WOULD-BE-BLOCKED, allow the trade (start here;
+                           the counterfactual join prices it against real
+                           close rows — the B.10/momentum_reentry pattern).
+      shadow_mode false -> hard block; the reason string flows into the
+                           existing runner_gate_blocked forensics path.
+    Threshold lives in config, NOT baked in code (raw trap noul is logged,
+    so every threshold variant is priced offline).
+
+    FAIL-OPEN by doctrine: no dv row (observer off/failed) or a missing trap
+    scalar = "no observation", never a block. Never raises.
+    """
+    try:
+        gate = (config.get("decision_voice_gate") or {})
+        if not bool(gate.get("enabled", False)):
+            return ""
+        tv = gate.get("trap_veto") or {}
+        dv = analysis.get("decision_voice_at_entry") or {}
+        trap = dv.get("trap")
+        if trap is None:
+            return ""  # fail-open: no observation
+        threshold = float(tv.get("threshold", 0.45))
+        trap = float(trap)
+        if trap < threshold:
+            return ""
+        coin = analysis.get("coin") or "unknown"
+        side = (analysis.get("side") or "long")
+        conf = float(analysis.get("confidence", 0) or 0)
+        score = float(analysis.get("composite_score", 0) or 0)
+        if bool(tv.get("shadow_mode", True)):
+            logger.warning(
+                f"[gate][SHADOW] dv_trap_veto WOULD BE BLOCKED {coin} "
+                f"{str(side).upper()}: trap {trap:.2f} >= {threshold:.2f}, "
+                f"conf {conf:.2f}, composite {score:.0f}, "
+                f"pid {analysis.get('perception_id', 'unknown')} — "
+                f"NOT blocking (shadow accrual, clef-gate); live rule stands")
+            return ""
+        return (f"dv_trap_veto (trap {trap:.2f} >= {threshold:.2f})")
+    except Exception as e:  # noqa: BLE001 — a broken gate never costs/blocks a trade
+        logger.debug(f"[executor] dv_trap_veto gate failed for "
+                     f"{analysis.get('coin')}: {e}")
+        return ""
+
+
 def _exit_type(reason: str) -> Optional[str]:
     """Coarse exit class from the leading token of a close reason string.
 
@@ -3216,6 +3292,10 @@ def close_position_market(coin: str, exit_reason: str = "") -> Dict[str, Any]:
                     # research.py's duelist_at_entry). The duel report computes
                     # its hypothetical P&L from this + the realized fields.
                     "duelist_at_entry": _ec.get("duelist"),
+                    # Decision voice at entry (verdict + trap/close_now
+                    # scalars) — the clef-gate offline join prices the
+                    # trap-veto / close-veto counterfactuals from this.
+                    "decision_voice_at_entry": _ec.get("decision_voice"),
                     "perception_id": _ec.get("perception_id"),
                     # funding carry: rate_hr × hold_hrs × notional × side (long pays
                     # when rate>0). Estimate (entry-rate held constant over the hold).

@@ -29,6 +29,11 @@ os.environ["HERMES_LEDGER_FILE"] = os.path.join(_tmp, "trades.jsonl")
 # imports it, so an unset var would let a test that calls research() write
 # paired-verdict rows into the live ~/.hermes-trader-duel.jsonl.
 os.environ["HERMES_DUEL_FILE"] = os.path.join(_tmp, ".hermes-trader-duel.jsonl")
+# 2026-10-07: the decision-voice observer (decision_voice.py, Clef-family
+# /v1/systemone shadow accrual) gets the same treatment — HERMES_DV_FILE is
+# read at import time and research() calls the hook, so an unset var would
+# let a test write rows into the live ~/.hermes-trader-dv.jsonl.
+os.environ["HERMES_DV_FILE"] = os.path.join(_tmp, ".hermes-trader-dv.jsonl")
 # 2026-10-03: the prompt/response archive (prompt_log.py) gets the same
 # treatment — HERMES_PROMPT_LOG_DIR is read per call (default /app/log/
 # prompt-log, bind-mounted rw), so an unset var would let a test that calls
@@ -39,3 +44,8 @@ os.environ["HERMES_PROMPT_LOG_DIR"] = os.path.join(_tmp, "prompt-log")
 # DELETE (not empty-string) so a dev-shell export can't leak through — a test
 # that wants the duelist enables it via monkeypatch.setenv.
 os.environ.pop("LLM_DUEL_MODEL", None)
+# 2026-10-07: same force-off for the decision-voice observer — with
+# LLM_DV_BASE_URL exported in the dev shell, any test touching research()
+# would fire a real /v1/systemone call.
+os.environ.pop("LLM_DV_BASE_URL", None)
+os.environ.pop("LLM_DV_API_KEY", None)
