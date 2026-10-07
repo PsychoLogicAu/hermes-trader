@@ -1607,6 +1607,37 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_fav.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Divergent-sizing shadow accrual (WATCHLIST §C.16 follow-up, owner go
+    # 2026-10-07): the divergence flag's surviving value is as a RISK marker,
+    # not a gate — divergent-executed entries showed mean early adverse
+    # excursion -2.91% vs -1.17% non-divergent (n=3 vs 40, accrual-only).
+    # The gate-lever cohort died (blocked cohort net-negative); a sizing
+    # haircut has the opposite asymmetry (shrinks the knife, never forfeits
+    # a winner). This logs the would-be haircut WITHOUT applying it: the
+    # executed trade keeps its full size. Re-judge bar: at n>=15
+    # divergent-executed, re-run scratch/_c16_pullweight.py; the haircut
+    # becomes decision-ready only if the mean-adverse split holds >=1.5x.
+    # Config `divergent_sizing_shadow.enabled` (default False) — accrual
+    # line only, never touches trade_notional.
+    try:
+        _dss = config.get("divergent_sizing_shadow", {}) or {}
+        if bool(_dss.get("enabled", False)):
+            _mr_res = gate_output["results"].get("market_regime") or {}
+            _dv = _mr_res.get("divergence") or {}
+            if _dv.get("coin_vs_btc_diverged"):
+                _half = float(_dss.get("haircut", 0.5))
+                _tn = float(trade_notional or 0.0)
+                if _tn > 0:
+                    logger.warning(
+                        f"[gate][SHADOW] divergent_sizing WOULD HAVE HALVED "
+                        f"{analysis['coin']} {trade_side.upper()} "
+                        f"(btc={_dv.get('btc_regime')} coin={_dv.get('coin_regime')} "
+                        f"conf {analysis['confidence']:.2f}): notional "
+                        f"${_tn:.2f} -> ${_tn * _half:.2f} — NOT applying "
+                        f"(shadow-only)")
+    except Exception as _dss_e:  # accrual must never break the execution path
+        logger.debug(f"[executor] divergent_sizing shadow accrual failed: {_dss_e}")
+
     if gate_output["blocked"]:
         # ── Capital-rotation (Phase-1 lever) — SHADOW by default ─────────────
         # Phase-1 finding: 94% of missed movers die at the 300% cap / max_concurrent

@@ -92,6 +92,11 @@ TRIGGER_CONFIG: Dict[str, Any] = {
         # escape (conf vs counter_regime_min_conf or nothing). Aligned/neutral trades
         # unaffected. Default False = historical behaviour; live config sets it True.
         "counter_regime_no_composite_escape": False,
+        # C.16 follow-up (2026-10-07): divergent-sizing SHADOW accrual. When
+        # enabled, an executed entry whose coin_vs_btc_diverged flag is set logs
+        # the would-be notional haircut WITHOUT applying it (never touches
+        # trade_notional). Accrual-only until the n>=15 pullweight re-judge.
+        "divergent_sizing_shadow": {"enabled": False, "haircut": 0.5},
         # Daily giveback lock — once day peaks, no new entries if PnL retraces > halt_pct
         "daily_giveback_halt_pct": 0.0,
         "daily_giveback_min_peak_usd": 20.0,
