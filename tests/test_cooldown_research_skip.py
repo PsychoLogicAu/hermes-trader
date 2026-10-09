@@ -309,7 +309,7 @@ def test_loop_wiring():
         "route_verdict"
     ) in _loop_src
     assert "_forced = _forced_held_reeval(results, _cfg_cd, held_coins)" in _loop_src
-    assert "_worklist = list(results) + _forced" in _loop_src
+    assert "order_worklist(list(results) + _forced, held_coins)" in _loop_src
     assert "for perception in _worklist:" in _loop_src
     # The new skip sits AFTER the held branch (held coins keep their CLOSE
     # path) and BEFORE the TA filter.
