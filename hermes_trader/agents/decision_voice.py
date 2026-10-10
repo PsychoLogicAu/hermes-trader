@@ -146,7 +146,10 @@ CLOSE_QUESTION = {
         "The account HOLDS a position in this coin. Has the structure flipped "
         "against the held position such that it should be closed now? (A "
         "position that is merely at a small loss with intact trend structure "
-        "should keep running.)"
+        "should keep running.) state.held_position carries entry_px, "
+        "unrealized_pnl_usd and pnl_pct_vs_entry (signed for the side: "
+        "negative = losing): weigh how deep the loss is against whether the "
+        "structure can still recover it."
     ),
 }
 
@@ -267,10 +270,31 @@ def build_state(
     if whale:
         state["whale_signal"] = whale if isinstance(whale, str) else str(whale)
     if held:
-        state["held_position"] = {
+        hp: Dict[str, Any] = {
             "side": held.get("side"),
             "size_usd": _round(held.get("size_usd")),
         }
+        # B.39 close-voice audit 2026-10-10: the close_now question was asked
+        # blind to position depth (side+size only) — dv_close_now capped at
+        # ~0.23 lifetime. Entry price + live PnL (abs + % vs entry, computed
+        # against the scan's mid) ride the state so the decision model can
+        # actually weigh "structure flipped" against how deep the bag is.
+        entry = _round(held.get("entry_px"))
+        if entry:
+            hp["entry_px"] = entry
+            mid = perception.get("mid")
+            try:
+                pnl = held.get("unrealized_pnl_usd")
+                if pnl is not None:
+                    hp["unrealized_pnl_usd"] = _round(pnl, 2)
+                if mid:
+                    raw = (mid - entry) / entry * 100
+                    if held.get("side") == "short":
+                        raw = -raw
+                    hp["pnl_pct_vs_entry"] = _round(raw, 2)
+            except (TypeError, ValueError):
+                pass
+        state["held_position"] = hp
 
     # Bound the state (encode_record's max_state_tokens analogue): if the
     # JSON is over budget, drop the news text first — it is the bulkiest and

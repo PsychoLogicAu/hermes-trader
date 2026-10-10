@@ -157,7 +157,8 @@ def test_close_question_only_when_held():
 def test_state_shape_and_held_block():
     st = dv.build_state(
         "BTC", _perception(), _tf(), _tf(), _tf(bull=False), "0.0100%/hr",
-        "headline here", [{"coin": "BTC", "side": "long", "size_usd": 33.0}],
+        "headline here", [{"coin": "BTC", "side": "long", "size_usd": 33.0,
+                           "entry_px": 48_000.0, "unrealized_pnl_usd": -1.32}],
         win_rate=0.55, n_closes=20,
     )
     assert st["coin"] == "BTC" and st["mid"] == 50_000.0
@@ -165,8 +166,37 @@ def test_state_shape_and_held_block():
     assert st["tf_1h"]["ema8_above_ema21"] is True
     assert st["tf_1d"]["ema8_above_ema21"] is False
     assert st["held_position"]["side"] == "long"
+    # B.39 close-voice audit fix: entry + PnL ride the state (signed for side)
+    assert st["held_position"]["entry_px"] == 48_000.0
+    assert st["held_position"]["unrealized_pnl_usd"] == -1.32
+    assert st["held_position"]["pnl_pct_vs_entry"] == 4.17  # (50000-48000)/48000
     # JSON-serialisable (the systemone body is JSON)
     json.dumps(st)
+
+
+def test_state_held_pnl_signed_for_short():
+    # short at mid ABOVE entry = losing: pnl_pct must be negative
+    st = dv.build_state(
+        "BTC", _perception(), _tf(), _tf(), _tf(), "N/A", "no news",
+        [{"coin": "BTC", "side": "short", "size_usd": 33.0,
+          "entry_px": 48_000.0, "unrealized_pnl_usd": -2.5}],
+        win_rate=0.5, n_closes=3,
+    )
+    assert st["held_position"]["pnl_pct_vs_entry"] == -4.17
+    assert st["held_position"]["unrealized_pnl_usd"] == -2.5
+
+
+def test_state_held_without_entry_keys_still_works():
+    # defensive: an open_positions row missing the new keys (older callers /
+    # partial fetch) must not break the state build
+    st = dv.build_state(
+        "BTC", _perception(), _tf(), _tf(), _tf(), "N/A", "no news",
+        [{"coin": "BTC", "side": "long", "size_usd": 33.0}],
+        win_rate=0.5, n_closes=3,
+    )
+    assert st["held_position"]["side"] == "long"
+    assert "entry_px" not in st["held_position"]
+    assert "pnl_pct_vs_entry" not in st["held_position"]
 
 
 def test_state_not_polluted_by_other_positions():
