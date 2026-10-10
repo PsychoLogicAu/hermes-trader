@@ -129,6 +129,9 @@ archive/
 # Duel A/B log (bind-mounted, runtime JSONL)
 duel-logs/
 
+# Desktop-voice / dv runtime logs
+dv-logs/
+
 # HuggingFace model cache (mounted into container; binary, re-downloadable)
 hf-cache/
 
