@@ -1689,6 +1689,15 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                     abs(float(p.get("position", {}).get("szi", "0"))) *
                     float(p.get("position", {}).get("entryPx", "0"))
                 ),
+                # Entry + live PnL from the exchange (B.39 close-voice audit
+                # 2026-10-10): the dv `close_now` question was asked BLIND to
+                # how deep the position was (state carried side+size only),
+                # plausibly capping dv_close_now at ~0.23 lifetime. These keys
+                # feed decision_voice.build_state's held_position block; the
+                # chat prompt builder ignores unknown keys (byte-identical
+                # primary prompt).
+                "entry_px": float(p.get("position", {}).get("entryPx", "0") or 0) or None,
+                "unrealized_pnl_usd": float(p.get("position", {}).get("unrealizedPnl", "0") or 0),
             }
             for p in (state.get("asset_positions") or [])
             if float(p.get("position", {}).get("szi", "0")) != 0
