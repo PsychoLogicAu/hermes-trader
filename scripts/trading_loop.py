@@ -25,7 +25,7 @@ import logging
 import logging.handlers
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from hermes_trader.agents.research_concurrency import compute_research_workers
+from hermes_trader.agents.research_concurrency import compute_research_workers, order_worklist
 from hermes_trader.log_context import CoinLogFormatter, set_coin_context
 
 # Load .env.local (CWD-relative, matches skill restart command).
@@ -1311,7 +1311,12 @@ while True:
         # Runs AFTER the scan so `results` is known; empty list when nothing
         # qualifies, and the helper is failure-safe (never raises).
         _forced = _forced_held_reeval(results, _cfg_cd, held_coins)
-        _worklist = list(results) + _forced
+        # Held positions get the FIRST worker slots (order_worklist): the
+        # dsl-fast guard covers seconds, the research verdict covers
+        # structure, and a held coin's verdict must never queue behind
+        # fresh-entry candidates. Fresh candidates keep their composite-
+        # score order within the fresh group.
+        _worklist = order_worklist(list(results) + _forced, held_coins)
         _n_research = max(1, len(_worklist))
         # Clamp workers to [1, n_triggers]; a malformed config value falls back
         # to 1 (sequential) rather than blowing up the scan.

@@ -42,7 +42,7 @@ import hermes_trader.agents.executor as ex  # noqa: E402
 from hermes_trader.agents import dsl_exit  # noqa: E402
 from hermes_trader.agents import market_regime as _mr  # noqa: E402
 from hermes_trader.agents.risk_gates import eval_all_gates  # noqa: E402
-from hermes_trader.agents.research_concurrency import compute_research_workers  # noqa: E402
+from hermes_trader.agents.research_concurrency import compute_research_workers, order_worklist  # noqa: E402
 
 PASS = []
 FAIL = []
@@ -275,6 +275,24 @@ check("garbage 'abc' -> 1 (no exception)",
 check("float 4.9 -> 4 (int truncation)",
       compute_research_workers({"research_max_workers": 4.9}, 37) == 4)
 check("0 triggers -> 1 (safe floor)", compute_research_workers({"research_max_workers": 4}, 0) == 1)
+
+print("== Phase 3.5: held-first worklist ordering (order_worklist) ==")
+_W = lambda c, s: {"coin": c, "composite_score": s}
+_held = {"ZEC", "PONS"}
+_o = order_worklist([_W("BTC", 90), _W("ZEC", 10), _W("ETH", 70),
+                     _W("PONS", 5), _W("SOL", 40)], _held)
+check("held coins come first", _o[0]["coin"] in _held and _o[1]["coin"] in _held,
+      f"got={[p['coin'] for p in _o]}")
+check("held group keeps relative (score) order",
+      [p["coin"] for p in _o[:2]] == ["ZEC", "PONS"],
+      f"got={[p['coin'] for p in _o[:2]]}")
+check("fresh group keeps composite-score order after held",
+      [p["coin"] for p in _o[2:]] == ["BTC", "ETH", "SOL"],
+      f"got={[p['coin'] for p in _o[2:]]}")
+check("no held positions -> order unchanged",
+      [p["coin"] for p in order_worklist(
+          [_W("BTC", 90), _W("ETH", 70)], set())] == ["BTC", "ETH"])
+check("empty worklist -> empty", order_worklist([], _held) == [])
 
 print("== Phase 4: trading_loop integration ==")
 loop_src = open(os.path.join(
