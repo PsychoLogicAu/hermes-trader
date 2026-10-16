@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_trader.agents.config_store import read_agent_config
+from hermes_trader.agents.config_store import read_agent_config, read_model_profile_for_model
 from hermes_trader.agents.duel_store import effective_primary_model
 from hermes_trader.agents.chronos_signal import (
     get_chronos_signal_sync,
@@ -2849,6 +2849,27 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     min_score = float(gate.get("min_composite", 30.0))
     min_hip3_score = float(gate.get("min_hip3_composite", 50.0))
 
+    # Per-seat conf bars (model profile): the conf floor is a property of the
+    # ANSWERING seat's conf scale, not of the market. A seat whose profile
+    # sets entry_min_confidence / entry_min_short_confidence overrides the
+    # general bars for its own entries, so the bar travels with the seat on a
+    # flip instead of being re-derived by hand (the 0.65-on-d2 mis-scale,
+    # 2026-10-16 — same failure the nano seat got fixed for on 2026-10-13).
+    # Absent key / unreadable profile / seat with no profile = general bar
+    # (fail-open, same contract as cohort_admissions below). Only the general
+    # conf floors are overridable; late-chase/mover bars are separate knobs.
+    seat_prof = read_model_profile_for_model(str(analysis.get("primary_model") or ""))
+
+    def _seat_bar(key: str) -> Optional[float]:
+        raw = seat_prof.get(key)
+        try:
+            return float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None  # malformed -> general bar (fail-open)
+
+    seat_min_conf = _seat_bar("entry_min_confidence")
+    seat_min_short_conf = _seat_bar("entry_min_short_confidence")
+
     volume = bool(analysis.get("volume_spike_fired"))
     breakout = bool(analysis.get("breakout_fired"))
     burst = bool(analysis.get("momentum_burst_fired"))
@@ -2893,13 +2914,40 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 return ""
 
     if conf < min_conf:
-        return f"runner_gate_blocked (confidence {conf:.2f} < {min_conf:.2f})"
+        # Side-aware seat bar: a short is judged against the seat's SHORT bar
+        # when it has one (that is the point of side-awareness — it must be
+        # able to LOWER the short floor, which the gate's
+        # min_short_confidence alone can never do since the general bar is
+        # checked first).
+        seat_bar = seat_min_conf
+        if side == "short" and seat_min_short_conf is not None:
+            seat_bar = seat_min_short_conf
+        if seat_bar is not None and conf >= seat_bar:
+            logger.info(
+                f"[gate][SEAT-BAR] ADMIT {coin} {side.upper()}: profile "
+                f"'{str(analysis.get('primary_model') or '').strip().lower()}' "
+                f"entry_min_confidence {seat_bar:.2f} — conf {conf:.2f} "
+                f"below general bar {min_conf:.2f} (other runner checks apply)"
+            )
+            min_conf = seat_bar
+        else:
+            # Report the EFFECTIVE bar (the seat bar filtered it, not the
+            # general one, when the seat has one) — block-line forensics
+            # parse this number.
+            eff = seat_bar if seat_bar is not None else min_conf
+            return f"runner_gate_blocked (confidence {conf:.2f} < {eff:.2f})"
 
     if side == "short":
         if not bool(gate.get("allow_shorts", False)):
             return "runner_gate_blocked (shorts disabled)"
         short_min_score = float(gate.get("min_short_composite", min_score))
-        short_min_conf = float(gate.get("min_short_confidence", min_conf))
+        # Short-side seat bar: profile entry_min_short_confidence overrides
+        # the gate's min_short_confidence for this seat (independent of the
+        # long bar — side-aware by design; the d2 read shows shorts thinning
+        # out above 0.45 anyway).
+        short_min_conf = seat_min_short_conf
+        if short_min_conf is None:
+            short_min_conf = float(gate.get("min_short_confidence", min_conf))
         if conf < short_min_conf:
             return f"runner_gate_blocked (short confidence {conf:.2f} < {short_min_conf:.2f})"
         structured_short = (

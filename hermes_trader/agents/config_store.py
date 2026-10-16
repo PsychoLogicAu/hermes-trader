@@ -64,6 +64,35 @@ def read_model_profile(name: str) -> Dict[str, Any]:
     return {}
 
 
+def read_model_profile_for_model(model_name: str) -> Dict[str, Any]:
+    """Resolve a seat's ANSWERING model name to its profile file.
+
+    The analysis dict carries the model name (engine slot "model" /
+    llm.primary.model), which may differ from the profile FILE name (e.g.
+    "Qwen3.8-27B-..." lives in qwen3.8-27b-iq2xs.json). Match order: exact
+    file name, then any profile whose "model" key matches
+    case-insensitively. Fail-open: {} when nothing matches (silent — this
+    runs on every analysis; a seat simply having no profile is normal).
+    """
+    name = str(model_name or "").strip()
+    if not name or "/" in name or "\\" in name or name.startswith("."):
+        return {}
+    if os.path.exists(os.path.join(MODEL_CONFIG_DIR, f"{name}.json")):
+        return read_model_profile(name)
+    low = name.lower()
+    try:
+        entries = sorted(os.listdir(MODEL_CONFIG_DIR))
+    except OSError:
+        return {}
+    for fn in entries:
+        if not fn.endswith(".json"):
+            continue
+        prof = read_model_profile(fn[:-5])
+        if str(prof.get("model") or "").strip().lower() == low:
+            return prof
+    return {}
+
+
 def resolve_model_slot(slot: Any) -> Any:
     """Expand a slot's ``model_profile`` reference (hot, no cache).
 
