@@ -490,3 +490,46 @@ def test_parse_trap_veto_overrides_normalises():
     ) == {"vwap-fade-short": 0.75, "z": 0.5}
     assert dv._parse_trap_veto_overrides(None) == {}
     assert dv._parse_trap_veto_overrides(["nope"]) == {}
+
+
+# ── seat conf calibration scalar (conf_multiplier, B.46 2026-10-16) ──────
+
+def _arm_mult(monkeypatch, mult):
+    cfg = {"engine": "systemone", "model": "d3-flash",
+           "base_url": "http://so.test:8080"}
+    if mult is not None:
+        cfg["conf_multiplier"] = mult
+    _write_cfg(cfg)
+    # conv exp level 3.0 / (5-1) -> raw conf 0.75
+    answers = _answers({"long": 0.8, "short": 0.05, "none": 0.15},
+                       {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2})
+    monkeypatch.setattr(dv, "call_systemone", lambda *a, **k: (answers, 42, 30))
+
+
+def test_conf_multiplier_off_by_default_is_byte_identical(monkeypatch):
+    _arm_mult(monkeypatch, None)
+    _patch_research_deps(monkeypatch)
+    a = research.research("BTC", _perception())
+    assert a["verdict"] == "LONG" and a["confidence"] == 0.75
+
+
+def test_conf_multiplier_scales_seat_confidence(monkeypatch):
+    _arm_mult(monkeypatch, 1.2)
+    _patch_research_deps(monkeypatch)
+    a = research.research("BTC", _perception())
+    assert a["confidence"] == 0.9                      # 0.75 * 1.2
+
+
+def test_conf_multiplier_clamps_at_one(monkeypatch):
+    _arm_mult(monkeypatch, 1.4)
+    _patch_research_deps(monkeypatch)
+    a = research.research("BTC", _perception())
+    assert a["confidence"] == 1.0                      # 0.75 * 1.4 -> clamp
+
+
+def test_conf_multiplier_keeps_raw_conv_in_reasoning(monkeypatch):
+    # offline pricing stays raw-scale: reasoning keeps the RAW conv value
+    _arm_mult(monkeypatch, 1.4)
+    _patch_research_deps(monkeypatch)
+    a = research.research("BTC", _perception())
+    assert "conv0.75" in a["reasoning"]
