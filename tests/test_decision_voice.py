@@ -521,3 +521,40 @@ def test_research_held_coin_asks_close(_dv_on, monkeypatch):
     a = research.research("BTC", _perception())
     assert asked["held"] is True and asked["state_held"] is True
     assert a["decision_voice_at_entry"]["verdict"] == "CLOSE"
+
+
+# ── observer conf calibration scalar (conf_multiplier, B.46 2026-10-16) ──
+
+def test_observer_conf_multiplier_defaults_to_one(monkeypatch):
+    import hermes_trader.agents.config_store as cs
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump({"mode": "SHADOW",
+                   "llm": {"decision_voice": {"model": "clef-flash"}}}, f)
+    monkeypatch.setenv("LLM_DV_BASE_URL", "http://dv.test:8080")
+    cfg = dv._dv_config()
+    assert cfg is not None and cfg["conf_multiplier"] == 1.0
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump({"mode": "SHADOW",
+                   "llm": {"decision_voice": {"model": "d3-flash",
+                                              "conf_multiplier": 1.4}}}, f)
+    cfg = dv._dv_config()
+    assert cfg is not None and cfg["conf_multiplier"] == 1.4
+
+
+def test_observer_conf_multiplier_scales_dv_confidence(_dv_on, monkeypatch):
+    import hermes_trader.agents.config_store as cs
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump({"mode": "SHADOW",
+                   "llm": {"decision_voice": {"model": "d3-flash",
+                                              "conf_multiplier": 1.4}}}, f)
+    monkeypatch.setenv("LLM_DV_BASE_URL", "http://dv.test:8080")
+    # conv exp level 3.0 / (5-1) -> raw conf 0.75 -> 0.75*1.4 -> clamp 1.0
+    answers = _answers({"long": 0.8, "short": 0.05, "none": 0.15},
+                       {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2})
+    monkeypatch.setattr(dv, "call_systemone", lambda *a, **k: (answers, 42, 30))
+    row = dv.decision_voice_verdict(
+        "BTC", _perception(), _tf(), _tf(), _tf(), "", "", [], 0.5, 0,
+        primary_verdict="PASS", primary_confidence=0.0)
+    assert row is not None
+    assert row["dv_confidence"] == 1.0
+    assert "conv0.75" in row["dv_reasoning"]   # raw conv kept for audit

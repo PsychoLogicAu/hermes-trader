@@ -230,6 +230,10 @@ def _dv_config() -> Optional[Dict[str, Any]]:
             # (breakoutUp:0.42% / breakoutDown:0.12%). Default off = today's
             # byte-identical state; profile opt-in, hot rollback.
             "breakout_side_label": str(slot.get("breakout_side_label", False)).lower() not in ("false", "0", "off"),
+            # Observer conf calibration (mirrors primary_engine_config's key):
+            # model-specific, lives in the OBSERVER's profile file; absent =
+            # 1.0 = byte-identical dv_confidence.
+            "conf_multiplier": float(slot.get("conf_multiplier") or 1.0),
         }
     except Exception:  # noqa: BLE001 — fail-open (see module docstring)
         return None
@@ -379,6 +383,19 @@ def primary_engine_config() -> Dict[str, Any]:
             # (breakoutUp:0.42% / breakoutDown:0.12%). Default off = today's
             # byte-identical state; profile opt-in, hot rollback.
             "breakout_side_label": str(slot.get("breakout_side_label", False)).lower() not in ("false", "0", "off"),
+            # Seat conf calibration scalar (B.46 gauntlet, 2026-10-16): the
+            # conviction scale is MODEL-DEPENDENT — on byte-identical seat
+            # prompts d3-flash's conf median is 0.50 vs d2's 0.79 (31% vs
+            # 84% pass 0.65). Lives in the SEAT's model profile file
+            # (config-models/<name>.json), hot like every profile key.
+            # Every consumer reads the ONE confidence scalar
+            # (entry gate, short gate, mover bypass, sizing ladder, duelist
+            # compare), so a compressed-scale seat must be rescaled HERE —
+            # lowering any single bar would leave the others mis-calibrated
+            # (owner call: "a scalar multiplier, not the gate"). 1.0/absent
+            # = OFF, byte-identical seat mapping; raw conviction stays in
+            # the archived answers + reasoning for offline pricing.
+            "conf_multiplier": float(slot.get("conf_multiplier") or 1.0),
         }
     except Exception:  # noqa: BLE001 — fail-open: the LLM engine is the default
         return dict(_LLM_ENGINE)
@@ -428,6 +445,15 @@ def systemone_primary_verdict(
         return None
     parsed = verdict_from_answers(answers, coin, perception)
     parsed.pop("_answers", None)  # raw probs go to the archive, not the analysis
+
+    # Conf calibration scalar (see primary_engine_config): unit rescale of
+    # the ONE confidence scalar every downstream consumer reads (entry
+    # gate, short gate, mover bypass, sizing ladder), applied before any
+    # gate sees it. Clamp at 1.0; mult 1.0 = no-op, byte-identical. The
+    # reasoning line keeps the RAW conv — offline pricing stays raw-scale.
+    mult = float(cfg.get("conf_multiplier") or 1.0)
+    if mult != 1.0 and parsed["confidence"]:
+        parsed["confidence"] = round(min(1.0, parsed["confidence"] * mult), 4)
 
     # Entry trap veto (seat-level, config `llm.primary_engine.trap_veto_*`):
     # the nano-tuned optimum (trap<=.35 rung, +$53.48 vs +$38.35 at live
@@ -951,6 +977,12 @@ def decision_voice_verdict(
             return None
         parsed = verdict_from_answers(answers, coin, perception)
         answers = parsed.pop("_answers")
+
+        # Observer conf calibration (see _dv_config): same scalar semantics as
+        # the seat path — rescale dv_confidence, clamp at 1.0, 1.0 = no-op.
+        mult = float(cfg.get("conf_multiplier") or 1.0)
+        if mult != 1.0 and parsed["confidence"]:
+            parsed["confidence"] = round(min(1.0, parsed["confidence"] * mult), 4)
 
         row = {
             "coin": coin,
