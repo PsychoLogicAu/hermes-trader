@@ -107,3 +107,29 @@ def test_live_no_atr_falls_back():
     _amend(cs, -1, c=101.5, h=101.6)
     hit = _bo(cs, 10, width_mode="live")        # short lookback, short history
     assert hit["width_arms"]["2a"] is None
+
+
+def test_arms_bp_field_is_true_basis_points():
+    """Review fix t_240a0d58: arms['bp'] was PERCENT mislabeled as bp while
+    thr2a_bp/thr2b_bp are basis points — accrual joins read 100x wrong."""
+    cs = _flat(n=60)
+    _amend(cs, -2, c=102.0, h=102.0)          # confirmed close 99bp beyond 101
+    _amend(cs, -1, c=102.5, h=102.6)          # forming bar holds above
+    hit = _bo(cs, 48, width_mode="live", atr1h=0.2)
+    wa = hit["width_arms"]
+    assert hit["fired"] is True
+    assert wa["bp"] == pytest.approx(99.0, abs=2)      # 0.99% == 99bp
+    assert wa["bp"] >= wa["thr2a_bp"]                  # same unit, fires
+    assert "99bp" in hit["reason"]
+
+
+def test_nan_atr1h_is_not_evaluable_not_false():
+    """A NaN 1h ATR must land in the na arm (fallback contract), never
+    silently False via `bp >= NaN`."""
+    import math as _m
+    cs = _flat(n=60)
+    _amend(cs, -2, c=102.0, h=102.0)
+    _amend(cs, -1, c=102.5, h=102.6)
+    hit = _bo(cs, 48, width_mode="live", atr1h=_m.nan)
+    assert hit["width_arms"]["2b"] is None      # na, never silently False
+    assert hit["fired"] is True                 # 2a still decides

@@ -157,7 +157,10 @@ def _width_verdict(candles: List[Candle], lookback: int, atr_mult: float,
 
     fired=None means NOT EVALUABLE (no ATR reference / short history) —
     callers must fall back, never treat None as False."""
-    if atr_ref is None or atr_ref <= 0 or len(candles) < lookback + 3:
+    if atr_ref is None or not (atr_ref > 0) or len(candles) < lookback + 3:
+        # `not (atr_ref > 0)` also catches NaN (NaN > 0 is False) — a NaN ATR
+        # must land in the not-evaluable arm (None -> fallback to v1), never
+        # silently False via `bp >= NaN`.
         return {"fired": None}
     confirmed = candles[-2]
     prior_high, prior_low = _range_edges(candles[:-1], lookback)
@@ -202,7 +205,10 @@ def breakout(candles: List[Candle], lookback: int = 48,
     arms = {
         "v1": bool(v1["fired"]),
         "2a": v2a["fired"], "2b": v2b["fired"],
-        "bp": round(v2a.get("bp", 0.0) or 0.0, 1),
+        # bp in TRUE basis points — same unit as thr2a_bp/thr2b_bp so the
+        # accrual line reads consistently (t_240a0d58 review: was percent
+        # mislabeled as bp, 100x misread risk when joining the accrual).
+        "bp": round((v2a.get("bp", 0.0) or 0.0) * 100, 1),
         "thr2a_bp": round(v2a.get("thr_bp", 0.0) or 0.0, 1),
         "thr2b_bp": round(v2b.get("thr_bp", 0.0) or 0.0, 1) if v2b.get("fired") is not None else None,
         "side": v2a.get("side"),
@@ -223,7 +229,7 @@ def breakout(candles: List[Candle], lookback: int = 48,
             "score": min(10, max(0, v2a["bp"])),
             "reason": f"breakout confirmed beyond {lookback}-bar "
                       f"{'high' if v2a['side'] == 'up' else 'low'} "
-                      f"({v2a['bp']:.0f}bp >= {v2a['thr_bp']:.0f}bp)",
+                      f"({v2a['bp'] * 100:.0f}bp >= {v2a['thr_bp']:.0f}bp)",
             "fired": True,
             "width_arms": arms,
         }
