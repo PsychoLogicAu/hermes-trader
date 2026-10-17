@@ -212,7 +212,10 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
               (live band 5-8%): WR 82-85%, +$2.32/trade, vs -$1.96 in the
               flat 0-5% zone and -$1.77 beyond -8% (crash-bounce risk).
               The mover flag never fires on declines, so the band is the
-              discriminator here.
+              discriminator here. The same optional max_conf ceiling applies
+              (live 0.50): in-band shorts conf >=0.50 were 0/2, -$17.21
+              (STRK -$16 max_loss tail) vs 89% WR +$118.81 below 0.50 — thin
+              n, but zero-cost and symmetric with the long dead zone.
 
     Applied at BOTH conf gates — the runner gate (executor) and the classic
     confidence gate below — because either alone re-blocks what the other
@@ -272,6 +275,10 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
             decline = -float(dmove)
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
+            _mxc = sub.get("max_conf")
+            if _mxc is not None and conf >= float(_mxc):
+                return False, (f"conf {conf:.2f} >= clause ceiling "
+                               f"{float(_mxc):.2f} (dead-zone exclusion)"), shadow
             if not (min_dec <= decline < max_dec):
                 return False, (f"24h decline {decline:+.1f}% outside clause band "
                                f"[{min_dec:.1f}, {max_dec:.1f})%"), shadow
