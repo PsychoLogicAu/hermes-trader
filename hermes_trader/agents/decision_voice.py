@@ -383,6 +383,12 @@ def primary_engine_config() -> Dict[str, Any]:
             # (breakoutUp:0.42% / breakoutDown:0.12%). Default off = today's
             # byte-identical state; profile opt-in, hot rollback.
             "breakout_side_label": str(slot.get("breakout_side_label", False)).lower() not in ("false", "0", "off"),
+            # t_1999904f (2026-10-17): crowdedMover label in seat state —
+            # names the crowded dailyMover fact (>=bar 24h move AND >=$3M
+            # vol) so the seat can weigh extension risk instead of reading
+            # the mover as pure strength. Default off = byte-identical
+            # state; profile opt-in, hot rollback (same pattern as above).
+            "crowded_mover_label": str(slot.get("crowded_mover_label", False)).lower() not in ("false", "0", "off"),
             # Seat conf calibration scalar (B.46 gauntlet, 2026-10-16): the
             # conviction scale is MODEL-DEPENDENT — on byte-identical seat
             # prompts d3-flash's conf median is 0.50 vs d2's 0.79 (31% vs
@@ -435,6 +441,7 @@ def systemone_primary_verdict(
         emit_composite_score=bool(cfg.get("composite_score", False)),
         vwap_fields=bool(cfg.get("vwap_fields", False)),
         breakout_side_label=bool(cfg.get("breakout_side_label", False)),
+        crowded_mover_label=bool(cfg.get("crowded_mover_label", False)),
     )
     questions = build_questions(held, news_live=_news_live(news))
     answers, wall_ms, server_ms = call_systemone(
@@ -565,6 +572,7 @@ def build_state(
     emit_composite_score: bool = False,
     vwap_fields: bool = False,
     breakout_side_label: bool = False,
+    crowded_mover_label: bool = False,
 ) -> Dict[str, Any]:
     """The STATE: a compact structured snapshot of what the chat prompt says
     in prose. Deliberately lean (~1-2k tokens): the decision model's edge is
@@ -648,6 +656,22 @@ def build_state(
         "tf_4h": _tf(tf4h or {}),
         "tf_1d": _tf(tf1d or {}),
     }
+    # Crowded-mover label (t_1999904f, 2026-10-17): name the poison fact for
+    # the seat. The conviction ladder rewards "trend + structure + catalyst
+    # all agree" with no freshness concept, and the trigger name "dailyMover"
+    # reads as strength — the seat sees ONLY positive tokens on a stretched
+    # crowded mover and scores it top-rung (executed mover longs conf
+    # 0.71-0.88, n=29, -$2.64, 4 max_loss; blocked mover class n=158,
+    # -$2.08/trade). This emits the pre-computed crowdedness flag (>=bar 24h
+    # move AND >=$3M vol — the same source the gates veto on) as a named
+    # field so the model can weigh it instead of inferring "10% = late" from
+    # a raw number. Emitted ONLY when true: the ~96% non-mover states stay
+    # byte-identical, minimizing conf drift. Profile knob
+    # `crowded_mover_label`, default off (breakout_side_label pattern).
+    if crowded_mover_label and any(
+            t.get("name") == "dailyMover" and t.get("fired")
+            for t in (perception.get("triggers") or [])):
+        state["crowdedMover"] = True
     # B.45 per-field gauntlet 2026-10-14: track_record is net-negative for
     # every seat model tested and no longer rides the state (add −11.96% on
     # nano, −2.75% on decision2 — a ~0.63 lifetime win rate reads as caution
