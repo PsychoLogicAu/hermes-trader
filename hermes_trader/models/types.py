@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, TypedDict
+from typing import Any, Dict, Optional, TypedDict
 
 from pydantic import BaseModel
 
@@ -44,6 +44,12 @@ class TriggerHitExtras(TypedDict, total=False):
     flavour: str         # rsiDivergence: "bullish" | "bearish"
     extreme_pct: float   # rsiDivergence: signed price-extreme % beyond prior
     pct_break: float     # breakout: % beyond the range edge (t_a99fdac2)
+    range_pos_pct: Optional[float] # breakout: close position in the prior
+                         # range, 0=low 100=high, may exceed; None when the
+                         # range is degenerate (t_1999904f)
+    bars_beyond: Optional[int]     # breakout: consecutive closes beyond the
+                         # same edge counting back from the trigger bar
+                         # (freshness); None with no data
     width_arms: Dict[str, Any]  # breakout: v1/2a/2b arm comparison for the
                          # [breakout-width] accrual line (t_240a0d58)
     shape: str           # vwapDeviation: "fade" | "retest"

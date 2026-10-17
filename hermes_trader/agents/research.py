@@ -2019,6 +2019,15 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         else effective_primary_model()
     )
 
+    # Fired breakout hit (t_1999904f): the direction gate needs the break
+    # DIRECTION + context, not just the boolean. None when no breakout fired
+    # (or a pre-split hit carries no side) — the gate is inert on None.
+    _breakout_hit = next(
+        (t for t in (perception.get("triggers") or [])
+         if t.get("name") == "breakout" and t.get("fired")),
+        {},
+    )
+
     analysis = {
         "id": str(uuid.uuid4()),
         "perception_id": perception.get("id", "unknown"),
@@ -2106,6 +2115,14 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             t.get("name") == "breakout" and t.get("fired")
             for t in (perception.get("triggers") or [])
         ),
+        # Break DIRECTION + context of the fired breakout (t_1999904f):
+        # feeds the breakout-direction gate (short-into-breakoutUp /
+        # long-into-breakoutDown veto) and its accrual line. None when no
+        # breakout fired or the hit predates the side split.
+        "breakout_side": _breakout_hit.get("side"),
+        "breakout_width_pct": _breakout_hit.get("pct_break"),
+        "breakout_range_pos_pct": _breakout_hit.get("range_pos_pct"),
+        "breakout_bars_beyond": _breakout_hit.get("bars_beyond"),
         "volume_spike_fired": any(
             t.get("name") == "volumeSpike" and t.get("fired")
             for t in (perception.get("triggers") or [])

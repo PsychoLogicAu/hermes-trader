@@ -177,6 +177,40 @@ def _width_verdict(candles: List[Candle], lookback: int, atr_mult: float,
             "thr_bp": thr_pct * 100, "pct_break": round(bp, 2)}
 
 
+def _range_context(candles: List[Candle], lookback: int, ref_idx: int):
+    """(range_pos_pct, bars_beyond) for the close at `ref_idx` against the
+    prior `lookback`-bar range ending at ref_idx - 1 — the same window the
+    trigger itself measures against.
+
+    range_pos_pct: 0 = prior range low, 100 = prior range high; may exceed
+    the ends once beyond. bars_beyond: consecutive closes at/beyond the
+    SAME edge the ref close broke, counted back from ref_idx (0 when the
+    ref close is inside the range). t_1999904f: this is the freshness /
+    range-position context the seat state lacks — it rides the hit so the
+    breakout-direction gate's veto line accrues it without a second fetch.
+    """
+    prior_start = ref_idx - lookback
+    if prior_start < 0 or ref_idx >= len(candles):
+        return None, None
+    prior_high = max(candle_val(candles[i], "h") for i in range(prior_start, ref_idx))
+    prior_low = min(candle_val(candles[i], "l") for i in range(prior_start, ref_idx))
+    close = candle_val(candles[ref_idx], "c")
+    pos = round((close - prior_low) / (prior_high - prior_low) * 100.0, 1) \
+        if prior_high > prior_low else None
+    if close > prior_high:
+        beyond = lambda c: c > prior_high  # noqa: E731
+    elif close < prior_low:
+        beyond = lambda c: c < prior_low  # noqa: E731
+    else:
+        return pos, 0
+    n = 0
+    i = ref_idx
+    while i >= 0 and beyond(candle_val(candles[i], "c")):
+        n += 1
+        i -= 1
+    return pos, n
+
+
 def breakout(candles: List[Candle], lookback: int = 48,
              width_mode: str = "off", atr_mult: float = 0.25,
              atr1h: Optional[float] = None) -> TriggerHit:
@@ -195,6 +229,9 @@ def breakout(candles: List[Candle], lookback: int = 48,
 
     v1 = _breakout_v1(candles, lookback)
     if width_mode == "off":
+        if v1["fired"]:
+            v1["range_pos_pct"], v1["bars_beyond"] = _range_context(
+                candles, lookback, len(candles) - 1)
         return v1
 
     atr_list = atr(candles[:-1], 14)
@@ -219,13 +256,19 @@ def breakout(candles: List[Candle], lookback: int = 48,
         # arms recorded either way — flight recorder.
         hit = dict(v1)
         hit["width_arms"] = arms
+        if hit["fired"]:
+            hit["range_pos_pct"], hit["bars_beyond"] = _range_context(
+                candles, lookback, len(candles) - 1)
         return hit
 
     if v2a["fired"]:
+        _pos, _bb = _range_context(candles, lookback, len(candles) - 2)
         return {
             "name": "breakout",
             "side": v2a["side"],
             "pct_break": v2a["pct_break"],
+            "range_pos_pct": _pos,
+            "bars_beyond": _bb,
             "score": min(10, max(0, v2a["bp"])),
             "reason": f"breakout confirmed beyond {lookback}-bar "
                       f"{'high' if v2a['side'] == 'up' else 'low'} "
