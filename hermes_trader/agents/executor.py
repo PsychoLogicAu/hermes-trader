@@ -1521,6 +1521,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_bd.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Crowded-mover long veto (t_1999904f): same would-block accrual pattern.
+    # REQUIRED for this gate, not cosmetic: cohort-admitted longs early-return
+    # from the runner gate before its twin check, so the classic marker is
+    # their ONLY shadow surface. At mode=live the pipeline blocks and this
+    # never fires (the block_reasons line carries the same reason string).
+    _cmv = gate_output["results"].get("crowded_mover") or {}
+    if _cmv.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][CROWDED-MOVER][SHADOW] WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_cmv.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     # Quiet broad-tape gate (2026-09-10, WATCHLIST §B.17): a quiet
     # broad tape — trail24h vol/|drift| pair below the sweep thresholds —
     # says the tape is inactive; on the 09-05/06/07 bleed the whole book
