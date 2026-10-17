@@ -32,6 +32,14 @@ class GateContext:
         momentum_burst_fired: bool = False,
         volume_spike_fired: bool = False,
         breakout_fired: bool = False,
+        # Fired-breakout direction + context (t_1999904f): "up"/"down"/None
+        # from the trigger hit's side split, plus width/range-position/
+        # freshness for the veto line. Default None = byte-identical for
+        # every existing construction site; the direction gate is inert.
+        breakout_side: Optional[str] = None,
+        breakout_width_pct: Optional[float] = None,
+        breakout_range_pos_pct: Optional[float] = None,
+        breakout_bars_beyond: Optional[int] = None,
         slow_burn_fired: bool = False,
         whale_signal_fired: bool = False,
         binary_news_match: str = "",
@@ -72,6 +80,10 @@ class GateContext:
         # behaviour for every existing construction site.
         self.volume_spike_fired = volume_spike_fired
         self.breakout_fired = breakout_fired
+        self.breakout_side = breakout_side
+        self.breakout_width_pct = breakout_width_pct
+        self.breakout_range_pos_pct = breakout_range_pos_pct
+        self.breakout_bars_beyond = breakout_bars_beyond
         # True iff any 1h slow-burn trigger fired (volumeBuildup1h /
         # trendFlip1h / higherLows1h). Used as a counter-regime bypass: a
         # clean 1h accumulation pattern overrides the slow BTC proxy.
@@ -1189,6 +1201,51 @@ def _fresh_5m_extreme(
         return None
 
 
+def breakout_direction_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Breakout-direction veto (t_1999904f, d2 blocked-cohort counterfactual).
+
+    Blocks an entry whose side fights the fired breakout: SHORT into
+    breakoutUp, LONG into breakoutDown. Evidence (62 h d2 window, direction-
+    classified old combined fires): 15/16 DEAD-band breakout shorts were
+    up-pushes — −$116.62, WR 1/15 — and the GOOD short band fired breakout
+    only 1/67, so the short-side veto costs almost nothing it would have
+    won. The long side is the a-priori symmetry (falling-knife), n=1
+    in-sample; mode accrues the split.
+
+    Deliberately keyed on the TRIGGER TOKEN, not a live re-validation: the
+    poison shorts had mostly reverted INSIDE the range by decision time
+    (11/15, the worst subgroup at −$101.67 WR 0/11) — demanding "still
+    beyond the edge" would have released the biggest losers.
+
+    mode (config `breakout_direction_gate.mode`): "off" (default, inert) /
+    "shadow" (pass + would-block marker for accrual) / "live" (block).
+    Runs in the classic pipeline, so cohort-admitted entries face it too —
+    unlike the runner gate's shape checks. A missing side (no breakout or
+    pre-split hit) can never block.
+    """
+    mode = str(gate_cfg.get("mode", "off")).strip().lower()
+    if mode not in ("shadow", "live"):
+        return {"pass": True, "reason": "breakout_direction: disabled"}
+    side = (ctx.breakout_side or "").lower()
+    if side not in ("up", "down"):
+        return {"pass": True, "reason": "breakout_direction: no side"}
+    adverse = (ctx.trade_side == "short" and side == "up") or (
+        ctx.trade_side == "long" and side == "down")
+    if not adverse:
+        return {"pass": True, "reason": "breakout_direction: aligned"}
+    label = f"breakout{'Up' if side == 'up' else 'Down'}"
+    w = ctx.breakout_width_pct
+    detail = f"{label}{f':{w:.2f}%' if isinstance(w, (int, float)) else ''}"
+    reason = (
+        f"breakout_direction: {ctx.trade_side.upper()} into {detail} "
+        f"(range_pos={ctx.breakout_range_pos_pct}, "
+        f"bars_beyond={ctx.breakout_bars_beyond})"
+    )
+    if mode == "shadow":
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -1815,6 +1872,12 @@ def eval_all_gates(
     # (would-block marker) until the operator promotes it.
     results["band_counter_breach"] = band_counter_breach_gate(
         ctx, effective_config.get("band_counter_breach_gate") or {})
+    # Breakout-direction veto (t_1999904f): short-into-breakoutUp /
+    # long-into-breakoutDown. mode off/shadow/live; runs BEFORE the runner
+    # gate's cohort exemption applies (classic pipeline), so cohort-admitted
+    # entries face it too.
+    results["breakout_direction"] = breakout_direction_gate(
+        ctx, effective_config.get("breakout_direction_gate") or {})
     # Duelist veto: the A/B duelist's EXPLICIT VETO or opposite-side call on
     # the primary's directional entry (re-keyed 2026-09-03: a neutral PASS is
     # no longer an objection). Strict veto (no escape by default); shadow

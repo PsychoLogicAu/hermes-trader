@@ -1416,6 +1416,12 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # result line reports as volume_spike_fired / breakout_fired.
         volume_spike_fired=bool(analysis.get("volume_spike_fired", False)),
         breakout_fired=bool(analysis.get("breakout_fired", False)),
+        # Break DIRECTION + context for the breakout-direction gate
+        # (t_1999904f). None when no breakout fired / pre-split hit.
+        breakout_side=analysis.get("breakout_side"),
+        breakout_width_pct=analysis.get("breakout_width_pct"),
+        breakout_range_pos_pct=analysis.get("breakout_range_pos_pct"),
+        breakout_bars_beyond=analysis.get("breakout_bars_beyond"),
         slow_burn_fired=bool(analysis.get("slow_burn_fired", False)),
         # whale_regime_bypass gates whether a whale signal can bypass the
         # counter-regime gate. Missing config fails closed.
@@ -1497,6 +1503,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_bc.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Breakout-direction veto (t_1999904f): would-block accrual line while
+    # mode=shadow; at mode=live the pipeline blocks and this never fires.
+    _bd = gate_output["results"].get("breakout_direction") or {}
+    if _bd.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] breakout_direction WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_bd.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     # Quiet broad-tape gate (2026-09-10, WATCHLIST §B.17): a quiet
