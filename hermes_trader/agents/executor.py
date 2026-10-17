@@ -2965,6 +2965,28 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     if side != "long":
         return ""
 
+    # Crowded-mover long veto (t_1999904f): twin of risk_gates.
+    # crowded_mover_gate, one shared config block `crowded_mover_gate`
+    # (mode off/shadow/live). MUST precede the structured_daily_mover
+    # bypass below — the bypass (conf>=0.80 + composite>=45) is the live
+    # entry path of the target population (executed mover longs n=29,
+    # -$2.64, 4 max_loss -$8.99); a check after it would be a no-op for
+    # exactly the trades it exists to stop. Shadow logs WOULD-VETO for
+    # counterfactual accrual; live vetoes. Categorical — conf is the
+    # poison's carrier on this seat, no conf exemption offered.
+    _cm_mode = str((config.get("crowded_mover_gate") or {}).get(
+        "mode", "off")).strip().lower()
+    if daily_mover and _cm_mode in ("shadow", "live"):
+        _cm_detail = (f"{coin} LONG on crowded dailyMover at conf "
+                      f"{conf:.2f}, score {score:.0f} (crowded-extension class)")
+        if _cm_mode == "shadow":
+            logger.warning(
+                f"[gate][CROWDED-MOVER][SHADOW] WOULD VETO {_cm_detail} — "
+                f"NOT vetoing (shadow mode; kill-switch lever)")
+        else:
+            logger.warning(f"[gate][CROWDED-MOVER] VETO {_cm_detail}")
+            return "runner_gate_blocked (crowded daily mover veto)"
+
     structured_daily_mover = (
         daily_mover
         and conf >= float(gate.get("mover_min_confidence", 0.80))

@@ -1403,6 +1403,44 @@ def breakout_direction_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateR
     return {"pass": False, "reason": reason}
 
 
+def crowded_mover_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Crowded-mover long veto (t_1999904f, d2 executed-cohort mover split).
+
+    Blocks a LONG entered on a fired CROWDED dailyMover flag (24h move past
+    the configured bar AND volume >= $3M — perception runner_mover_surface).
+    Evidence (d2 seat window 2026-10-14..17): blocked mover longs n=158,
+    -$2.08/trade, 28 max_loss; executed mover longs (the
+    structured_daily_mover bypass path, conf 0.71-0.88) n=29, -$2.64 with
+    4 max_loss (-$8.99) rescued only by the 10-16 up-tape. The discriminator
+    is CROWDEDNESS, not stretch: >10% THIN movers (flag not fired) are the
+    best cell in the window (n=32, 91% WR) — hence the flag, never a raw
+    dmove threshold. Categorical: conf is the poison's carrier (it RISES
+    with extension on this seat), so no conf exemption is offered.
+
+    mode (config `crowded_mover_gate.mode`): "off" (default, inert) /
+    "shadow" (pass + would-block marker for accrual) / "live" (block).
+    LONG only — the short-side poison is the counter-breakout class, owned
+    by breakout_direction_gate. Runs in the classic pipeline so cohort-
+    admitted entries face it; the runner gate carries its own twin check
+    (executor._runner_entry_block_reason) because the mover bypass lives
+    there — either site alone would re-admit what the other blocks.
+    """
+    mode = str(gate_cfg.get("mode", "off")).strip().lower()
+    if mode not in ("shadow", "live"):
+        return {"pass": True, "reason": "crowded_mover: disabled"}
+    if ctx.trade_side != "long":
+        return {"pass": True, "reason": "crowded_mover: not long"}
+    if not bool(getattr(ctx, "daily_mover_fired", False)):
+        return {"pass": True, "reason": "crowded_mover: mover not fired"}
+    reason = (
+        f"crowded_mover: LONG on crowded dailyMover "
+        f"(conf {ctx.confidence:.2f}, score {ctx.composite_score:.0f})"
+    )
+    if mode == "shadow":
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -2041,6 +2079,12 @@ def eval_all_gates(
     # entries face it too.
     results["breakout_direction"] = breakout_direction_gate(
         ctx, effective_config.get("breakout_direction_gate") or {})
+    # Crowded-mover long veto (t_1999904f): LONG on a fired crowded
+    # dailyMover flag. mode off/shadow/live; classic-pipeline twin of the
+    # runner gate's check (executor) — cohort-admitted longs face it here,
+    # bypass-fed entries face it there.
+    results["crowded_mover"] = crowded_mover_gate(
+        ctx, effective_config.get("crowded_mover_gate") or {})
     # Duelist veto: the A/B duelist's EXPLICIT VETO or opposite-side call on
     # the primary's directional entry (re-keyed 2026-09-03: a neutral PASS is
     # no longer an objection). Strict veto (no escape by default); shadow
