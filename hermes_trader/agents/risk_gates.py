@@ -9,6 +9,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from hermes_trader.agents.config_store import read_model_profile
+
 GateResult = Dict[str, Any]  # {pass: bool, reason?: str}
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,12 @@ class GateContext:
         # Default None = byte-identical for every other construction site.
         cohort_tag: Optional[str] = None,
         primary_model: Optional[str] = None,
+        # State-admission clause (t_1999904f): the classic confidence gate
+        # needs the same 24h-move state the runner-gate clause reads, or it
+        # re-blocks every runner-gate admit at its own floor. Default
+        # None/False = clause inert at every other construction site.
+        daily_move_pct: Optional[float] = None,
+        daily_mover_fired: bool = False,
     ):
         self.confidence = confidence
         self.current_positions = current_positions
@@ -145,6 +153,8 @@ class GateContext:
         self.duelist_verdict = duelist_verdict
         self.cohort_tag = cohort_tag
         self.primary_model = primary_model
+        self.daily_move_pct = daily_move_pct
+        self.daily_mover_fired = daily_mover_fired
 
 
 def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> bool:
@@ -177,6 +187,146 @@ def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> boo
     fired = sum(1 for f in (ctx.volume_spike_fired, ctx.breakout_fired,
                             ctx.momentum_burst_fired) if f)
     return fired < need
+
+
+def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
+                    allow_shorts: bool):
+    """Model-profile state-admission clause (kanban t_1999904f, 2026-10-17).
+
+    A sub-conf-floor rescue for two empirically separated state patterns
+    (d2-seat window 2026-10-14..17, 543 conf-floor blocked decisions,
+    priced in both breach brackets — see board task comments 2-3, 10):
+
+      LONG  — conf in [min_conf, max_conf) and NOT a crowded dailyMover.
+              The mover flag (>=10% 24h move AND >=$3M volume, perception.py
+              runner_mover_surface) marks the poison class (n=158,
+              -$2.08/trade, 28 max_loss); non-mover longs are positive
+              overall and >10% THIN movers are the best cell in the window
+              (n=32, 91% WR) — hence no dmove condition on the long clause;
+              the flag is the discriminator. The optional max_conf ceiling
+              (live 0.50) excludes the conf dead zone: 0.50-0.64 longs were
+              negative in the band tables AND under the mover split, and
+              stayed -$55.70/-$75.37 across the re-entry-corrected sim
+              (34 of 71 executable; board comment 10). Absent = no ceiling.
+      SHORT — a mature 24h decline in [min_decline_pct, max_decline_pct)
+              (live band 5-8%): WR 82-85%, +$2.32/trade, vs -$1.96 in the
+              flat 0-5% zone and -$1.77 beyond -8% (crash-bounce risk).
+              The mover flag never fires on declines, so the band is the
+              discriminator here.
+
+    Applied at BOTH conf gates — the runner gate (executor) and the classic
+    confidence gate below — because either alone re-blocks what the other
+    admits (live proof 2026-10-17: three runner-gate ADMITs died at the
+    classic gate's identical 0.65 floor). The clause population is
+    trend-only by construction (0/199 fresh impulse), so an admit is a
+    FULL gate pass; every OTHER gate still applies (short liquidity floor,
+    counter-regime, quiet-tape, band-counter-breach, cooldowns, slots,
+    daily-kill, sizing, exit DSL). allow_shorts is honored here because
+    the clause fires before the short path's own kill-switch.
+
+    ``clause_cfg`` comes from the ANSWERING model's profile
+    (config-models/<primary_model>.json -> "state_admission"), read hot by
+    the callers — the weld is structural: another model in the seat has
+    no block = byte-identical general path. Absent/malformed block,
+    missing dmove, or unset short band = inert (fail-open to the normal
+    block). ``shadow`` defaults to True (log-only, entry still blocked);
+    shadow:true is also the kill-switch — only an explicit false goes
+    live. Returns (admit, why, shadow). Pure: no I/O, no logging.
+    """
+    if not isinstance(clause_cfg, dict):
+        return False, "", True
+    _sh = clause_cfg.get("shadow", True)
+    shadow = not (_sh is False or str(_sh).strip().lower() == "false")
+    side = str(analysis.get("side") or "").lower()
+    try:
+        conf = float(analysis.get("confidence", 0) or 0)
+        if side == "long":
+            sub = clause_cfg.get("long")
+            if not isinstance(sub, dict):
+                return False, "", shadow
+            if bool(analysis.get("daily_mover_fired")):
+                return False, "dailyMover fired (crowded-extension class)", shadow
+            min_conf = float(sub.get("min_conf", 0.40))
+            if conf < min_conf:
+                return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
+            _mxc = sub.get("max_conf")
+            if _mxc is not None and conf >= float(_mxc):
+                return False, (f"conf {conf:.2f} >= clause ceiling "
+                               f"{float(_mxc):.2f} (dead-zone exclusion)"), shadow
+            return True, (f"non-mover long, conf {conf:.2f} >= clause floor "
+                          f"{min_conf:.2f}"), shadow
+        if side == "short":
+            if not allow_shorts:
+                return False, "shorts disabled (allow_shorts off)", shadow
+            sub = clause_cfg.get("short")
+            if not isinstance(sub, dict):
+                return False, "", shadow
+            min_conf = float(sub.get("min_conf", 0.40))
+            _mn, _mx = sub.get("min_decline_pct"), sub.get("max_decline_pct")
+            if _mn is None or _mx is None:
+                return False, "", shadow  # band unset -> short clause inert
+            min_dec, max_dec = float(_mn), float(_mx)
+            dmove = analysis.get("daily_move_pct")
+            if dmove is None:
+                return False, "", shadow  # fail-open: no 24h move read
+            decline = -float(dmove)
+            if conf < min_conf:
+                return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
+            if not (min_dec <= decline < max_dec):
+                return False, (f"24h decline {decline:+.1f}% outside clause band "
+                               f"[{min_dec:.1f}, {max_dec:.1f})%"), shadow
+            return True, (f"mature-decline short: 24h {float(dmove):+.1f}% in band "
+                          f"[{min_dec:.1f}, {max_dec:.1f})%, conf {conf:.2f} >= "
+                          f"clause floor {min_conf:.2f}"), shadow
+    except (TypeError, ValueError):
+        return False, "", shadow  # malformed clause values -> inert
+    return False, "", shadow  # non-directional side
+
+
+def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
+                          res: Dict[str, Any], min_conf: float) -> Dict[str, Any]:
+    """State-admission clause for the CLASSIC confidence gate (t_1999904f).
+
+    Same clause, same profile, same helper as the runner gate's call site —
+    without this the classic gate's identical floor re-blocks every
+    runner-gate admit (live proof 2026-10-17). Mirrors
+    ``_cohort_conf_admission``: exempts ONLY the confidence gate; every
+    other classic gate (counter-regime, short liquidity, quiet-tape,
+    slots, daily-kill...) still applies. Fail-open everywhere: no model,
+    no clause, inert clause = the original block, byte-identical.
+    """
+    if res.get("pass"):
+        return res
+    model = str(getattr(ctx, "primary_model", "") or "").strip()
+    if not model:
+        return res
+    clause = (read_model_profile(model) or {}).get("state_admission")
+    if not isinstance(clause, dict):
+        return res
+    admit, why, shadow = state_admission(
+        {
+            "side": getattr(ctx, "trade_side", ""),
+            "confidence": getattr(ctx, "confidence", 0) or 0,
+            "daily_move_pct": getattr(ctx, "daily_move_pct", None),
+            "daily_mover_fired": getattr(ctx, "daily_mover_fired", False),
+        },
+        clause,
+        bool((cfg.get("runner_entry_gate") or {}).get("allow_shorts", False)),
+    )
+    _tag = f"{ctx.coin} {str(getattr(ctx, 'trade_side', '')).upper()}"
+    if admit:
+        if shadow:
+            logger.warning(
+                f"[gate][STATE-ADMIT][SHADOW] WOULD ADMIT (classic conf gate) "
+                f"{_tag}: {why} — NOT admitting (shadow mode; kill-switch lever)")
+            return res
+        logger.warning(
+            f"[gate][STATE-ADMIT] ADMIT (classic conf gate) {_tag}: {why} — "
+            f"classic floor {min_conf:.2f} exempted by profile clause; all "
+            f"other classic gates still apply")
+        return {"pass": True, "via": "state_admission", "clause_why": why}
+    logger.info(f"[gate][STATE-ADMIT][SKIP] (classic conf gate) {_tag}: {why}")
+    return res
 
 
 def confidence_gate(ctx: GateContext, min_confidence: float) -> GateResult:
@@ -1808,6 +1958,12 @@ def eval_all_gates(
             pass
     results["confidence"] = _cohort_conf_admission(
         ctx, effective_config, confidence_gate(ctx, min_conf), min_conf)
+    # State-admission clause (t_1999904f): same profile clause the runner
+    # gate applies — without it the classic gate's identical floor re-blocks
+    # every runner-gate admit (live proof 2026-10-17, three INJ LONGs).
+    if not results["confidence"].get("pass"):
+        results["confidence"] = _state_conf_admission(
+            ctx, effective_config, results["confidence"], min_conf)
     results["max_concurrent"] = max_concurrent_positions_gate(ctx, _cfg(effective_config, "max_concurrent", 3))
     results["notional_cap"] = per_trade_notional_cap_gate(ctx, _cfg(effective_config, "max_trade_notional_usd", 300))
     # Equity-relative daily kill + halt timer (see daily_loss_kill_switch).

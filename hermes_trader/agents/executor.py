@@ -32,7 +32,7 @@ from hermes_trader.agents.dsl_exit import (
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.ledger import record_open, record_close
-from hermes_trader.agents.risk_gates import GateContext, eval_all_gates
+from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
     cancel_open_orders_for_coin,
@@ -1439,6 +1439,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         duelist_verdict=_duelist_verdict,
         cohort_tag=analysis.get("cohort_tag"),
         primary_model=analysis.get("primary_model"),
+        # State-admission clause (t_1999904f): the classic confidence gate
+        # re-checks the same floor the runner gate just exempted — it needs
+        # the 24h-move state or it re-blocks every clause admit.
+        daily_move_pct=analysis.get("daily_move_pct"),
+        daily_mover_fired=bool(analysis.get("daily_mover_fired")),
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
@@ -2838,89 +2843,6 @@ def _late_chase_volume_accrual(gate: Dict[str, Any], coin: str, side: str,
                      f"failed for {coin}: {e}")
 
 
-def _state_admission(analysis: Dict[str, Any], clause_cfg: Any,
-                     allow_shorts: bool) -> Tuple[bool, str, bool]:
-    """Model-profile state-admission clause (kanban t_1999904f, 2026-10-17).
-
-    A sub-conf-floor rescue for two empirically separated state patterns
-    (d2-seat window 2026-10-14..17, 543 conf-floor blocked decisions,
-    priced in both breach brackets — see board task comments 2-3):
-
-      LONG  — NOT a crowded dailyMover. The mover flag (>=10% 24h move AND
-              >=$3M volume, perception.py runner_mover_surface) marks the
-              poison class (n=158, -$2.08/trade, 28 max_loss); non-mover
-              longs are positive overall and >10% THIN movers are the best
-              cell in the window (n=32, 91% WR) — hence NO dmove condition
-              on the long clause; the flag is the discriminator.
-      SHORT — a mature 24h decline in [min_decline_pct, max_decline_pct)
-              (live band 5-8%): WR 82-85%, +$2.32/trade, vs -$1.96 in the
-              flat 0-5% zone and -$1.77 beyond -8% (crash-bounce risk).
-              The mover flag never fires on declines, so the band is the
-              discriminator here.
-
-    The clause population is trend-only by construction (0/199 fresh
-    impulse), so an admit is a FULL runner-gate pass — the call site early
-    returns; falling through would re-block 100% at the late-chase /
-    structured_runner checks. Every OTHER gate still applies (short
-    liquidity floor, quiet-tape, band-counter-breach, cooldowns, slots,
-    daily-kill, sizing, exit DSL). allow_shorts is honored here because
-    the clause fires before the short path's own kill-switch.
-
-    ``clause_cfg`` comes from the ANSWERING model's profile
-    (config-models/<primary_model>.json -> "state_admission"), read hot by
-    the call site — the weld is structural: another model in the seat has
-    no block = byte-identical general path. Absent/malformed block,
-    missing dmove, or unset short band = inert (fail-open to the normal
-    block). ``shadow`` defaults to True (log-only, entry still blocked);
-    shadow:true is also the kill-switch — only an explicit false goes
-    live. Returns (admit, why, shadow). Pure: no I/O, no logging.
-    """
-    if not isinstance(clause_cfg, dict):
-        return False, "", True
-    _sh = clause_cfg.get("shadow", True)
-    shadow = not (_sh is False or str(_sh).strip().lower() == "false")
-    side = str(analysis.get("side") or "").lower()
-    try:
-        conf = float(analysis.get("confidence", 0) or 0)
-        if side == "long":
-            sub = clause_cfg.get("long")
-            if not isinstance(sub, dict):
-                return False, "", shadow
-            if bool(analysis.get("daily_mover_fired")):
-                return False, "dailyMover fired (crowded-extension class)", shadow
-            min_conf = float(sub.get("min_conf", 0.40))
-            if conf < min_conf:
-                return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
-            return True, (f"non-mover long, conf {conf:.2f} >= clause floor "
-                          f"{min_conf:.2f}"), shadow
-        if side == "short":
-            if not allow_shorts:
-                return False, "shorts disabled (allow_shorts off)", shadow
-            sub = clause_cfg.get("short")
-            if not isinstance(sub, dict):
-                return False, "", shadow
-            min_conf = float(sub.get("min_conf", 0.40))
-            _mn, _mx = sub.get("min_decline_pct"), sub.get("max_decline_pct")
-            if _mn is None or _mx is None:
-                return False, "", shadow  # band unset -> short clause inert
-            min_dec, max_dec = float(_mn), float(_mx)
-            dmove = analysis.get("daily_move_pct")
-            if dmove is None:
-                return False, "", shadow  # fail-open: no 24h move read
-            decline = -float(dmove)
-            if conf < min_conf:
-                return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
-            if not (min_dec <= decline < max_dec):
-                return False, (f"24h decline {decline:+.1f}% outside clause band "
-                               f"[{min_dec:.1f}, {max_dec:.1f})%"), shadow
-            return True, (f"mature-decline short: 24h {float(dmove):+.1f}% in band "
-                          f"[{min_dec:.1f}, {max_dec:.1f})%, conf {conf:.2f} >= "
-                          f"clause floor {min_conf:.2f}"), shadow
-    except (TypeError, ValueError):
-        return False, "", shadow  # malformed clause values -> inert
-    return False, "", shadow  # non-directional side
-
-
 def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> str:
     """Block entries that are not fresh runner setups.
 
@@ -3002,11 +2924,9 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # through would re-block 100% at the structure checks below.
         _pm = str(analysis.get("primary_model") or "").strip()
         if _pm:
-            _admit, _why, _shadow = _state_admission(
-                analysis,
-                (read_model_profile(_pm) or {}).get("state_admission"),
-                bool(gate.get("allow_shorts", False)),
-            )
+            _clause = (read_model_profile(_pm) or {}).get("state_admission")
+            _admit, _why, _shadow = state_admission(
+                analysis, _clause, bool(gate.get("allow_shorts", False)))
             if _admit:
                 _detail = (f"{coin} {side.upper()}: {_why} — general floor "
                            f"{min_conf:.2f} rescued by profile clause; every "
@@ -3018,6 +2938,11 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 else:
                     logger.warning(f"[gate][STATE-ADMIT] ADMIT {_detail}")
                     return ""
+            elif isinstance(_clause, dict):
+                # Clause active but declined this candidate: log the reason
+                # (ceiling / mover / floor / band) so the excluded population
+                # accrues in the same greppable family as the admits.
+                logger.info(f"[gate][STATE-ADMIT][SKIP] {coin} {side.upper()}: {_why}")
         return block
 
     if side == "short":
