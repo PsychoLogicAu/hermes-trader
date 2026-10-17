@@ -304,6 +304,30 @@ def test_classic_gate_short_band_admits(monkeypatch):
     assert res.get("pass") and res.get("via") == "state_admission"
 
 
+def test_helper_short_ceiling_is_half_open(monkeypatch):
+    cl = dict(_CLAUSE, short={"min_conf": 0.40, "max_conf": 0.50,
+                              "min_decline_pct": 5.0, "max_decline_pct": 8.0})
+    a = risk_gates.state_admission(
+        {"side": "short", "confidence": 0.499, "daily_move_pct": -6.0}, cl, True)
+    assert a[0]
+    b = risk_gates.state_admission(
+        {"side": "short", "confidence": 0.50, "daily_move_pct": -6.0}, cl, True)
+    assert not b[0] and "ceiling" in b[1]
+    c = risk_gates.state_admission(
+        {"side": "short", "confidence": 0.62, "daily_move_pct": -6.0}, cl, True)
+    assert not c[0] and "ceiling" in c[1]
+
+
+def test_classic_gate_short_ceiling_skips(monkeypatch, caplog):
+    cl = dict(_CLAUSE, short={"min_conf": 0.40, "max_conf": 0.50,
+                              "min_decline_pct": 5.0, "max_decline_pct": 8.0})
+    res = _classic(_ctx(trade_side="short", confidence=0.55, daily_move_pct=-6.0),
+                   cl, monkeypatch, caplog)
+    assert not res.get("pass")
+    assert "[gate][STATE-ADMIT][SKIP] (classic conf gate)" in caplog.text
+    assert "ceiling" in caplog.text
+
+
 def test_classic_gate_absent_clause_byte_identical(monkeypatch):
     res = _classic(_ctx(), None, monkeypatch)
     assert res == {"pass": False, "reason": "confidence 0.50 < 0.65"}
