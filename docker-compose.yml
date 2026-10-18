@@ -115,6 +115,41 @@ services:
               count: all
               capabilities: [gpu]
 
+  # pplx-decider-27b — primary-seat candidate (config profile
+  # pplx-decider-27b points here at http://pplx-serve:8082).
+  # Gauntlet winner vs the current d2 seat on 19,955 shape-matched prompts
+  # (board t_41305059): incremental +$315/ex-best-1 +$195 vs +$134/+$15,
+  # sole-primary +$430 vs +$334, trap-veto overlay +$489 vs baseline +$435.
+  # Stock llama.cpp master tree (0a731cc compiled PPLX_DECIDER) — NO fork.
+  # Flags = the proven .16 serving run: card PINS -b/-ub 4096 (batch size
+  # moves the probabilities); -c 4096 is the VRAM lever (decision states are
+  # ~1k tokens; card's 15.9 GiB peak figure was measured at -c 16384).
+  # VRAM: process 14.2 GB at -c 4096 — pplx runs ALONE on the 4060 Ti:
+  # flip = stop decision2-serve (10.3 GB) AND stop/move nano-serve shadow
+  # (3.5 GB) first. Never co-start with the other serve containers.
+  pplx-serve:
+    image: nvidia/cuda:12.8.1-devel-ubuntu22.04
+    container_name: pplx-serve
+    environment:
+      - LD_LIBRARY_PATH=/srv/bin
+    command: /srv/bin/llama-server
+      -m /models/pplx-decider-27B-Artemis-IQ3_M.gguf
+      -c 4096 -b 4096 -ub 4096 -np 1
+      --host 0.0.0.0 --port 8082
+    volumes:
+      - /home/oknight/llama-master/build:/srv:ro
+      - /home/oknight/models:/models:ro
+    networks:
+      - llama-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
 networks:
   llama-net:
     external: true
