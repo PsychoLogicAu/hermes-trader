@@ -12,9 +12,10 @@ logs-but-still-blocks, absent profile block byte-identical, at/above the
 general floor the clause is never consulted, allow_shorts honored).
 """
 
+import json
 import logging
 
-from hermes_trader.agents import executor, risk_gates
+from hermes_trader.agents import config_store, executor, risk_gates
 
 
 def _gate(**over):
@@ -55,7 +56,7 @@ def _short(dmove, conf=0.47):
 
 def _stub_profile(monkeypatch, clause):
     monkeypatch.setattr(
-        executor, "read_model_profile",
+        executor, "read_model_profile_for_model",
         lambda name: {"state_admission": clause} if clause is not None else {})
 
 
@@ -189,7 +190,7 @@ def test_gate_absent_profile_block_is_byte_identical(monkeypatch):
 def test_gate_at_or_above_general_floor_never_consults_clause(monkeypatch):
     def _boom(name):
         raise AssertionError("clause must not be read at/above the general floor")
-    monkeypatch.setattr(executor, "read_model_profile", _boom)
+    monkeypatch.setattr(executor, "read_model_profile_for_model", _boom)
     reason = executor._runner_entry_block_reason(_analysis(confidence=0.70), _gate())
     assert reason != ""  # normal structure path still governs above-floor entries
 
@@ -197,9 +198,22 @@ def test_gate_at_or_above_general_floor_never_consults_clause(monkeypatch):
 def test_gate_without_primary_model_never_reads_profile(monkeypatch):
     def _boom(name):
         raise AssertionError("must not read a profile without primary_model")
-    monkeypatch.setattr(executor, "read_model_profile", _boom)
+    monkeypatch.setattr(executor, "read_model_profile_for_model", _boom)
     reason = executor._runner_entry_block_reason(_analysis(primary_model=""), _gate())
     assert reason == "runner_gate_blocked (confidence 0.50 < 0.65)"
+
+
+def test_gate_clause_found_when_profile_filename_differs_from_model_key(
+        tmp_path, monkeypatch):
+    # Regression (pplx cutover, 2026-10-18): the profile FILE name may differ
+    # from the answering model KEY (pplx-decider-27b.json holds
+    # "model": "pplx-decider") — the clause lookup must resolve by key.
+    monkeypatch.setattr(config_store, "MODEL_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "seat-x-file.json").write_text(json.dumps(
+        {"model": "seat-X", "state_admission": _CLAUSE}))
+    reason = executor._runner_entry_block_reason(
+        _analysis(primary_model="seat-X"), _gate())
+    assert reason == ""  # clause rescued conf 0.50 < 0.65
 
 
 def test_gate_short_admit_requires_allow_shorts(monkeypatch):
@@ -261,7 +275,7 @@ _CFG = {"runner_entry_gate": {"allow_shorts": True}, "min_ai_confidence": 0.65}
 
 def _stub_rg_profile(monkeypatch, clause):
     monkeypatch.setattr(
-        risk_gates, "read_model_profile",
+        risk_gates, "read_model_profile_for_model",
         lambda name: {"state_admission": clause} if clause is not None else {})
 
 
