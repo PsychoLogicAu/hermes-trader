@@ -2344,7 +2344,7 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
 
     # ── Decision-voice close voice (B.50, t_af6dfa45) ──────────────────
     # The DV observer answers close_now on every scan of a HELD coin; when
-    # the seat's model profile arms close_veto_mode "live" and the accrual
+    # the seat's model profile close_veto block arms mode "live" and the accrual
     # conditions pass (held, close_now >= threshold, grace elapsed, dsl
     # tracker verified), research attaches a dv_close_fire spec here. It
     # executes as a synthetic CLOSE through the SAME AI-CLOSE path, tagged
@@ -3231,12 +3231,17 @@ def _dv_trap_veto_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> st
     >= 0.40 veto removes -$3.98 of the gated walk book's -$4.68 (clef as
     ENTRY DECIDER was rejected; as trap-veto it is the whole win).
 
-    Config `decision_voice_gate.trap_veto`:
-      shadow_mode true  -> log WOULD-BE-BLOCKED, allow the trade (start here;
-                           the counterfactual join prices it against real
-                           close rows — the B.10/momentum_reentry pattern).
-      shadow_mode false -> hard block; the reason string flows into the
-                           existing runner_gate_blocked forensics path.
+    The bar travels with the OBSERVER's model profile (owner call
+    2026-10-18): config-models/<dv profile>.json -> "trap_veto":
+      {"mode": "shadow"|"live"|"off", "threshold": X}
+      shadow -> log WOULD-BE-BLOCKED, allow the trade (the counterfactual
+                join prices it against real close rows — the
+                B.10/momentum_reentry pattern).
+      live   -> hard block; the reason string flows into the existing
+                runner_gate_blocked forensics path.
+      off / threshold 0 or absent -> gate inert (no line at all).
+    A malformed mode logs LOUD and fail-safes to shadow — never blocks on
+    garbage. `decision_voice_gate.enabled` stays the master kill.
     Threshold lives in config, NOT baked in code (raw trap noul is logged,
     so every threshold variant is priced offline).
 
@@ -3247,12 +3252,24 @@ def _dv_trap_veto_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> st
         gate = (config.get("decision_voice_gate") or {})
         if not bool(gate.get("enabled", False)):
             return ""
-        tv = gate.get("trap_veto") or {}
+        from hermes_trader.agents.decision_voice import dv_gate_block
+        tv = dv_gate_block("trap_veto", config)
         dv = analysis.get("decision_voice_at_entry") or {}
         trap = dv.get("trap")
         if trap is None:
             return ""  # fail-open: no observation
-        threshold = float(tv.get("threshold", 0.45))
+        threshold = float(tv.get("threshold") or 0.0)
+        if threshold <= 0:
+            return ""  # no profile block / threshold 0 = gate inert
+        mode = str(tv.get("mode") or "shadow").strip().lower()
+        if mode == "off":
+            return ""
+        if mode not in ("shadow", "live"):
+            logger.warning(
+                f"[gate] dv_trap_veto: dv profile trap_veto mode "
+                f"{tv.get('mode')!r} (expected shadow|live|off) — fail-safe "
+                f"to shadow, NOT blocking")
+            mode = "shadow"
         trap = float(trap)
         if trap < threshold:
             return ""
@@ -3260,7 +3277,7 @@ def _dv_trap_veto_reason(analysis: Dict[str, Any], config: Dict[str, Any]) -> st
         side = (analysis.get("side") or "long")
         conf = float(analysis.get("confidence", 0) or 0)
         score = float(analysis.get("composite_score", 0) or 0)
-        if bool(tv.get("shadow_mode", True)):
+        if mode == "shadow":
             logger.warning(
                 f"[gate][SHADOW] dv_trap_veto WOULD BE BLOCKED {coin} "
                 f"{str(side).upper()}: trap {trap:.2f} >= {threshold:.2f}, "

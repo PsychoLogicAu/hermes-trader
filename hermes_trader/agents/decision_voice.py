@@ -239,6 +239,29 @@ def _dv_config() -> Optional[Dict[str, Any]]:
         return None
 
 
+def dv_gate_block(name: str,
+                  config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Resolve a MODEL-SCOPED gate block for the decision-voice OBSERVER
+    seat from the `llm.decision_voice` slot (profile = base, inline slot
+    keys override), returning the named block — "trap_veto" / "close_veto"
+    — as a dict; absent or malformed = {}. Owner call 2026-10-18: the
+    gates' thresholds/modes travel with the model that produced the noul
+    (its conf scale is what the bar was priced against);
+    `decision_voice_gate.enabled` stays the master kill. Hot read, never
+    raises."""
+    try:
+        block = (config if config is not None
+                 else read_agent_config()).get("llm")
+        raw_slot = block.get("decision_voice") if isinstance(block, dict) else None
+        slot = resolve_model_slot(raw_slot)
+        if not isinstance(slot, dict):
+            return {}
+        blk = slot.get(name)
+        return blk if isinstance(blk, dict) else {}
+    except Exception:  # noqa: BLE001 — fail-open (see module docstring)
+        return {}
+
+
 def dv_file() -> str:
     """Current decision-voice log path (read at call time so tests redirect)."""
     return os.environ.get("HERMES_DV_FILE", _DV_FILE)
@@ -260,6 +283,42 @@ def _parse_trap_veto_overrides(raw) -> Dict[str, float]:
             except (TypeError, ValueError):
                 continue
     return out
+
+
+def _seat_trap_veto(slot: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse the nested seat knob `trap_veto: {mode, threshold, overrides}`
+    into the internal cfg keys read by systemone_primary_verdict (the bar
+    travels with the model profile — owner call 2026-10-18). mode: "live"
+    = hard downgrade, "shadow" (default) = accrual only; threshold
+    0/absent = OFF (byte-identical seat mapping). Malformed threshold ->
+    OFF, malformed mode -> shadow, each logged LOUDLY (a broken knob must
+    never silently veto). Per-cohort bar overrides (B.46 fade-short
+    promote) ride inside as `overrides`: {cohort tag: bar}. A
+    with-the-signal entry whose state carries a matching vwap_deviation
+    field uses the cohort bar INSTEAD of the global one; absent key /
+    malformed entries fail open to the global bar."""
+    tvb = slot.get("trap_veto")
+    tvb = tvb if isinstance(tvb, dict) else {}
+    try:
+        thr = float(tvb.get("threshold") or 0.0)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"[research] primary_engine trap_veto threshold "
+            f"{tvb.get('threshold')!r} malformed — trap veto OFF for this "
+            f"seat, NOT vetoing")
+        return {"trap_veto_threshold": 0.0,
+                "trap_veto_shadow_mode": True,
+                "trap_veto_overrides": {}}
+    mode = str(tvb.get("mode") or "shadow").strip().lower()
+    if mode not in ("shadow", "live"):
+        logger.warning(
+            f"[research] primary_engine trap_veto mode {tvb.get('mode')!r} "
+            f"(expected live|shadow) — fail-safe to shadow, NOT vetoing")
+        mode = "shadow"
+    return {"trap_veto_threshold": thr,
+            "trap_veto_shadow_mode": mode != "live",
+            "trap_veto_overrides": _parse_trap_veto_overrides(
+                tvb.get("overrides"))}
 
 
 def _trap_veto_cohort_tag(state: Any, verdict_side: Any) -> Optional[str]:
@@ -349,23 +408,10 @@ def primary_engine_config() -> Dict[str, Any]:
             "api_key": api_key,
             "timeout_s": float(slot.get("timeout_s") or DEFAULT_TIMEOUT_S),
             "max_state_chars": int(slot.get("max_state_chars") or DEFAULT_MAX_STATE_CHARS),
-            # Entry trap veto (owner call 2026-10-13, nano-tuned book):
-            # threshold 0/absent = OFF (byte-identical seat mapping);
-            # >0 = a LONG/SHORT whose trap noul EXCEEDS the threshold is
-            # rejected. shadow defaults TRUE (house doctrine: new gates
-            # ship log-only); the config flip sets it false to arm live.
-            "trap_veto_threshold": float(slot.get("trap_veto_threshold") or 0.0),
-            "trap_veto_shadow_mode": str(
-                slot.get("trap_veto_shadow_mode", True)
-            ).lower() not in ("false", "0", "off"),
-            # Per-cohort trap-veto bar overrides (B.46 fade-short promote):
-            # {cohort tag: bar}. A with-the-signal entry whose state carries
-            # a matching vwap_deviation field uses the cohort bar INSTEAD of
-            # the global one; absent key / malformed entries fail open to
-            # the global bar (no-op merge — byte-identical without the key).
-            "trap_veto_overrides": _parse_trap_veto_overrides(
-                slot.get("trap_veto_overrides")
-            ),
+            # Entry trap veto (owner call 2026-10-13, nano-tuned book;
+            # nested `trap_veto: {mode, threshold, overrides}` block — see
+            # _seat_trap_veto).
+            **_seat_trap_veto(slot),
             # Fade-family state shape (B.44 gauntlet, MODEL-DEPENDENT):
             # true = side-aware fields, names stripped (nano-tuned, the
             # shipped default); false = names in, no fields (decision2 —

@@ -18,12 +18,17 @@ def test_resolve_no_profile_is_untouched():
 
 def test_resolve_profile_is_base_inline_overrides(tmp_path, monkeypatch):
     (tmp_path / "m1.json").write_text(json.dumps(
-        {"model": "m1", "trap_veto_threshold": 0.35, "fade_fields": False}))
+        {"model": "m1",
+         "trap_veto": {"mode": "shadow", "threshold": 0.35},
+         "fade_fields": False}))
     monkeypatch.setattr(config_store, "MODEL_CONFIG_DIR", str(tmp_path))
-    out = resolve_model_slot({"model_profile": "m1", "trap_veto_threshold": 0.5})
+    out = resolve_model_slot({"model_profile": "m1",
+                              "trap_veto": {"threshold": 0.5}})
     assert out["model"] == "m1"
     assert out["fade_fields"] is False
-    assert out["trap_veto_threshold"] == 0.5  # inline key wins over profile
+    # merge is SHALLOW: an inline nested block REPLACES the profile's block
+    # whole (per-key merge inside gate blocks is not a thing).
+    assert out["trap_veto"] == {"threshold": 0.5}
     assert "model_profile" not in out
 
 
@@ -53,7 +58,7 @@ def test_primary_engine_config_resolves_profile(tmp_path, monkeypatch):
     models.mkdir()
     (models / "d2.json").write_text(json.dumps({
         "model": "decision2-lux-9b", "base_url": "http://decision2-serve:8081",
-        "trap_veto_threshold": 0.35, "trap_veto_shadow_mode": False,
+        "trap_veto": {"mode": "live", "threshold": 0.35},
         "fade_fields": False}))
     monkeypatch.setattr(config_store, "CONFIG_PATH", str(cfg))
     monkeypatch.setattr(config_store, "MODEL_CONFIG_DIR", str(models))
@@ -63,6 +68,7 @@ def test_primary_engine_config_resolves_profile(tmp_path, monkeypatch):
     assert e["model"] == "decision2-lux-9b"
     assert e["base_url"] == "http://decision2-serve:8081"
     assert e["fade_fields"] is False
+    # nested block maps to the internal keys the verdict code reads:
     assert e["trap_veto_threshold"] == 0.35
     assert e["trap_veto_shadow_mode"] is False
 
