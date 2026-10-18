@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from hermes_trader.agents.config_store import read_model_profile
+from hermes_trader.agents.config_store import read_model_profile_for_model
 
 GateResult = Dict[str, Any]  # {pass: bool, reason?: str}
 
@@ -307,7 +307,7 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
     model = str(getattr(ctx, "primary_model", "") or "").strip()
     if not model:
         return res
-    clause = (read_model_profile(model) or {}).get("state_admission")
+    clause = (read_model_profile_for_model(model) or {}).get("state_admission")
     if not isinstance(clause, dict):
         return res
     admit, why, shadow = state_admission(

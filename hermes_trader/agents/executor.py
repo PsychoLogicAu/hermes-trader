@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import (
     read_agent_config,
-    read_model_profile,
     read_model_profile_for_model,
 )
 from hermes_trader.agents.duel_store import effective_primary_model
@@ -2956,17 +2955,23 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     # Absent key / unreadable profile / seat with no profile = general bar
     # (fail-open, same contract as cohort_admissions below). Only the general
     # conf floors are overridable; late-chase/mover bars are separate knobs.
-    seat_prof = read_model_profile_for_model(str(analysis.get("primary_model") or ""))
+    # The profile lookup is LAZY: the file is only read once a candidate
+    # actually reaches a conf-floor decision (the at/above-floor path stays
+    # profile-free) and a nameless seat never reads one at all. Resolution is
+    # by ANSWERING model key — the profile FILE name may differ (e.g.
+    # pplx-decider-27b.json holds "model": "pplx-decider").
+    seat_prof: Optional[Dict[str, Any]] = None
 
     def _seat_bar(key: str) -> Optional[float]:
+        nonlocal seat_prof
+        if seat_prof is None:
+            _spm = str(analysis.get("primary_model") or "").strip()
+            seat_prof = read_model_profile_for_model(_spm) if _spm else {}
         raw = seat_prof.get(key)
         try:
             return float(raw) if raw is not None else None
         except (TypeError, ValueError):
             return None  # malformed -> general bar (fail-open)
-
-    seat_min_conf = _seat_bar("entry_min_confidence")
-    seat_min_short_conf = _seat_bar("entry_min_short_confidence")
 
     volume = bool(analysis.get("volume_spike_fired"))
     breakout = bool(analysis.get("breakout_fired"))
@@ -3020,9 +3025,9 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # the state-admission clause below: between seat bar and general bar
         # the seat admits (SEAT-BAR log, other runner checks still apply);
         # below the seat bar the clause still gets its sub-floor rescue.
-        seat_bar = seat_min_conf
-        if side == "short" and seat_min_short_conf is not None:
-            seat_bar = seat_min_short_conf
+        seat_bar = _seat_bar("entry_min_short_confidence") if side == "short" else None
+        if seat_bar is None:
+            seat_bar = _seat_bar("entry_min_confidence")
         if seat_bar is not None and conf >= seat_bar:
             logger.info(
                 f"[gate][SEAT-BAR] ADMIT {coin} {side.upper()}: profile "
@@ -3045,7 +3050,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             # through would re-block 100% at the structure checks below.
             _pm = str(analysis.get("primary_model") or "").strip()
             if _pm:
-                _clause = (read_model_profile(_pm) or {}).get("state_admission")
+                _clause = (read_model_profile_for_model(_pm) or {}).get("state_admission")
                 _admit, _why, _shadow = state_admission(
                     analysis, _clause, bool(gate.get("allow_shorts", False)))
                 if _admit:
@@ -3074,7 +3079,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # the gate's min_short_confidence for this seat (independent of the
         # long bar — side-aware by design; the d2 read shows shorts thinning
         # out above 0.45 anyway).
-        short_min_conf = seat_min_short_conf
+        short_min_conf = _seat_bar("entry_min_short_confidence")
         if short_min_conf is None:
             short_min_conf = float(gate.get("min_short_confidence", min_conf))
         if conf < short_min_conf:
