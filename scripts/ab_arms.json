@@ -1,12 +1,12 @@
 {
-  "_comment": "Arms for scripts/llm_ab_replay.py. base_url is the OPENAI-COMPATIBLE root (…/v1). api_key_env names an env var (never put keys here). sampling/chat_template_kwargs override the live .agent-config.json llm.primary block when present. Run: .venv/bin/python scripts/llm_ab_replay.py replay --arm TAG",
+  "_comment": "Arms for scripts/llm_ab_replay.py. base_url is the OPENAI-COMPATIBLE root (\u2026/v1). api_key_env names an env var (never put keys here). sampling/chat_template_kwargs override the live .agent-config.json llm.primary block when present. Run: .venv/bin/python scripts/llm_ab_replay.py replay --arm TAG",
   "arms": [
     {
       "tag": "incumbent-selfcheck",
       "base_url": "http://127.0.0.1:13305/api/v1",
       "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ3_S",
       "api_key_env": "",
-      "note": "same model already serving the bot — end-to-end harness self-test; verdicts should match the archive parsed field closely (temp 0.7 is not deterministic, so expect agreement ~85-95%, not 100%)"
+      "note": "same model already serving the bot \u2014 end-to-end harness self-test; verdicts should match the archive parsed field closely (temp 0.7 is not deterministic, so expect agreement ~85-95%, not 100%)"
     },
     {
       "tag": "frognano-4b-q8",
@@ -15,7 +15,7 @@
       "api_key_env": "",
       "sampling": null,
       "chat_template_kwargs": null,
-      "note": "thinking model — loaded on remote with --reasoning off; Q8 (Q4_K_M was an accidental download, arm deleted)"
+      "note": "thinking model \u2014 loaded on remote with --reasoning off; Q8 (Q4_K_M was an accidental download, arm deleted)"
     },
     {
       "tag": "spark-x25-4b-q8",
@@ -33,7 +33,7 @@
       "api_key_env": "",
       "sampling": null,
       "chat_template_kwargs": null,
-      "note": "09-09 survey duelist pick (vendor 0.7/.8/rep 1.05); same family as the Qwen3.8 primary — quality check, not a diversity arm"
+      "note": "09-09 survey duelist pick (vendor 0.7/.8/rep 1.05); same family as the Qwen3.8 primary \u2014 quality check, not a diversity arm"
     },
     {
       "tag": "neohorse-9b-q8",
@@ -42,7 +42,7 @@
       "api_key_env": "",
       "sampling": null,
       "chat_template_kwargs": null,
-      "note": "owner-flagged new model — unknown family; audit step decides format reliability"
+      "note": "owner-flagged new model \u2014 unknown family; audit step decides format reliability"
     },
     {
       "tag": "k2-horizon-7b-q8",
@@ -51,7 +51,7 @@
       "api_key_env": "",
       "sampling": null,
       "chat_template_kwargs": null,
-      "note": "owner-flagged new model (modelscope pull) — CANNOT RUN: GGUF architecture 'k2-horizon' is unknown to llama.cpp b11435 (not upstream yet). Do not retry until llama.cpp gains the arch. (NeoHorse-1-9B was the other modelscope pull and works fine.)"
+      "note": "owner-flagged new model (modelscope pull) \u2014 CANNOT RUN: GGUF architecture 'k2-horizon' is unknown to llama.cpp b11435 (not upstream yet). Do not retry until llama.cpp gains the arch. (NeoHorse-1-9B was the other modelscope pull and works fine.)"
     },
     {
       "tag": "clef-flash-q8",
@@ -60,7 +60,45 @@
       "model": "clef-flash",
       "api_key_env": "",
       "timeout_s": 30.0,
-      "note": "DECISION MODEL (Clef family) — not a chat arm. Bare llama-server on :8080 (lemonade proxy does not route /v1/systemone). Harness maps each archived prompt's facts into the decision_voice state schema and uses the bot's own build_questions/verdict_from_answers. No generation -> masked-verdict class impossible; audit is a no-op. Server started manually: llama-server -m Cloudflare_clef-flash-Q8_0.gguf --port 8080 --host 0.0.0.0 -c 16384"
+      "note": "DECISION MODEL (Clef family) \u2014 not a chat arm. Bare llama-server on :8080 (lemonade proxy does not route /v1/systemone). Harness maps each archived prompt's facts into the decision_voice state schema and uses the bot's own build_questions/verdict_from_answers. No generation -> masked-verdict class impossible; audit is a no-op. Server started manually: llama-server -m Cloudflare_clef-flash-Q8_0.gguf --port 8080 --host 0.0.0.0 -c 16384"
+    },
+    {
+      "tag": "confloor-a",
+      "base_url": "http://192.168.1.16:13305/api/v1",
+      "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ2_S",
+      "kind": "chat",
+      "sampling": null,
+      "chat_template_kwargs": null,
+      "max_tokens": null,
+      "note": "Arm A: byte-identical archived prompts (0.70 text). Cohort: scratch/_ab_confloor_orig.jsonl via _confloor_run.py"
+    },
+    {
+      "tag": "confloor-b",
+      "base_url": "http://192.168.1.16:13305/api/v1",
+      "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ2_S",
+      "kind": "chat",
+      "sampling": null,
+      "chat_template_kwargs": null,
+      "max_tokens": null,
+      "note": "Arm B: floor sites -> 0.65 (renders of commit 9fe3b4e). Cohort: scratch/_ab_confloor_mod.jsonl via _confloor_run.py"
+    },
+    {
+      "tag": "pplx-decider-iq3m",
+      "kind": "systemone",
+      "base_url": "http://192.168.1.16:8080",
+      "model": "pplx-decider",
+      "api_key_env": "",
+      "timeout_s": 60.0,
+      "note": "DECISION MODEL (pplx-decider family, TurinTech Artemis IQ3_M 14.27GB) \u2014 bare llama-server (llama-master cbe28bb, 2026-10-13) on :8080, served with -b 4096 -ub 4096 per card. Replaces d3-nano-serve on that port (docker stop/start to swap). Card: IQ3_M peaks 15.9 GiB at -c 16384 (A100, untested on 16GB) \u2014 served at reduced -c to fit the 5060 Ti."
+    },
+    {
+      "tag": "decision2-lux-q8",
+      "kind": "systemone",
+      "base_url": "http://192.168.1.16:8081",
+      "model": "decision2-lux",
+      "api_key_env": "",
+      "timeout_s": 60.0,
+      "note": "DECISION MODEL (vLLM Decision 2.0 Lux 9B Q8_0) \u2014 fork build ~/llama-decision2, container d2-serve :8081, flags per _model_gauntlet.sh (--embeddings --pooling none -c 8192 -b 8192 -ub 8192). FULL-COHORT re-run 2026-10-17 on CURRENT state shape to settle d2-vs-pplx authoritatively; old 908-row old-shape results archived to scratch/preshape/ (resume-poison rule)."
     }
   ]
 }

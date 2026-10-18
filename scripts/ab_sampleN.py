@@ -22,7 +22,11 @@ ap.add_argument("--concurrency", type=int, default=2)
 args = ap.parse_args()
 
 for arm in args.arms.split(","):
-    ns = argparse.Namespace(arm=arm, limit=args.limit, concurrency=args.concurrency)
+    # systemone-branch flags (added to cmd_replay after this driver was
+    # written): default OFF — plain model arm.
+    ns = argparse.Namespace(arm=arm, limit=args.limit, concurrency=args.concurrency,
+                            inject_vwap=False, fade_mode=None, strip_fields=None,
+                            only_vwap_episodes=False, stride=1)
     print(f"\n===== SAMPLE{args.limit} arm={arm} =====", flush=True)
     ab.cmd_replay(ns)
     ab.cmd_audit(argparse.Namespace(arm=arm))
