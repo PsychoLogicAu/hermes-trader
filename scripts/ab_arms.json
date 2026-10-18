@@ -99,6 +99,15 @@
       "api_key_env": "",
       "timeout_s": 60.0,
       "note": "DECISION MODEL (vLLM Decision 2.0 Lux 9B Q8_0) \u2014 fork build ~/llama-decision2, container d2-serve :8081, flags per _model_gauntlet.sh (--embeddings --pooling none -c 8192 -b 8192 -ub 8192). FULL-COHORT re-run 2026-10-17 on CURRENT state shape to settle d2-vs-pplx authoritatively; old 908-row old-shape results archived to scratch/preshape/ (resume-poison rule)."
+    },
+    {
+      "tag": "pplx-decider-onsite",
+      "kind": "systemone",
+      "base_url": "http://192.168.1.16:8080",
+      "model": "pplx-decider",
+      "api_key_env": "",
+      "timeout_s": 60.0,
+      "note": "Arm A state-shape sweep: SAME pplx IQ3_M endpoint as pplx-decider-iq3m, replayed in decision2-lux live shape (--profile-shape decision2-lux-9b: composite ON, vwap fields, breakout side labels, crowdedMover). Control file untouched \u2014 results go to *_ps-* file."
     }
   ]
 }
