@@ -251,3 +251,60 @@ def test_trend_release_depth_zero_inert(cfg):
     res, calls = route()
     assert res["action"] == "none"
     assert calls == []
+
+
+# ── Scaled contention floor (owner call 2026-10-18): the default floor is
+# 60% of max_concurrent — 3 was chosen when the cap was 5; the RATIO is the
+# load-bearing choice, not the number. An explicit stale_flat_min_positions
+# still pins verbatim.
+
+CAP8_NOFLOOR = {
+    "max_concurrent": 8,
+    "dsl_exit": {},
+    "ai_close_slot_defer": {"enabled": True, "shadow_mode": False},
+}
+
+
+def _plain_cfg(monkeypatch, c):
+    monkeypatch.setattr(executor, "read_agent_config", lambda: c)
+
+
+def test_scaled_floor_cap8_defers_below_5(monkeypatch):
+    _plain_cfg(monkeypatch, CAP8_NOFLOOR)
+    _active_positions["FOO_long"] = _tracker("FOO", peak=100.0)
+    for i in range(3):
+        _active_positions[f"O{i}_long"] = _tracker(f"O{i}")
+    res, calls = route()  # used 4 < round(8*0.6) = 5
+    assert res["action"] == "none" and calls == []
+
+
+def test_scaled_floor_cap8_contention_at_5(monkeypatch):
+    _plain_cfg(monkeypatch, CAP8_NOFLOOR)
+    _active_positions["FOO_long"] = _tracker("FOO", peak=100.0)
+    for i in range(4):
+        _active_positions[f"O{i}_long"] = _tracker(f"O{i}")
+    res, calls = route()  # used 5 >= 5 -> contended, close proceeds
+    assert res["action"] == "close" and calls == ["FOO"]
+
+
+def test_scaled_floor_cap5_matches_old_default(monkeypatch):
+    c = {k: (dict(v) if isinstance(v, dict) else v) for k, v in CAP8_NOFLOOR.items()}
+    c["max_concurrent"] = 5
+    _plain_cfg(monkeypatch, c)
+    _active_positions["FOO_long"] = _tracker("FOO", peak=100.0)
+    _active_positions["O0_long"] = _tracker("O0")
+    res, calls = route()  # used 2 < 3 -> defer
+    assert res["action"] == "none" and calls == []
+    _active_positions["O1_long"] = _tracker("O1")
+    res, calls = route()  # used 3 >= 3 -> close (byte-identical to old floor 3)
+    assert res["action"] == "close" and calls == ["FOO"]
+
+
+def test_explicit_floor_pins_verbatim_under_scaling(monkeypatch):
+    c = {k: (dict(v) if isinstance(v, dict) else v) for k, v in CAP8_NOFLOOR.items()}
+    c["dsl_exit"] = {"stale_flat_min_positions": 2}
+    _plain_cfg(monkeypatch, c)
+    _active_positions["FOO_long"] = _tracker("FOO", peak=100.0)
+    _active_positions["O0_long"] = _tracker("O0")
+    res, calls = route()  # explicit 2 -> used 2 contention stands
+    assert res["action"] == "close" and calls == ["FOO"]

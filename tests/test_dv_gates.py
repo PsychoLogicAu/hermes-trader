@@ -401,12 +401,37 @@ def test_route_verdict_dv_close_overrides_long_on_held():
     assert r["action"] == "close" and not called  # entry attempt skipped
 
 
-def test_route_verdict_dv_close_bypasses_slot_defer(monkeypatch):
-    """The ai_close slot-pressure guard is for the PRIMARY cohort (B.35).
-    dv closes must never be deferred by it."""
-    def _boom(coin):
-        raise AssertionError("slot defer must not run for dv closes")
-    monkeypatch.setattr(executor, "_ai_close_slot_defer_check", _boom)
+def test_route_verdict_dv_close_respects_slot_defer_enforced(monkeypatch):
+    """Owner call 2026-10-18: the slot-pressure guard applies to dv closes
+    too — an enforced defer returns action none, deterministic exits own it."""
+    defer = {"shadow": False, "used": 1, "cap": 8, "floor": 5,
+             "peak_pct": 0.5, "protect_pct": 1.5,
+             "reason": "ai_close_slot_defer: slots 1/8 < floor 5, never armed"}
+    monkeypatch.setattr(executor, "_ai_close_slot_defer_check", lambda c: defer)
+    a = _analysis(verdict="PASS", dv_close_fire=_spec())
+    closed = []
+    r = executor.route_verdict(a, execute_fn=lambda x: None,
+                               close_fn=lambda c, reason: closed.append(c))
+    assert r["action"] == "none" and r["close_source"] == "dv"
+    assert "deferred_reason" in r and not closed
+    # re-check happens every scan: the voice fires at its first PERMITTED veto
+
+
+def test_route_verdict_dv_close_shadow_defer_closes(caplog, monkeypatch):
+    defer = {"shadow": True, "used": 1, "cap": 8, "floor": 5,
+             "peak_pct": 0.5, "protect_pct": 1.5, "reason": "would defer"}
+    monkeypatch.setattr(executor, "_ai_close_slot_defer_check", lambda c: defer)
+    a = _analysis(verdict="VETO", dv_close_fire=_spec())
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.executor"):
+        r = executor.route_verdict(a, execute_fn=lambda x: None,
+                                   close_fn=_rec_close)
+    assert r["action"] == "close" and r["close_source"] == "dv"
+    assert [x for x in caplog.records if "dv_close WOULD-HAVE-DEFERRED" in x.getMessage()]
+
+
+def test_route_verdict_dv_close_contended_book_closes(monkeypatch):
+    """Guard returns None (contended / armed / trend-released) -> fire."""
+    monkeypatch.setattr(executor, "_ai_close_slot_defer_check", lambda c: None)
     a = _analysis(verdict="VETO", dv_close_fire=_spec())
     r = executor.route_verdict(a, execute_fn=lambda x: None, close_fn=_rec_close)
     assert r["action"] == "close" and r["close_source"] == "dv"

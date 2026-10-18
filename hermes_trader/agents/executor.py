@@ -2241,9 +2241,20 @@ def _ai_close_slot_defer_check(coin: str) -> Optional[Dict[str, Any]]:
         if not trackers:
             return None  # no tracker (flat / not booked) — close no-ops anyway
         cap = int(read_agent_config().get("max_concurrent", 5) or 5)
-        floor = 3
         dsl_cfg = read_agent_config().get("dsl_exit") or {}
-        floor = int(dsl_cfg.get("stale_flat_min_positions", 3) or 0)
+        raw_floor = dsl_cfg.get("stale_flat_min_positions", None)
+        if raw_floor is None:
+            # Scaled contention floor (owner call 2026-10-18): the shipped
+            # default 3 was calibrated when max_concurrent was 5 — i.e. 60%
+            # of slots in use = a contended book. The ratio, not the number,
+            # is the load-bearing choice: cap 5 -> 3 (byte-identical to the
+            # old default), cap 8 -> 5. An EXPLICIT stale_flat_min_positions
+            # still overrides verbatim (it also pins the deterministic
+            # stale-flat timeout's floor — that side is untouched by this
+            # scaling, which only applies to the guard's default).
+            floor = max(1, int(round(cap * 0.6)))
+        else:
+            floor = int(raw_floor or 0)
         if used >= floor:
             return None  # contended book — LLM close is legitimate
         # NEVER-ARMED test: peak profit below protect_pct for every tracker
@@ -2339,15 +2350,15 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     # executes as a synthetic CLOSE through the SAME AI-CLOSE path, tagged
     # close_source "dv" — the ledger exit type is "dv_close" (_exit_type
     # splits the reason prefix).
-    # The slot-pressure jurisdiction guard deliberately does NOT apply to
-    # dv-sourced closes: the guard was built from B.35 (the PRIMARY-seat
-    # ai_close cohort cost -$3.06 with 0/625 responses engaging the slots
-    # fact). The DV cohort is the opposite evidence (B.50 Oct-17:
-    # first-veto savings on 5/7 losers, +$7.72, zero interference with
-    # winners) — and knife-bottom losers are by construction never armed,
-    # so applying the defer would gut exactly the population this fires
-    # for. Suppression for dv closes stays inside the accrual
-    # (threshold + grace_minutes + fail-closed tracker check).
+    # The slot-pressure jurisdiction guard APPLIES to dv closes as well as
+    # primary ai_close (owner call 2026-10-18). Oct-17 pricing: of the five
+    # dv first-fires, four happened on books of 5-6 positions — contention
+    # passes, they close unimpeded; only a thin-book never-armed veto is
+    # deferred, and trend_release restores jurisdiction once the mark is
+    # <= -depth_pct (the deferred population is shallow noise on an
+    # uncontended book, exactly the B.35 pathology the guard exists for).
+    # First-fire semantics survive: deferral is re-checked every scan, so
+    # the dv voice fires at its first *permitted* veto, not the last.
     _dvf = analysis.get("dv_close_fire")
     if isinstance(_dvf, dict) and _dvf and coin and verdict != "CLOSE":
         _reason = (
@@ -2357,6 +2368,21 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             f"entry {_dvf.get('entry', 'n/a')}, mark {_dvf.get('mark', 'n/a')} "
             f"(model {_dvf.get('model', '?')})"
         )
+        _dv_defer = _ai_close_slot_defer_check(str(coin))
+        if _dv_defer is not None:
+            _mode = "WOULD-HAVE-DEFERRED" if _dv_defer["shadow"] else "DEFERRED"
+            logger.warning(
+                f"[route_verdict] {coin}: dv_close {_mode} "
+                f"(slots {_dv_defer['used']}/{_dv_defer['cap']} in use < floor "
+                f"{_dv_defer['floor']}, never armed: mark peak "
+                f"{_dv_defer['peak_pct']:+.2f}% < protect "
+                f"{_dv_defer['protect_pct']:.2f}%) — deterministic exits keep "
+                f"ownership. DV: {_reason[:160]}"
+            )
+            if not _dv_defer["shadow"]:
+                return {"action": "none", "verdict": "CLOSE", "result": None,
+                        "close_source": "dv",
+                        "deferred_reason": _dv_defer["reason"]}
         logger.warning(
             f"[route_verdict] {coin}: dv_close FIRE — decision-voice close "
             f"voice overrides '{verdict or '?'}' verdict: {_reason}")
