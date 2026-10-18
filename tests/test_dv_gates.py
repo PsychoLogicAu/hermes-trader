@@ -1,15 +1,22 @@
 """Tests for the clef decision-voice GATES (clef-gate scope Changes 1-3).
 
-Two enforcement points, both shadow-first per the house pattern
+Two enforcement points, both model-scoped in the OBSERVER's model profile
+(config-models/<profile>.json -> trap_veto/close_veto blocks {mode,
+threshold, ...}; owner call 2026-10-18 — the bars travel with the model
+that produces the noul), shadow-first per the house pattern
 (.hermes/plans/2026-10-07-clef-gate-close-voice-scope.md):
 
-  1. entry trap-veto (executor._dv_trap_veto_reason) — shadow ON logs
-     WOULD-BE-BLOCKED and allows; shadow OFF hard-blocks with the exact
-     reason string through the runner_gate forensics path; NO dv row is
-     fail-open (a failed observer is 'no observation', never a block).
+  1. entry trap-veto (executor._dv_trap_veto_reason) — mode shadow logs
+     WOULD-BE-BLOCKED and allows; live hard-blocks with the exact reason
+     string through the runner_gate forensics path; off / absent block =
+     inert; NO dv row is fail-open (a failed observer is 'no observation',
+     never a block).
   2. close_veto accrual (research._dv_close_exit_accrual) — held +
-     close_now >= threshold + primary != CLOSE -> WOULD-HAVE-CLOSED line;
-     grace_minutes suppresses young positions.
+     close_now >= threshold + primary != CLOSE -> WOULD-HAVE-CLOSED line
+     (shadow) or fire-spec (live); grace_minutes suppresses young
+     positions.
+
+decision_voice_gate.enabled remains the master kill above both.
 
 Plus the whitelist regression (the 2026-08 pitfall): trap/close_now survive
 analysis -> entry-context -> close-row join.
@@ -31,20 +38,33 @@ from hermes_trader.agents import executor, research  # noqa: E402
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
-def _cfg(threshold=0.45, shadow=True, enabled=True, close_thr=0.50,
-         close_shadow=True, grace=90, dv_profile=None):
-    cfg = {
-        "decision_voice_gate": {
-            "enabled": enabled,
-            "trap_veto": {"shadow_mode": shadow, "threshold": threshold},
-            "close_veto": {"shadow_mode": close_shadow, "threshold": close_thr,
-                           "grace_minutes": grace},
-        }
+def _profile_file(trap_mode="shadow", trap_thr=0.45, close_mode="shadow",
+                  close_thr=0.50, grace=90, blocks=True):
+    """Write config-models/dv-test.json — the gate blocks are per-model
+    (hot-read by dv_gate_block through MODEL_CONFIG_DIR)."""
+    import hermes_trader.agents.config_store as cs
+    prof = {"model": "vllm-test"}
+    if blocks:
+        prof["trap_veto"] = {"mode": trap_mode, "threshold": trap_thr}
+        prof["close_veto"] = {"mode": close_mode, "threshold": close_thr,
+                              "grace_minutes": grace}
+    pf = Path(cs.MODEL_CONFIG_DIR) / "dv-test.json"
+    pf.parent.mkdir(parents=True, exist_ok=True)
+    pf.write_text(json.dumps(prof))
+
+
+def _cfg(trap_mode="shadow", trap_thr=0.45, close_mode="shadow",
+         close_thr=0.50, grace=90, enabled=True, blocks=True):
+    """Agent-config dict for the executor gate fns (master kill + dv slot
+    pointing at the dv-test profile); also writes the profile file."""
+    _profile_file(trap_mode=trap_mode, trap_thr=trap_thr,
+                  close_mode=close_mode, close_thr=close_thr, grace=grace,
+                  blocks=blocks)
+    return {
+        "decision_voice_gate": {"enabled": enabled},
+        "llm": {"decision_voice": {"enabled": True,
+                                   "model_profile": "dv-test"}},
     }
-    if dv_profile:
-        cfg["llm"] = {"decision_voice": {"enabled": True,
-                                         "model_profile": dv_profile}}
-    return cfg
 
 
 def _analysis(trap=0.52, close_now=None, **over):
@@ -64,7 +84,8 @@ def _analysis(trap=0.52, close_now=None, **over):
 # ── 1. trap-veto: hard block, exact reason string ─────────────────────────
 
 def test_trap_veto_hard_block_reason_exact():
-    r = executor._dv_trap_veto_reason(_analysis(trap=0.52), _cfg(shadow=False))
+    r = executor._dv_trap_veto_reason(_analysis(trap=0.52),
+                                      _cfg(trap_mode="live"))
     assert r == "dv_trap_veto (trap 0.52 >= 0.45)"
 
 
@@ -72,11 +93,11 @@ def test_trap_veto_below_threshold_passes():
     assert executor._dv_trap_veto_reason(_analysis(trap=0.40), _cfg()) == ""
 
 
-# ── 2. trap-veto: shadow ON -> allowed + accrual line ─────────────────────
+# ── 2. trap-veto: shadow -> allowed + accrual line ────────────────────────
 
 def test_trap_veto_shadow_logs_and_allows(caplog):
     with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.executor"):
-        r = executor._dv_trap_veto_reason(_analysis(trap=0.52), _cfg(shadow=True))
+        r = executor._dv_trap_veto_reason(_analysis(trap=0.52), _cfg())
     assert r == ""  # trade allowed
     lines = [rec.getMessage() for rec in caplog.records
              if "dv_trap_veto WOULD BE BLOCKED" in rec.getMessage()]
@@ -94,18 +115,52 @@ def test_trap_veto_shadow_logs_and_allows(caplog):
 def test_trap_veto_fail_open_no_dv_row():
     a = _analysis()
     a["decision_voice_at_entry"] = None
-    assert executor._dv_trap_veto_reason(a, _cfg(shadow=False)) == ""
+    assert executor._dv_trap_veto_reason(
+        a, _cfg(trap_mode="live")) == ""
 
 
 def test_trap_veto_fail_open_missing_trap_scalar():
     a = _analysis()
     a["decision_voice_at_entry"] = {"model": "clef-flash", "verdict": "LONG"}
-    assert executor._dv_trap_veto_reason(a, _cfg(shadow=False)) == ""
+    assert executor._dv_trap_veto_reason(
+        a, _cfg(trap_mode="live")) == ""
 
 
 def test_trap_veto_gate_disabled_no_opinion():
-    assert executor._dv_trap_veto_reason(_analysis(trap=0.99),
-                                         _cfg(enabled=False, shadow=False)) == ""
+    assert executor._dv_trap_veto_reason(
+        _analysis(trap=0.99), _cfg(enabled=False, trap_mode="live")) == ""
+
+
+def test_trap_veto_profile_block_absent_gate_inert(caplog):
+    """No gate blocks in the dv profile = no opinion at all (clean-break
+    shape: the agent-config gate block no longer carries bars)."""
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.executor"):
+        r = executor._dv_trap_veto_reason(_analysis(trap=0.99),
+                                          _cfg(blocks=False))
+    assert r == ""
+    assert not [x for x in caplog.records
+                if "dv_trap_veto" in x.getMessage()]
+
+
+def test_trap_veto_mode_off_silent(caplog):
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.executor"):
+        r = executor._dv_trap_veto_reason(_analysis(trap=0.99),
+                                          _cfg(trap_mode="off"))
+    assert r == ""
+    assert not [x for x in caplog.records
+                if "dv_trap_veto" in x.getMessage()]
+
+
+def test_trap_veto_malformed_mode_fails_safe_to_shadow(caplog):
+    """Garbage mode never hard-blocks: loud line + shadow behaviour."""
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.executor"):
+        r = executor._dv_trap_veto_reason(_analysis(trap=0.52),
+                                          _cfg(trap_mode="enable"))
+    assert r == ""
+    assert [x for x in caplog.records
+            if "trap_veto mode 'enable'" in x.getMessage()
+            and "fail-safe to shadow" in x.getMessage()]
+    assert "WOULD BE BLOCKED" in caplog.text  # shadow accrual stands
 
 
 # ── 4. close_veto accrual: held + >= thr + primary != CLOSE ───────────────
@@ -128,26 +183,33 @@ def _held(coin="TEST", side="long"):
 
 @pytest.fixture
 def _gate_cfg(monkeypatch):
-    """Write the decision_voice_gate block into the agent config (hot read).
-    dv_mode (any string, written verbatim) also writes
-    config-models/dv-test.json with close_veto_mode and points the
-    decision_voice slot at it (B.50 profile-key resolution)."""
+    """Write the agent config (master kill + dv slot) AND the
+    config-models/dv-test.json profile carrying the nested
+    trap_veto/close_veto blocks (B.50+ model-scoped shape, hot read).
+    profile=False removes the profile file entirely (block-absent
+    defaults path)."""
     import hermes_trader.agents.config_store as cs
     from pathlib import Path
 
-    def _write(dv_mode=None, **kw):
+    def _write(close_mode="shadow", close_thr=0.50, grace=90, enabled=True,
+               trap_mode="shadow", trap_thr=0.45, profile=True):
         cfg_path = Path(cs.CONFIG_PATH)
         cfg_path.unlink(missing_ok=True)
+        cfg = {"mode": "LIVE",
+               "decision_voice_gate": {"enabled": enabled},
+               "llm": {"decision_voice": {"enabled": True,
+                                          "model_profile": "dv-test"}}}
         with open(cfg_path, "w") as f:
-            json.dump({"mode": "LIVE",
-                       **_cfg(dv_profile="dv-test" if dv_mode is not None else None,
-                              **kw)}, f)
+            json.dump(cfg, f)
         pf = Path(cs.MODEL_CONFIG_DIR) / "dv-test.json"
         pf.unlink(missing_ok=True)
-        if dv_mode is not None:
+        if profile:
             pf.parent.mkdir(parents=True, exist_ok=True)
-            pf.write_text(json.dumps({"model": "vllm-test",
-                                      "close_veto_mode": dv_mode}))
+            pf.write_text(json.dumps({
+                "model": "vllm-test",
+                "trap_veto": {"mode": trap_mode, "threshold": trap_thr},
+                "close_veto": {"mode": close_mode, "threshold": close_thr,
+                               "grace_minutes": grace}}))
     yield _write
     Path(cs.CONFIG_PATH).unlink(missing_ok=True)
     (Path(cs.MODEL_CONFIG_DIR) / "dv-test.json").unlink(missing_ok=True)
@@ -214,11 +276,10 @@ def test_close_veto_grace_suppresses_young_position(caplog, _gate_cfg):
         _dslx._active_positions.pop("TEST_long", None)
 
 
-def test_close_veto_legacy_shadow_off_now_fires(caplog, _gate_cfg):
-    """B.50 wiring: with NO model-profile key, the legacy mapping
-    shadow_mode false = LIVE — returns the fire-spec (route_verdict acts on
+def test_close_veto_live_fires_spec(caplog, _gate_cfg):
+    """B.50 wiring: LIVE mode returns the fire-spec (route_verdict acts on
     it) and logs the FIRED line. Tracker present so grace is verified."""
-    _gate_cfg(close_shadow=False)
+    _gate_cfg(close_mode="live")
     trk = _FakeTracker(100.0, time.time() - 120 * 60, 101.0, 97.0)
     from hermes_trader.agents import dsl_exit as _dslx
     _dslx._active_positions["TEST_long"] = trk
@@ -270,7 +331,7 @@ def test_trap_close_scalars_survive_entry_context_join(monkeypatch):
     assert '"close_now": dv_row["dv_close_now"]' in wl
 
 
-# ── 7. B.50 model-profile close_veto_mode (tri-state, seat-welded) ────────
+# ── 7. B.50+ model-profile close_veto block (tri-state mode, welded) ──────
 
 def _live_tracker(mins=120):
     return _FakeTracker(100.0, time.time() - mins * 60, 101.0, 97.0)
@@ -285,20 +346,22 @@ def _with_tracker(fn):
         _dslx._active_positions.pop("TEST_long", None)
 
 
-def test_profile_live_overrides_legacy_shadow(caplog, _gate_cfg):
-    """Profile close_veto_mode 'live' wins over legacy shadow_mode: true."""
-    _gate_cfg(dv_mode="live")  # close_shadow stays True
+def test_profile_absent_defaults_to_shadow(caplog, _gate_cfg):
+    """No profile file at all -> fail-safe shadow at the 0.50 code
+    default: accrues, never fires."""
+    _gate_cfg(profile=False)
     with caplog.at_level(logging.INFO, logger="hermes_trader.agents.research"):
         spec = _with_tracker(lambda: research._dv_close_exit_accrual(
             "TEST", _dv_row(0.72), _held()))
-    assert spec is not None
-    assert not [r for r in caplog.records
-                if "WOULD HAVE CLOSED" in r.getMessage()]
+    assert spec is None
+    assert [r for r in caplog.records
+            if "WOULD HAVE CLOSED" in r.getMessage()
+            and "close_now 0.72 >= 0.50" in r.getMessage()]
 
 
-def test_profile_off_silent_even_when_legacy_live(caplog, _gate_cfg):
-    """Profile 'off' silences the voice even with legacy shadow_mode: false."""
-    _gate_cfg(dv_mode="off", close_shadow=False)
+def test_profile_off_silent(caplog, _gate_cfg):
+    """mode 'off' silences the voice entirely (live bar irrelevant)."""
+    _gate_cfg(close_mode="off", close_thr=0.20)
     with caplog.at_level(logging.INFO, logger="hermes_trader.agents.research"):
         spec = _with_tracker(lambda: research._dv_close_exit_accrual(
             "TEST", _dv_row(0.90), _held()))
@@ -306,35 +369,36 @@ def test_profile_off_silent_even_when_legacy_live(caplog, _gate_cfg):
     assert not [r for r in caplog.records if "dv_close_veto" in r.getMessage()]
 
 
-def test_profile_shadow_overrides_legacy_live(caplog, _gate_cfg):
-    """Demote lever: profile 'shadow' back-arms accrual-only even when the
-    legacy knob says live. Hot, one profile edit."""
-    _gate_cfg(dv_mode="shadow", close_shadow=False)
+def test_threshold_from_profile_block(caplog, _gate_cfg):
+    """The bar travels with the model: block threshold 0.80 > close_now
+    0.72 -> silent in live mode (no fire, no line)."""
+    _gate_cfg(close_mode="live", close_thr=0.80)
+    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.research"):
+        spec = _with_tracker(lambda: research._dv_close_exit_accrual(
+            "TEST", _dv_row(0.72), _held()))
+    assert spec is None
+    assert not [r for r in caplog.records if "dv_close_veto" in r.getMessage()]
+
+
+def test_profile_invalid_value_fails_safe_to_shadow(caplog, _gate_cfg):
+    """A malformed close_veto mode never fires by accident: loud log,
+    shadow behaviour."""
+    _gate_cfg(close_mode="enable")  # garbage mode at a live-priced bar
     with caplog.at_level(logging.INFO, logger="hermes_trader.agents.research"):
         spec = _with_tracker(lambda: research._dv_close_exit_accrual(
             "TEST", _dv_row(0.72), _held()))
     assert spec is None
     assert [r for r in caplog.records
-            if "WOULD HAVE CLOSED" in r.getMessage()]
-
-
-def test_profile_invalid_value_fails_safe_to_shadow(caplog, _gate_cfg):
-    """A malformed close_veto_mode never fires by accident: loud log,
-    shadow behaviour."""
-    _gate_cfg(dv_mode="enable", close_shadow=False)  # legacy live + garbage key
-    with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.research"):
-        spec = _with_tracker(lambda: research._dv_close_exit_accrual(
-            "TEST", _dv_row(0.72), _held()))
-    assert spec is None
-    assert [r for r in caplog.records
-            if "close_veto_mode 'enable'" in r.getMessage()
+            if "close_veto mode 'enable'" in r.getMessage()
             and "fail-safe to shadow" in r.getMessage()]
+    assert [r for r in caplog.records
+            if "WOULD HAVE CLOSED" in r.getMessage()]
 
 
 def test_profile_live_fail_closed_without_tracker(caplog, _gate_cfg):
     """Live mode never fires without dsl tracker data: age/grace would be
     unverifiable. Loud WOULD-NOT-FIRE line instead."""
-    _gate_cfg(dv_mode="live")
+    _gate_cfg(close_mode="live")
     from hermes_trader.agents import dsl_exit as _dslx
     _dslx._active_positions.pop("TEST_long", None)
     with caplog.at_level(logging.WARNING, logger="hermes_trader.agents.research"):
@@ -346,7 +410,7 @@ def test_profile_live_fail_closed_without_tracker(caplog, _gate_cfg):
 
 def test_profile_live_grace_still_suppresses(caplog, _gate_cfg):
     """grace_minutes applies in live mode too (young position = no fire)."""
-    _gate_cfg(dv_mode="live", grace=90)
+    _gate_cfg(close_mode="live", grace=90)
     from hermes_trader.agents import dsl_exit as _dslx
     _dslx._active_positions["TEST_long"] = _live_tracker(mins=30)
     try:
@@ -362,7 +426,7 @@ def test_profile_live_grace_still_suppresses(caplog, _gate_cfg):
 def test_gate_enabled_false_kills_live_voice(_gate_cfg):
     """decision_voice_gate.enabled remains the master kill above the
     profile mode."""
-    _gate_cfg(dv_mode="live", enabled=False)
+    _gate_cfg(close_mode="live", enabled=False)
     assert _with_tracker(lambda: research._dv_close_exit_accrual(
         "TEST", _dv_row(0.99), _held())) is None
 

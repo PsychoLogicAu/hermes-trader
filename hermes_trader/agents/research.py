@@ -30,6 +30,7 @@ from hermes_trader.agents.duel_store import (
 from hermes_trader.agents import prompt_log
 from hermes_trader.agents.decision_voice import (
     decision_voice_verdict,
+    dv_gate_block,
     primary_engine_config,
     systemone_primary_verdict,
 )
@@ -1393,37 +1394,25 @@ def _dv_close_voice_mode(cv: Dict[str, Any]) -> str:
     """Tri-state resolution for the decision-voice CLOSE VOICE (B.50,
     t_af6dfa45): returns "off" | "shadow" | "live".
 
-    The key lives in the decision_voice SEAT's MODEL PROFILE — that model's
-    conf scale is what the threshold was priced against, so the mode travels
-    with the model (same structural-weld principle as state_admission):
-    config-models/<profile>.json -> "close_veto_mode": "off"|"shadow"|"live".
+    The mode lives in the decision_voice OBSERVER seat's MODEL PROFILE,
+    close_veto block (that model's conf scale is what the threshold was
+    priced against, so the mode travels with the model — same
+    structural-weld principle as state_admission): config-models/
+    <profile>.json -> "close_veto": {"mode": "off"|"shadow"|"live", ...}.
     A malformed value logs LOUD and fail-safes to shadow (never fires
-    accidentally). With no profile key the legacy agent-config mapping
-    stays: decision_voice_gate.close_veto.shadow_mode true -> shadow,
-    false -> live. `decision_voice_gate.enabled` remains the master kill,
-    checked by the caller BEFORE mode resolution.
-    """
-    try:
-        from hermes_trader.agents.config_store import (
-            read_agent_config, read_model_profile)
-        slot = ((read_agent_config().get("llm") or {})
-                .get("decision_voice") or {})
-        profile_name = str(slot.get("model_profile") or "")
-        if profile_name:
-            raw = (read_model_profile(profile_name) or {}).get("close_veto_mode")
-            if raw is not None:
-                mode = str(raw).strip().lower()
-                if mode in ("off", "shadow", "live"):
-                    return mode
-                logger.warning(
-                    f"[gate] dv_close_veto: model profile '{profile_name}' has "
-                    f"close_veto_mode {raw!r} (expected off|shadow|live) — "
-                    f"fail-safe to shadow, NOT firing")
-                return "shadow"
-    except Exception as e:  # noqa: BLE001 — mode read must never break the loop
-        logger.debug(f"[research] dv close_veto_mode resolution failed ({e}) "
-                     f"— falling back to legacy shadow_mode path")
-    return "shadow" if bool(cv.get("shadow_mode", True)) else "live"
+    accidentally). Block or mode absent -> shadow (fail-safe, accrual
+    only). `decision_voice_gate.enabled` remains the master kill, checked
+    by the caller BEFORE mode resolution."""
+    raw = cv.get("mode")
+    if raw is None:
+        return "shadow"
+    mode = str(raw).strip().lower()
+    if mode in ("off", "shadow", "live"):
+        return mode
+    logger.warning(
+        f"[gate] dv_close_veto: model profile close_veto mode {raw!r} "
+        f"(expected off|shadow|live) — fail-safe to shadow, NOT firing")
+    return "shadow"
 
 
 def _dv_close_exit_accrual(
@@ -1452,17 +1441,18 @@ def _dv_close_exit_accrual(
     tracker, and firing without it would bypass the grace check — no
     tracker, no fire (loud line instead; shadow still logs its line).
 
-    Mode: model-profile key `close_veto_mode` (see _dv_close_voice_mode);
-    legacy knobs `decision_voice_gate.close_veto` {shadow_mode, threshold,
-    grace_minutes} — all hot read. Every firing logs the raw close_now so
-    all threshold variants are priced offline. Never raises.
+    Settings live in the OBSERVER's model profile close_veto block
+    {mode, threshold, grace_minutes} — resolved via dv_gate_block,
+    threshold default 0.50, grace default 90min, all hot read. `decision_
+    voice_gate.enabled` stays the master kill. Every firing logs the raw
+    close_now so all threshold variants are priced offline. Never raises.
     """
     try:
         from hermes_trader.agents.config_store import read_agent_config
         gate = (read_agent_config().get("decision_voice_gate") or {})
         if not bool(gate.get("enabled", False)):
             return None
-        cv = gate.get("close_veto") or {}
+        cv = dv_gate_block("close_veto")
         held = next((p for p in (open_positions or [])
                      if p.get("coin") == coin), None)
         if held is None:
@@ -2031,7 +2021,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     )
     # B.50 (t_af6dfa45): the dv close voice. Shadow mode accrues the
     # WOULD-HAVE-CLOSED line (mirrors the B.10 duelist line); LIVE mode
-    # (model-profile close_veto_mode) returns a fire-SPEC that rides the
+    # (model-profile close_veto block mode "live") returns a fire-SPEC that rides the
     # analysis dict to route_verdict as a synthetic dv_close.
     _dv_close_fire = None
     if dv_row is not None:
@@ -2163,7 +2153,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             if dv_row is not None else None
         ),
         # DV close-voice fire spec (B.50, t_af6dfa45): None unless the
-        # decision_voice seat's model profile arms close_veto_mode "live"
+        # decision_voice seat's model profile close_veto block arms mode "live"
         # AND the held-position conditions passed this scan. Consumed by
         # route_verdict: executed as a synthetic CLOSE tagged
         # close_source "dv" (ledger exit type dv_close).

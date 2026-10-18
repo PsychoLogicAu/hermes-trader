@@ -270,8 +270,8 @@ def test_research_systemone_held_close(monkeypatch):
 def _arm_veto(monkeypatch, trap, threshold, shadow):
     _write_cfg({"engine": "systemone", "model": "d2-lux",
                 "base_url": "http://so.test:8080",
-                "trap_veto_threshold": threshold,
-                "trap_veto_shadow_mode": shadow})
+                "trap_veto": {"threshold": threshold,
+                              "mode": "shadow" if shadow else "live"}})
     answers = _answers({"long": 0.8, "short": 0.05, "none": 0.15},
                        {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2}, trap=trap)
     monkeypatch.setattr(dv, "call_systemone",
@@ -312,7 +312,7 @@ def test_trap_veto_never_touches_close(monkeypatch):
     # held + close_now >= 0.5 + trap above threshold -> CLOSE stays CLOSE
     _write_cfg({"engine": "systemone", "model": "d2-lux",
                 "base_url": "http://so.test:8080",
-                "trap_veto_threshold": 0.35, "trap_veto_shadow_mode": False})
+                "trap_veto": {"threshold": 0.35, "mode": "live"}})
     answers = _answers({"long": 0.1, "short": 0.1, "none": 0.8},
                        {0: 0.5, 1: 0.3, 2: 0.2, 3: 0.0, 4: 0.0},
                        trap=0.9, close=0.7)
@@ -357,11 +357,10 @@ _VWAP_SHORT = {"name": "vwapDeviation", "fired": True, "reason": "vwap fade",
 def _arm_veto_ovr(monkeypatch, trap, threshold, overrides, vwap_fields=True):
     slot = {"engine": "systemone", "model": "d2-lux",
             "base_url": "http://so.test:8080",
-            "trap_veto_threshold": threshold,
-            "trap_veto_shadow_mode": False,
+            "trap_veto": {"threshold": threshold, "mode": "live"},
             "vwap_fields": vwap_fields}
     if overrides is not None:
-        slot["trap_veto_overrides"] = overrides
+        slot["trap_veto"]["overrides"] = overrides
     _write_cfg(slot)
     answers = _answers({"long": 0.05, "short": 0.8, "none": 0.15},
                        {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2}, trap=trap)
@@ -442,6 +441,33 @@ def test_trap_veto_cohort_bar_malformed_fails_open(monkeypatch):
     assert a["verdict"] == "VETO"  # malformed entries dropped -> global bar
 
 
+def test_trap_veto_malformed_block_fails_safe(monkeypatch, caplog):
+    """A broken knob never vetoes: bad threshold -> gate OFF (loud line);
+    bad mode -> fail-safe shadow (proceeds with accrual, not VETO)."""
+    import logging
+    caplog.set_level(logging.WARNING, logger="hermes_trader.agents.decision_voice")
+    _write_cfg({"engine": "systemone", "model": "d2-lux",
+                "base_url": "http://so.test:8080",
+                "trap_veto": {"threshold": "abc", "mode": "live"}})
+    answers = _answers({"long": 0.8, "short": 0.05, "none": 0.15},
+                       {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2}, trap=0.9)
+    monkeypatch.setattr(dv, "call_systemone",
+                        lambda *a, **k: (answers, 42, 30))
+    _patch_research_deps(monkeypatch)
+    a = research.research("BTC", _perception())
+    assert a["verdict"] == "LONG"
+    assert "trap veto OFF for this seat" in caplog.text
+
+    _write_cfg({"engine": "systemone", "model": "d2-lux",
+                "base_url": "http://so.test:8080",
+                "trap_veto": {"threshold": 0.35, "mode": "banana"}})
+    _patch_research_deps(monkeypatch)
+    a = research.research("BTC", _perception())
+    assert a["verdict"] == "LONG"  # shadow, not VETO
+    assert "fail-safe to shadow" in caplog.text
+    assert "WOULD BE VETOED (shadow" in caplog.text
+
+
 def test_trap_veto_cohort_bar_above_cohort_bar_still_vetoes(monkeypatch, caplog):
     _arm_veto_ovr(monkeypatch, trap=0.80, threshold=0.5,
                   overrides={"vwap-fade-short": 0.75})
@@ -459,7 +485,7 @@ def test_trap_veto_cohort_bar_shadow_mode_uses_cohort_bar(monkeypatch, caplog):
                   overrides={"vwap-fade-short": 0.75})
     import hermes_trader.agents.config_store as cs
     cfg = json.load(open(cs.CONFIG_PATH))
-    cfg["llm"]["primary_engine"]["trap_veto_shadow_mode"] = True
+    cfg["llm"]["primary_engine"]["trap_veto"]["mode"] = "shadow"
     with open(cs.CONFIG_PATH, "w") as f:
         json.dump(cfg, f)
     _patch_research_deps(monkeypatch)
