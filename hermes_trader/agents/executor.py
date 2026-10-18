@@ -2331,6 +2331,38 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
     verdict = (analysis.get("verdict") or "").upper()
     coin = analysis.get("coin")
 
+    # ── Decision-voice close voice (B.50, t_af6dfa45) ──────────────────
+    # The DV observer answers close_now on every scan of a HELD coin; when
+    # the seat's model profile arms close_veto_mode "live" and the accrual
+    # conditions pass (held, close_now >= threshold, grace elapsed, dsl
+    # tracker verified), research attaches a dv_close_fire spec here. It
+    # executes as a synthetic CLOSE through the SAME AI-CLOSE path, tagged
+    # close_source "dv" — the ledger exit type is "dv_close" (_exit_type
+    # splits the reason prefix).
+    # The slot-pressure jurisdiction guard deliberately does NOT apply to
+    # dv-sourced closes: the guard was built from B.35 (the PRIMARY-seat
+    # ai_close cohort cost -$3.06 with 0/625 responses engaging the slots
+    # fact). The DV cohort is the opposite evidence (B.50 Oct-17:
+    # first-veto savings on 5/7 losers, +$7.72, zero interference with
+    # winners) — and knife-bottom losers are by construction never armed,
+    # so applying the defer would gut exactly the population this fires
+    # for. Suppression for dv closes stays inside the accrual
+    # (threshold + grace_minutes + fail-closed tracker check).
+    _dvf = analysis.get("dv_close_fire")
+    if isinstance(_dvf, dict) and _dvf and coin and verdict != "CLOSE":
+        _reason = (
+            f"dv_close: close_now {float(_dvf.get('close_now', 0)):.2f} >= "
+            f"{float(_dvf.get('threshold', 0)):.2f}, age {_dvf.get('age', 'n/a')}, "
+            f"spot {_dvf.get('spot', 'n/a')}, peak {_dvf.get('peak', 'n/a')}, "
+            f"entry {_dvf.get('entry', 'n/a')}, mark {_dvf.get('mark', 'n/a')} "
+            f"(model {_dvf.get('model', '?')})"
+        )
+        logger.warning(
+            f"[route_verdict] {coin}: dv_close FIRE — decision-voice close "
+            f"voice overrides '{verdict or '?'}' verdict: {_reason}")
+        return {"action": "close", "verdict": "CLOSE", "close_source": "dv",
+                "result": close_fn(str(coin), _reason)}
+
     if verdict in ("LONG", "SHORT"):
         _res = execute_fn(analysis)
         if isinstance(_res, dict):
