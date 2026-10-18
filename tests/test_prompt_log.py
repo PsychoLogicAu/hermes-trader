@@ -214,6 +214,14 @@ def test_archive_record_shapes(monkeypatch):
     assert rec["prior_block_injected"] is True
     assert rec["system_prompt"].endswith("[TRUNCATED]")
     assert len(rec["system_prompt"]) < 100
+
+    # B.32 observability defaults: absent kwargs = legacy shape semantics
+    # (nothing computed, nothing injected, no text) — old writers unchanged.
+    rec0 = R._archive_record(coin="BTC", perception={"id": "p1"}, role="primary",
+                             model="m", system_prompt=None, user_message="u",
+                             raw_response="x", parsed=parsed)
+    assert rec0["prior_block_computed"] is False
+    assert rec0["prior_block_text"] is None
     assert rec["raw_response"].endswith("[TRUNCATED]")
     assert rec["parsed"]["verdict"] == "LONG"
     assert len(rec["parsed"]["reasoning"]) <= 2012  # 2000 + marker
