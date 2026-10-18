@@ -108,6 +108,15 @@
       "api_key_env": "",
       "timeout_s": 60.0,
       "note": "DECISION MODEL (d3 family, vllm-sr d3-27B TurinTech Artemis Q3_K_S 12.26GB, arch qwen35) \u2014 container d3-27b-serve :8090 (llama-master cbe28bb, same tree as d3-nano-serve; d2-serve stopped per owner 2026-10-20, nano STAYS LIVE as DV seat \u2014 co-resident run). Flags per card: -c 4096 -b 4096 -ub 4096 --parallel 1 (-np 1 mandatory, #30402). Cohort: same _ab_cohort.jsonl n=19955 as pplx-decider-iq3m + decision2-lux-q8 full runs -> true SBS. sha256 34c640d250afb383a63aee495f2c0d9ab01d8a1f309789ffd35f3f7e298e3224"
+    },
+    {
+      "tag": "pplx-decider-onsite",
+      "kind": "systemone",
+      "base_url": "http://192.168.1.16:8080",
+      "model": "pplx-decider",
+      "api_key_env": "",
+      "timeout_s": 60.0,
+      "note": "Arm A state-shape sweep: SAME pplx IQ3_M endpoint as pplx-decider-iq3m, replayed in decision2-lux live shape (--profile-shape decision2-lux-9b: composite ON, vwap fields, breakout side labels, crowdedMover). Control file untouched \u2014 results go to *_ps-* file."
     }
   ]
 }

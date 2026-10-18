@@ -317,6 +317,8 @@ def cmd_replay(args):
         arm_tag += f"__fade-{args.fade_mode}"
     if args.strip_fields:
         arm_tag += f"__strip-{args.strip_fields}"
+    if getattr(args, "profile_shape", None):
+        arm_tag += f"__ps-{args.profile_shape}"
     done = purge_errors(arm_tag)
     rows = [json.loads(l) for l in COHORT.open(errors="ignore") if l.strip()]
     if args.only_vwap_episodes or args.inject_vwap:
@@ -410,7 +412,7 @@ def cmd_replay(args):
 
 # ------------------------------------------------------- systemone arm ----
 
-def _state_from_prompt(coin, user_message):
+def _state_from_prompt(coin, user_message, with_fired=False):
     """Parse the archived chat user_message into the decision_voice state shape.
 
     The prompt layout is fixed (research.py renders it), so regex extraction is
@@ -423,6 +425,7 @@ def _state_from_prompt(coin, user_message):
         m = re.search(pat, user_message)
         return cast(m.group(1)) if m else None
 
+    fired_parts = []
     state = {
         "coin": coin,
         "mid": _f(r"Current mid: \$?([\d.eE+-]+)"),
@@ -437,6 +440,8 @@ def _state_from_prompt(coin, user_message):
             name = part.split(":")[0].strip()
             if name:
                 state["triggers_fired"].append(name)
+                detail = part.split(":", 1)[1].strip() if ":" in part else ""
+                fired_parts.append({"name": name, "detail": detail})
 
     for tf in ("1h", "4h", "1d"):
         m = re.search(
@@ -460,7 +465,40 @@ def _state_from_prompt(coin, user_message):
     held = bool(re.search(rf"Open position on {re.escape(coin)}: (?!none)",
                           user_message))
     state["held_position"] = {"side": None, "size_usd": None} if held else None
-    return state, held
+    return (state, fired_parts) if with_fired else (state, held)
+
+
+def apply_profile_shape(state, fired_parts, knobs, parsed_composite=None):
+    """Re-apply live decision_voice.build_state knobs onto the replay state
+    reconstructed from the archived chat prompt:
+      composite_score ON   -> keep the parsed perception score;
+      crowded_mover_label  -> emit crowdedMover when dailyMover fired (the
+          fired condition already bakes bar-move AND >=$3M vol — perception
+          runner_mover_surface — so fired == the crowded flag);
+      breakout_side_label  -> rewrite fired "breakout" to breakoutUp/Down
+          from the archived detail's above/below text (pct width is not
+          carried in the prompt; live renders bare "breakoutUp" when
+          pct_break is absent).
+    vwap_fields is handled by the caller via the episode-join injection
+    (archived chat prompts never carry the shadow vwap trigger); fade is
+    untouched: archived side-less fade names ARE the fade_fields:false
+    live shape byte-for-byte.
+    """
+    names = [p["name"] for p in fired_parts]
+    if knobs.get("composite_score") and parsed_composite is not None:
+        state["composite_score"] = round(float(parsed_composite), 1)
+    if knobs.get("crowded_mover_label") and "dailyMover" in names:
+        state["crowdedMover"] = True
+    if knobs.get("breakout_side_label"):
+        det = next((p["detail"] for p in fired_parts
+                    if p["name"] == "breakout"), "")
+        side = ("Up" if "above" in det.lower()
+                else "Down" if "below" in det.lower() else "")
+        if side:
+            state["triggers_fired"] = [
+                f"breakout{side}" if n == "breakout" else n
+                for n in state.get("triggers_fired", [])]
+    return state
 
 
 def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
@@ -476,7 +514,23 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
     inject = args.inject_vwap
     fade = args.fade_mode
     stripf = args.strip_fields
-    vwap_by_coin = load_vwap_episodes() if inject or args.only_vwap_episodes else None
+    # --profile-shape <name>: re-apply a live model-profile's state-shape
+    # knobs (composite/vwap/breakout-side/crowded-mover) onto the replay
+    # state, mirroring decision_voice.build_state. Fade is NOT touched —
+    # archived chat prompts already carry side-less fade names, which IS
+    # the live fade_fields:false shape byte-for-byte.
+    knobs = None
+    if getattr(args, "profile_shape", None):
+        from hermes_trader.agents.config_store import read_model_profile
+        knobs = read_model_profile(args.profile_shape)
+        if not knobs:
+            raise SystemExit(f"--profile-shape: profile '{args.profile_shape}' "
+                             f"not found in config-models")
+    shape_name = (args.profile_shape + ":on" if knobs else "control")
+    inject_on = bool(knobs.get("vwap_fields")) if knobs else bool(inject)
+    inject_mode = "full" if knobs else inject
+    vwap_by_coin = (load_vwap_episodes()
+                    if inject_on or args.only_vwap_episodes else None)
     n_ok = n_err = 0
     from concurrent.futures import ThreadPoolExecutor
     import threading
@@ -486,6 +540,8 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
         rec = {"perception_id": r["perception_id"], "arm": arm_tag,
                "coin": r["coin"], "ts": r["ts"], "model": model}
         state, held = _state_from_prompt(r["coin"], r["user_message"])
+        held = bool(held)
+        parsed_composite = state.get("composite_score")
         # Mirror B.45 live build_state: news_recent only rides when live; the
         # archive never had real news, so drop it (news_negative unasked).
         # B.45 meta drop: composite_score + track_record no longer ride state
@@ -499,6 +555,11 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
             state["track_record"] = _track_at(r["ts"])
         if stripf:
             apply_strip_fields(state, stripf)
+        if knobs:
+            _, fired = _state_from_prompt(r["coin"], r["user_message"],
+                                          with_fired=True)
+            apply_profile_shape(state, fired, knobs, parsed_composite)
+            rec["shape"] = shape_name
         if fade:
             apply_fade_mode(state, r["user_message"], fade)
             mm = MFI_FIRE_RE.search(r["user_message"])
@@ -514,8 +575,11 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
             rec["vwap"] = {"shape": j[2]["shape"], "side": j[2]["side"],
                            "z": j[2]["z"], "age": j[2]["age"],
                            "dt_s": int(j[0] / 1000)}
-            if inject:
-                apply_vwap_inject(state, j[2], inject)
+            if inject_mode and not (knobs and "vwap_deviation" in state):
+                # profile path already carries the exact live fields from
+                # the archived fired trigger; --inject-vwap gauntlet arms
+                # still use the episode-join injection.
+                apply_vwap_inject(state, j[2], inject_mode)
         questions = build_questions(held)
         answers, wall_ms, server_ms = call_systemone(
             url_root, api_key, model, state, questions, timeout_s=timeout_s)
@@ -925,6 +989,11 @@ def main():
     rp = sub.add_parser("replay")
     rp.add_argument("--arm", required=True)
     rp.add_argument("--limit", type=int, default=0)
+    rp.add_argument("--profile-shape", default=None,
+                    help="systemone arms: re-apply the state-shape knobs of "
+                         "config-models/<name>.json (composite/vwap/"
+                         "breakout-side/crowded-mover) onto the reconstructed "
+                         "state. Results: _ab_<arm>__ps-<name>_results.jsonl")
     rp.add_argument("--concurrency", type=int, default=1,
                     help="parallel in-flight calls (remote llama-server must "
                          "run with --parallel >= this; slots split ctx)")
