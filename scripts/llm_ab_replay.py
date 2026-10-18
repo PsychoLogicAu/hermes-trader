@@ -509,6 +509,27 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
         build_questions, call_systemone, verdict_from_answers)
     url_root = arm["base_url"]
     model = arm["model"]
+    # Model identity guard (nano-contamination incident 2026-10-18): llama.cpp
+    # /v1/systemone does NOT validate the model field, so if the endpoint swaps
+    # containers mid-run (someone runs the restore command early) every
+    # subsequent row is silently scored from the WRONG model. Preflight the
+    # server's advertised model path vs the arm, and re-check periodically.
+    expect = arm.get("expect_model_path", model)
+    def _props_check():
+        try:
+            import urllib.request
+            with urllib.request.urlopen(f"{url_root}/props", timeout=10) as r:
+                props = json.loads(r.read())
+            got = str(props.get("model_path") or props.get("model_alias") or "")
+            return expect in got, got
+        except Exception as e:  # noqa: BLE001
+            return False, f"/props unreachable: {e}"
+    ok, got = _props_check()
+    if not ok:
+        raise SystemExit(f"ABORT: endpoint {url_root} serving {got!r}, "
+                         f"arm expects {expect!r} — refusing to score")
+    print(f"props guard ok: {got}")
+    props_every = 500
     timeout_s = float(arm.get("timeout_s", 30.0))
     conc = max(1, args.concurrency)
     inject = args.inject_vwap
@@ -608,6 +629,13 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
                 out.flush()
             if i % 100 == 0 or i == len(rows):
                 print(f"  {i}/{len(rows)} ok={n_ok} err={n_err}")
+            if i % props_every == 0:
+                ok, got = _props_check()
+                if not ok:
+                    raise SystemExit(
+                        f"ABORT at row {i}: endpoint {url_root} now serving "
+                        f"{got!r}, arm expects {expect!r} — remaining rows "
+                        f"NOT scored (quarantine tail rows before resuming)")
     print(f"done arm={arm_tag} ok={n_ok} err={n_err} -> {results_path(arm_tag)}")
 
 
