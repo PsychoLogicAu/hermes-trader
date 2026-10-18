@@ -241,6 +241,28 @@ def test_research_systemone_long(monkeypatch):
     assert prim[0]["parsed"]["verdict"] == "LONG"
 
 
+def test_research_systemone_prior_block_observability(monkeypatch):
+    """B.32 (2026-10-19): the systemone seat does NOT receive the prior-call
+    block. The archive must record computed=True / injected=False and carry
+    the block TEXT (the counterfactual record), while the actual request
+    stays block-free — injected=False must remain the truth."""
+    answers = _answers({"long": 0.8, "short": 0.05, "none": 0.15},
+                       {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2})
+    _arm_systemone(monkeypatch, answers)
+    _patch_research_deps(monkeypatch)
+    monkeypatch.setattr(research, "build_prior_call_block",
+                        lambda *a, **k: "Your recent history on BTC (stateful context — x)")
+    rows = _capture_archive(monkeypatch)
+    research.research("BTC", _perception())
+    prim = [r for r in rows if r.get("role") == "primary"]
+    assert len(prim) == 1
+    assert prim[0]["prior_block_computed"] is True
+    assert prim[0]["prior_block_injected"] is False
+    assert prim[0]["prior_block_text"].startswith("Your recent history on BTC")
+    # The block must NOT have leaked into what the seat actually saw.
+    assert "recent history on BTC" not in prim[0]["user_message"]
+
+
 def test_research_systemone_veto(monkeypatch):
     answers = _answers({"long": 0.1, "short": 0.1, "none": 0.8},
                        {0: 0.4, 1: 0.3, 2: 0.3, 3: 0.0, 4: 0.0}, trap=0.8)

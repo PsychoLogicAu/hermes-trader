@@ -1181,13 +1181,24 @@ def _archive_record(
     wall_ms: int = 0,
     server_ms: int | None = None,
     prior_block_injected: bool = False,
+    prior_block_computed: bool = False,
+    prior_block_text: str | None = None,
 ) -> Dict[str, Any]:
     """Assemble one prompt_log record (see prompt_log.py for the storage
     model). ``system_prompt``/``user_message`` None → role="duelist" reference
     row (its prompt is byte-identical to the primary's; analysis joins on
     perception_id). Field truncation guards keep a runaway response from
     bloating a chunk. NEVER raises — record_call has its own belt, but this
-    runs inside the parse path."""
+    runs inside the parse path.
+
+    Prior-call observability (B.32, 2026-10-19): ``injected`` means the block
+    REACHED the model (chat path); ``computed`` means it was built this call.
+    The systemone engine does NOT carry the block in its {state, questions}
+    request, so those rows log computed=True/injected=False and archive the
+    block TEXT — the counterfactual record of what the seat did not see, and
+    the join source for the B.32 accrual under the systemone era. Default
+    False/None keeps pre-existing record shapes unchanged.
+    """
     try:
         cfg = prompt_log._cfg()
 
@@ -1208,6 +1219,8 @@ def _archive_record(
             "mid": perception.get("mid"),
             "composite_score": perception.get("composite_score"),
             "prior_block_injected": prior_block_injected,
+            "prior_block_computed": prior_block_computed,
+            "prior_block_text": _clip(prior_block_text, int(cfg.get("max_prompt_chars", 40000))),
             "system_prompt": _clip(system_prompt, int(cfg.get("max_prompt_chars", 40000))),
             "user_message": _clip(user_message, int(cfg.get("max_prompt_chars", 40000))),
             "raw_response": _clip(raw_response, int(cfg.get("max_response_chars", 20000))),
@@ -1958,7 +1971,13 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             system_prompt=None, user_message=request_json,
             raw_response=ai_text, parsed=parsed,
             wall_ms=primary_ms, server_ms=primary_server_ms,
+            # B.32 honesty: the systemone {state, questions} request does NOT
+            # carry the prior-call block — injected stays False (what the seat
+            # actually saw). Archive the computed text so the counterfactual
+            # accrues and the delivery decision is priced, not guessed.
             prior_block_injected=False,
+            prior_block_computed=bool(prior_block),
+            prior_block_text=(prior_block or None),
         ))
     else:
         ai_t0 = time.monotonic()
@@ -1988,6 +2007,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             raw_response=ai_text, parsed=parsed,
             wall_ms=primary_ms, server_ms=primary_server_ms,
             prior_block_injected=bool(prior_block),
+            prior_block_computed=bool(prior_block),
         ))
 
     # A/B duelist: the SAME prompt to the second model, recorded but never
