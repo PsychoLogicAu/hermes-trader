@@ -11,7 +11,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -1389,13 +1389,54 @@ def _duelist_close_exit_accrual(
         logger.debug(f"[research] duelist_close_exit accrual failed for {coin}: {e}")
 
 
+def _dv_close_voice_mode(cv: Dict[str, Any]) -> str:
+    """Tri-state resolution for the decision-voice CLOSE VOICE (B.50,
+    t_af6dfa45): returns "off" | "shadow" | "live".
+
+    The key lives in the decision_voice SEAT's MODEL PROFILE — that model's
+    conf scale is what the threshold was priced against, so the mode travels
+    with the model (same structural-weld principle as state_admission):
+    config-models/<profile>.json -> "close_veto_mode": "off"|"shadow"|"live".
+    A malformed value logs LOUD and fail-safes to shadow (never fires
+    accidentally). With no profile key the legacy agent-config mapping
+    stays: decision_voice_gate.close_veto.shadow_mode true -> shadow,
+    false -> live. `decision_voice_gate.enabled` remains the master kill,
+    checked by the caller BEFORE mode resolution.
+    """
+    try:
+        from hermes_trader.agents.config_store import (
+            read_agent_config, read_model_profile)
+        slot = ((read_agent_config().get("llm") or {})
+                .get("decision_voice") or {})
+        profile_name = str(slot.get("model_profile") or "")
+        if profile_name:
+            raw = (read_model_profile(profile_name) or {}).get("close_veto_mode")
+            if raw is not None:
+                mode = str(raw).strip().lower()
+                if mode in ("off", "shadow", "live"):
+                    return mode
+                logger.warning(
+                    f"[gate] dv_close_veto: model profile '{profile_name}' has "
+                    f"close_veto_mode {raw!r} (expected off|shadow|live) — "
+                    f"fail-safe to shadow, NOT firing")
+                return "shadow"
+    except Exception as e:  # noqa: BLE001 — mode read must never break the loop
+        logger.debug(f"[research] dv close_veto_mode resolution failed ({e}) "
+                     f"— falling back to legacy shadow_mode path")
+    return "shadow" if bool(cv.get("shadow_mode", True)) else "live"
+
+
 def _dv_close_exit_accrual(
     coin: str,
     dv_row: Dict[str, Any],
     open_positions: List[Dict[str, Any]],
-) -> None:
-    """Decision-voice close_veto shadow accrual (clef-gate scope Change 3,
-    log-only, never acts — mirrors _duelist_close_exit_accrual).
+) -> Optional[Dict[str, Any]]:
+    """Decision-voice close_veto (clef-gate scope Change 3, promoted LIVE by
+    B.50/t_af6dfa45). Returns a fire-SPEC dict when the close voice is LIVE
+    and would act; None otherwise. Never acts here — the caller attaches the
+    spec to the analysis dict and route_verdict executes it as a synthetic
+    CLOSE (close_source "dv"). Shadow mode keeps the original log-only
+    accrual byte-identical; off is silent.
 
     The dv observer already answers `close_now` (noul) on EVERY scan for a
     HELD coin (the question is only asked when held — the phantom-CLOSE class
@@ -1404,22 +1445,23 @@ def _dv_close_exit_accrual(
 
     Fires when: held AND close_now >= threshold AND the primary did NOT say
     CLOSE (a primary CLOSE closes the position anyway — not a split).
-    grace_minutes suppresses the line on young positions (don't fight fresh
-    entries; mirrors the dsl grace).
+    grace_minutes suppresses young positions in EVERY mode (don't fight
+    fresh entries; mirrors the dsl grace).
 
-    Config `decision_voice_gate.close_veto` {shadow_mode, threshold,
-    grace_minutes} — hot read. shadow_mode false is the PROMOTION step and
-    not implemented here by design: promotion injects a synthetic CLOSE via
-    the AI-CLOSE execution path (executor verdict=="CLOSE"), tagged
-    close_source "dv" — that lands with the offline join's verdict, not now.
-    Every firing logs the raw close_now so all threshold variants are priced
-    offline. Never raises.
+    LIVE is fail-closed on tracker data: age/grace come from the dsl_exit
+    tracker, and firing without it would bypass the grace check — no
+    tracker, no fire (loud line instead; shadow still logs its line).
+
+    Mode: model-profile key `close_veto_mode` (see _dv_close_voice_mode);
+    legacy knobs `decision_voice_gate.close_veto` {shadow_mode, threshold,
+    grace_minutes} — all hot read. Every firing logs the raw close_now so
+    all threshold variants are priced offline. Never raises.
     """
     try:
         from hermes_trader.agents.config_store import read_agent_config
         gate = (read_agent_config().get("decision_voice_gate") or {})
         if not bool(gate.get("enabled", False)):
-            return
+            return None
         cv = gate.get("close_veto") or {}
         held = next((p for p in (open_positions or [])
                      if p.get("coin") == coin), None)
@@ -1434,6 +1476,7 @@ def _dv_close_exit_accrual(
             return
         side = str(held.get("side") or "?")
         age_s = spot_s = peak_s = basis_s = mark_s = "n/a"
+        tracker_ok = False
         try:
             from hermes_trader.agents import dsl_exit as _dslx
             trk = _dslx._active_positions.get(f"{coin}_{side}")
@@ -1444,6 +1487,7 @@ def _dv_close_exit_accrual(
                 grace = float(cv.get("grace_minutes", 90))
                 if age_min < grace:
                     return  # young position — don't fight fresh entries
+                tracker_ok = True  # grace verified against real tracker data
                 age_s = f"{int(age_min)}min"
                 peak_pct = ((pk - e) / e * 100) if side == "long" else ((e - pk) / e * 100)
                 peak_s = f"{peak_pct:+.2f}%"
@@ -1455,22 +1499,45 @@ def _dv_close_exit_accrual(
                     mark_s = f"{m:.6g}"
         except Exception:  # noqa: BLE001 — tracker read is best-effort
             pass
-        if not bool(cv.get("shadow_mode", True)):
-            # Promotion not wired yet (see docstring): log LOUDLY that the
-            # condition fired with shadow off, but still do not act — the
-            # synthetic-CLOSE injection rides a separate reviewed change.
-            logger.warning(
-                f"[gate] dv_close_veto FIRED (shadow OFF, action NOT wired) "
-                f"{coin} {side}: close_now {close_p:.2f} >= {threshold:.2f}, "
-                f"age {age_s}, spot {spot_s}, peak {peak_s}, entry {basis_s}, "
-                f"mark {mark_s}, pid {dv_row.get('perception_id', 'unknown')}")
-            return
+        mode = _dv_close_voice_mode(cv)
+        if mode == "off":
+            return None
+        if mode == "live":
+            if not tracker_ok:
+                logger.warning(
+                    f"[gate] dv_close_veto WOULD NOT FIRE {coin} {side}: "
+                    f"close_now {close_p:.2f} >= {threshold:.2f} but the dsl "
+                    f"tracker is unreadable — age/grace unverifiable, "
+                    f"fail-closed (live mode never fires without tracker data); "
+                    f"pid {dv_row.get('perception_id', 'unknown')}")
+                return None
+            spec = {
+                "coin": coin,
+                "side": side,
+                "close_now": close_p,
+                "threshold": threshold,
+                "age": age_s,
+                "spot": spot_s,
+                "peak": peak_s,
+                "entry": basis_s,
+                "mark": mark_s,
+                "model": dv_row.get("dv_model", "?"),
+                "perception_id": dv_row.get("perception_id", "unknown"),
+            }
+            logger.info(
+                f"[gate] dv_close_veto FIRED -> dv_close queued for {coin} "
+                f"{side}: close_now {close_p:.2f} >= {threshold:.2f}, "
+                f"position age {age_s}, spot {spot_s}, peak {peak_s}, "
+                f"entry {basis_s}, mark {mark_s}, model {spec['model']}, "
+                f"pid {dv_row.get('perception_id', 'unknown')}")
+            return spec
         logger.info(
             f"[gate][SHADOW] dv_close_veto WOULD HAVE CLOSED {coin} {side}: "
             f"close_now {close_p:.2f} >= {threshold:.2f}, position age {age_s}, "
             f"spot {spot_s}, peak {peak_s}, entry {basis_s}, mark {mark_s}, "
             f"pid {dv_row.get('perception_id', 'unknown')}"
         )
+        return None
     except Exception as e:  # noqa: BLE001 — accrual must never break the loop
         logger.debug(f"[research] dv_close_veto accrual failed for {coin}: {e}")
 
@@ -1962,12 +2029,17 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         parsed["verdict"], parsed["confidence"],
         primary_ms=primary_ms,
     )
+    # B.50 (t_af6dfa45): the dv close voice. Shadow mode accrues the
+    # WOULD-HAVE-CLOSED line (mirrors the B.10 duelist line); LIVE mode
+    # (model-profile close_veto_mode) returns a fire-SPEC that rides the
+    # analysis dict to route_verdict as a synthetic dv_close.
+    _dv_close_fire = None
     if dv_row is not None:
-        # clef-gate scope Change 3: dv close_now exit check (log-only shadow
-        # accrual, mirrors the B.10 duelist line). Skipped when the primary
-        # also said CLOSE — that split is not a would-have-closed case.
+        # clef-gate scope Change 3: dv close_now exit check. Skipped when
+        # the primary also said CLOSE — that split is not a
+        # would-have-closed case (the position closes anyway).
         if parsed["verdict"] != "CLOSE":
-            _dv_close_exit_accrual(coin, dv_row, open_positions)
+            _dv_close_fire = _dv_close_exit_accrual(coin, dv_row, open_positions)
         try:
             from hermes_trader.session_log import append as _log_event_dv
             _log_event_dv({
@@ -2090,6 +2162,13 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             }
             if dv_row is not None else None
         ),
+        # DV close-voice fire spec (B.50, t_af6dfa45): None unless the
+        # decision_voice seat's model profile arms close_veto_mode "live"
+        # AND the held-position conditions passed this scan. Consumed by
+        # route_verdict: executed as a synthetic CLOSE tagged
+        # close_source "dv" (ledger exit type dv_close).
+        # WHITELIST REGRESSION POINT: absent key = never routes.
+        "dv_close_fire": _dv_close_fire,
         "created_at": int(time.time() * 1000),
         # Carry forward so risk gates can read own-coin signal strength.
         "composite_score": float(perception.get("composite_score", 0) or 0),
