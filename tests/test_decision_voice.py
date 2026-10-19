@@ -558,3 +558,68 @@ def test_observer_conf_multiplier_scales_dv_confidence(_dv_on, monkeypatch):
     assert row is not None
     assert row["dv_confidence"] == 1.0
     assert "conv0.75" in row["dv_reasoning"]   # raw conv kept for audit
+
+
+# ── [setup-shadow] setup-tag accrual (t_daf39dec) ──────────────────────────
+
+def _tfk(ema8=101.0, ema21=100.0, adx14=25.0):
+    """bare tf dict for the tag helper (only ema8/ema21/adx14 are read)."""
+    return {"ema8": ema8, "ema21": ema21, "adx14": adx14}
+
+
+def test_setup_tag_line_silent_when_no_tag_fires():
+    line = dv._setup_tag_line(
+        "BTC", {"chg3_pct": 0.2, "daily_move_pct": 0.5, "triggers": []},
+        _tfk(ema8=99.0), _tfk(ema8=99.0), _tfk(ema8=99.0))
+    assert line is None
+
+
+def test_setup_tag_line_all_four_classes():
+    # 1h up / 4h down / 1d up, adx 25, chg3 +1.4, 24h +3.1, rc fired
+    p = {"chg3_pct": 1.4, "daily_move_pct": 3.1,
+         "triggers": [{"name": "rangeCompression", "fired": True}]}
+    line = dv._setup_tag_line("BTC", p, _tfk(), _tfk(ema8=99.0), _tfk())
+    assert line is not None and "tags=S1,S3,S6,S7" in line
+    assert "chg3=+1.40" in line and "chg24=+3.10" in line and "adx1d=25.0" in line
+
+
+def test_setup_tag_line_threshold_boundaries():
+    # chg3=-0.5 suppresses S1/S6/S7; S3 band is closed: 8.5 out, 8.0 in,
+    # 2.0 in, 1.5 out.
+    p = {"chg3_pct": -0.5, "daily_move_pct": 8.5,
+         "triggers": [{"name": "rangeCompression", "fired": True}]}
+    assert dv._setup_tag_line("BTC", p, _tfk(), _tfk(), _tfk()) is None
+    p["daily_move_pct"] = 8.0
+    line = dv._setup_tag_line("BTC", p, _tfk(), _tfk(), _tfk())
+    assert line is not None and "tags=S3" in line
+    p["daily_move_pct"] = 2.0
+    line = dv._setup_tag_line("BTC", p, _tfk(), _tfk(), _tfk())
+    assert line is not None and "tags=S3" in line
+    p["daily_move_pct"] = 1.5
+    assert dv._setup_tag_line("BTC", p, _tfk(), _tfk(), _tfk()) is None
+    # S1 strict: chg3 exactly 1.0 does NOT fire S1 (battery: > +1)
+    p2 = {"chg3_pct": 1.0, "daily_move_pct": 0.0, "triggers": []}
+    line = dv._setup_tag_line("BTC", p2, _tfk(), _tfk(ema8=99.0), _tfk())
+    assert line is not None and "S1" not in line.split(" ")[2]   # tags= field
+
+
+def test_setup_tag_line_survives_missing_scalars():
+    # no chg3/d24/adx at all (old perception dicts, thin data) -> no crash,
+    # only adx-free classes can fire; d24 None blocks S3, chg3 None blocks S7
+    p = {"chg3_pct": None, "daily_move_pct": None,
+         "triggers": [{"name": "rangeCompression", "fired": True}]}
+    assert dv._setup_tag_line("BTC", p, _tfk(), _tfk(), _tfk(adx14=None)) is None
+
+
+def test_build_state_setup_shadow_knob_state_stays_identical(caplog):
+    import logging
+    args = ("BTC", {"id": "pid-1", "coin": "BTC", "mid": 100.0,
+                    "chg3_pct": 1.4, "daily_move_pct": 3.1,
+                    "triggers": [{"name": "rangeCompression", "fired": True}]},
+            _tfk(), _tfk(ema8=99.0), _tfk(), "0.01%", "", [], 0.5, 0)
+    with caplog.at_level(logging.INFO, logger="hermes_trader.agents.decision_voice"):
+        off = dv.build_state(*args)
+        on = dv.build_state(*args, setup_shadow=True)
+    assert json.dumps(off) == json.dumps(on)      # prompt bytes untouched
+    lines = [r.message for r in caplog.records if "setup-shadow" in r.message]
+    assert len(lines) == 1 and "tags=S1,S3,S6,S7" in lines[0]
