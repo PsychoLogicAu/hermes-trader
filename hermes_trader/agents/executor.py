@@ -3276,6 +3276,32 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     else:
         bypassed = False
 
+    # Mover-bypass shadow (kanban t_b7876025, 2026-10-20): the CONF-BYPASS-BARS
+    # state sweep (t_ec2c8bbf) measured the mover lane's released conf bands
+    # ALL net-negative on the pplx seat's scale (-1.52/-1.56/-2.69 per trade,
+    # worse as conf rises — conf uninformative-to-inverted, mirror of the trap
+    # finding). `runner_entry_gate.mover_bypass_shadow_mode: true` converts the
+    # structured_daily_mover admission into a shadow accrual: the entry falls
+    # to the SAME byte-identical block reason it would get without the mover
+    # term (external parsers keep working) while a loud [gate][SHADOW] line
+    # accrues the would-admit cohort for the promote/die call — same doctrine
+    # as bypass_late_trend_chase_shadow_mode (t_954c9739 precedent: shadow the
+    # release, keep the counterfactual data accruing). Key absent/false =
+    # live admission, byte-identical to before. Fires ONLY where the mover
+    # term is decisive (not fresh, not bypassed): fresh-impulse admits and the
+    # late-chase bypass lane are untouched; a bypassed uptrend mover long was
+    # admitted by the late-chase bar, not by this term.
+    if (structured_daily_mover and not fresh_impulse and not bypassed
+            and bool(gate.get("mover_bypass_shadow_mode", False))):
+        logger.warning(
+            f"[gate][SHADOW] mover_bypass WOULD HAVE ADMITTED {coin} LONG: "
+            f"conf {conf:.2f} >= bar "
+            f"{float(gate.get('mover_min_confidence', 0.80)):.2f}, score "
+            f"{score:.0f}, slow {slow_count} — NOT admitting (shadow mode; "
+            f"live rule blocks)")
+        return (f"runner_gate_blocked (needs volume+breakout/burst "
+                f"and structure; score={score:.0f}, slow={slow_count})")
+
     # Only require fresh impulse structure if we didn't just bypass above.
     if not (fresh_impulse or structured_daily_mover):
         if not bypassed:
