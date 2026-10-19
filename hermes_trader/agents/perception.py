@@ -22,7 +22,7 @@ from hermes_trader.client.hl_client import fetch_all_mids, fetch_hl_candles
 from hermes_trader.client.universe import get_universe
 from hermes_trader.indicators import triggers as trigger_mod
 from hermes_trader.indicators.math import atr
-from hermes_trader.models.types import Candle
+from hermes_trader.models.types import Candle, TriggerHit
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +166,49 @@ def _hip3_prefilter_verdict(score: float, hits: List[Any], market: Dict[str, Any
 
 # ── Scan single market (returns result or (False, error)) ────────────────────
 
+def _momentum_shadow_line(coin: str, up_hit: TriggerHit,
+                          dn_hit: TriggerHit, mode: str,
+                          thr: float) -> Optional[str]:
+    """Momentum arm-comparison accrual line (t_62c58463).
+
+    ONE line per coin-scan (collapse landed 2026-10-19, board follow-up): the
+    up/dn arms share ONE signed scalar each — both the close-to-close net and
+    the Theil-Sen slope are compared against +/-trendMomentumPct — so at most
+    one arm can be non-flat and the old per-arm pair carried an entailed
+    duplicate mirror line (~41% of all [momentum-shadow] lines in trader.log).
+    This helper is the single format owner and records BOTH scalars on one
+    line (flight recorder — live mode keeps net, shadow mode keeps ts value):
+    ts=/live= are the SIGNED SCALAR verdicts (UP/DN/flat), not per-arm state.
+
+    Returns the line to log, or None when there is nothing to record (no data,
+    or both scalars flat).
+    """
+    if mode == "live":
+        net = up_hit.get("live_net_move")
+        if net is None:
+            return None
+        fired = bool(up_hit["fired"] or dn_hit["fired"])
+        if not (net != 0.0 or fired):
+            return None
+        net_side = "UP" if net >= thr else ("DN" if net <= -thr else "flat")
+        ts_side = "UP" if up_hit["fired"] else ("DN" if dn_hit["fired"] else "flat")
+        if net_side == ts_side and not fired:
+            return None
+        return (f"[momentum-shadow] {coin} mode=live "
+                f"net={net:+.1f}%/{net_side} ts={ts_side}")
+    ts_move = up_hit.get("shadow_ts_move")
+    if ts_move is None or "shadow_ts_move" not in dn_hit:
+        return None
+    live_side = ("UP" if up_hit["fired"]
+                 else "DN" if dn_hit["fired"] else "flat")
+    ts_side = ("UP" if up_hit.get("shadow_ts_fired")
+               else "DN" if dn_hit.get("shadow_ts_fired") else "flat")
+    if live_side == ts_side == "flat":
+        return None
+    return (f"[momentum-shadow] {coin} mode=shadow "
+            f"live={live_side} ts={ts_move:+.1f}%/{ts_side}")
+
+
 def _scan_single_market(
     market: Dict[str, Any],
     mid: float,
@@ -266,32 +309,21 @@ def _scan_single_market(
                                            theilsen_mode=_mts_mode),
         ]
 
-        # Momentum arm-comparison accrual line (t_62c58463): one line per scan
-        # where either arm fires or the arms disagree — grep "momentum-shadow"
-        # to join against forward returns. Records BOTH arms in every mode
-        # (flight recorder). Silent when both are flat: no signal, no info.
+        # Momentum arm-comparison accrual (t_62c58463): ONE [momentum-shadow]
+        # line per scan where either arm fires or the arms disagree — grep
+        # "momentum-shadow" to join against forward returns. Both scalars
+        # (net + signed Theil-Sen verdict) ride that one line; format owner is
+        # _momentum_shadow_line (per-arm pair collapsed 2026-10-19 — the
+        # mirror line was entailed duplication). Silent when both flat.
         if _mts_mode != "off":
-            for h in hits:
-                if h["name"] in ("uptrendMomentum", "downtrendMomentum"):
-                    _up = h["name"] == "uptrendMomentum"
-                    if _mts_mode == "live":
-                        _net = h.get("live_net_move")
-                        _ts_side = ("UP" if _up else "DN") if h["fired"] else "flat"
-                        if _net is not None and (_net != 0.0 or h["fired"]):
-                            _net_side = ("UP" if _net >= thresholds.get("trendMomentumPct", 3.0)
-                                         else "DN" if _net <= -thresholds.get("trendMomentumPct", 3.0)
-                                         else "flat")
-                            if _net_side != _ts_side or h["fired"]:
-                                logger.info(
-                                    f"[momentum-shadow] {market['coin']} {h['name']} mode=live "
-                                    f"net={_net:+.1f}%/{_net_side} ts={_ts_side}")
-                    elif "shadow_ts_move" in h:
-                        _live_side = ("UP" if _up else "DN") if h["fired"] else "flat"
-                        _ts_side = ("UP" if _up else "DN") if h.get("shadow_ts_fired") else "flat"
-                        if _live_side != _ts_side or h["fired"] or h.get("shadow_ts_fired"):
-                            logger.info(
-                                f"[momentum-shadow] {market['coin']} {h['name']} mode=shadow "
-                                f"live={_live_side} ts={h['shadow_ts_move']:+.1f}%/{_ts_side}")
+            _m_up = next((h for h in hits if h["name"] == "uptrendMomentum"), None)
+            _m_dn = next((h for h in hits if h["name"] == "downtrendMomentum"), None)
+            if _m_up is not None and _m_dn is not None:
+                _ms_line = _momentum_shadow_line(
+                    market["coin"], _m_up, _m_dn, _mts_mode,
+                    thresholds.get("trendMomentumPct", 3.0))
+                if _ms_line:
+                    logger.info(_ms_line)
 
         # breakout-width arm-comparison accrual line (t_240a0d58): one line
         # per scan where ANY arm fires — grep "breakout-width" to join
