@@ -576,14 +576,16 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         }
     shadow_mode = mode == "SHADOW"
 
-    # AI active rejection (2026-09-03): a VETO verdict means "this setup is a
-    # trap — avoid like the plague", categorically stronger than PASS. Refuse
-    # it here BEFORE the structural-override section: unlike a hedged PASS, a
-    # VETO must never be upgraded to LONG by whale/composite/breakout force
-    # paths. This guard also closes the direct-call hole (server.py /execute
-    # and the MCP server call maybe_execute with any remembered analysis):
-    # every downstream PASS guard is an equality check, so an unhandled VETO
-    # would fall through to `trade_side = side or "long"` and blind-LONG.
+    # AI active rejection: a VETO verdict is produced ONLY by the systemone
+    # decision seat (decision_voice.py: verdict_from_answers none+trap
+    # synthesis, and the seat trap-veto downgrade of its own LONG/SHORT).
+    # The chat path no longer has a VETO token (retired 2026-10-19). Refuse
+    # VETO here BEFORE the structural-override section: a trap veto must
+    # never be upgraded to LONG by whale/composite/breakout force paths.
+    # This guard also closes the direct-call hole (server.py /execute and
+    # the MCP server call maybe_execute with any remembered analysis):
+    # every downstream PASS guard is an equality check, so an unhandled
+    # VETO would fall through to `trade_side = side or "long"` and blind-LONG.
     if str(analysis.get("verdict") or "").upper() == "VETO":
         return {
             "executed": False, "mode": mode,
@@ -1394,8 +1396,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         except Exception as _xe:
             logger.debug(f"[executor] tirex gate-side read failed for {analysis['coin']}: {_xe}")
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
-    # LONG / SHORT / PASS / VETO, or None when the duelist is disabled /
-    # failed. Fed to duelist_veto_gate — the explicit-VETO / opposite-side
+    # LONG / SHORT / PASS, or None when the duelist is disabled /
+    # failed. Fed to duelist_veto_gate — the opposite-side
     # veto shape (re-keyed 2026-09-03: a neutral PASS no longer vetoes). A
     # data gap (None) can never block a trade: the gate passes with no opinion.
     _duelist_at = analysis.get("duelist_at_entry") or {}
@@ -2337,7 +2339,7 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
       - LONG / SHORT  → action="execute", result = execute_fn(analysis)
       - CLOSE         → action="close",   result = close_fn(coin)
       - PASS          → action="none" (structural-override hints may still route it)
-      - VETO          → action="none" (active rejection — override hints NEVER apply)
+      - VETO          → action="none" (systemone seat trap-rejection — override hints NEVER apply)
       - anything else → action="unknown" (logged loudly; never silently dropped)
     """
     execute_fn = execute_fn or maybe_execute
@@ -2431,8 +2433,9 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
                         "deferred_reason": _defer["reason"]}
         return {"action": "close", "verdict": verdict, "result": close_fn(coin, _reason)}
     if verdict in ("PASS", "VETO"):
-        # PASS = neutral abstention; VETO (2026-09-03) = ACTIVE rejection,
-        # categorically stronger. Both are no-action here, but the
+        # PASS = neutral abstention; VETO = active trap-rejection from the
+        # systemone seat (decision_voice.py — the chat path has no VETO
+        # token, retired 2026-10-19). Both are no-action here, but the
         # structural-override HINT routing below applies to PASS ONLY — a
         # whale/composite/breakout force-execute can never upgrade a VETO.
         # maybe_execute carries its own guard for direct callers (server
