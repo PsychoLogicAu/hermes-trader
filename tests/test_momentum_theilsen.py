@@ -128,3 +128,150 @@ class TestDowntrendMomentumMirror:
     def test_bleed_parabola_not_surfaced_as_downtrend_in_live(self):
         hit = downtrend_momentum(_closes_to_candles(BLEED_PARABOLA), LB, TH, theilsen_mode="live")
         assert hit["fired"] is False
+
+
+# ---- [momentum-shadow] accrual line (t_62c58463 follow-up, 2026-10-19) ----
+# The per-arm pair collapsed to ONE line per coin-scan: both arms read the
+# same signed scalar (net and Theil-Sen are compared against +/-thr), so the
+# mirror arm's line was entailed duplication. _momentum_shadow_line is the
+# single format owner; these tests pin the shape AND fire-decision equivalence
+# with the old per-arm union (so the offline accrual join sees exactly the
+# same coin-scans, just one line instead of up to two).
+
+import re
+
+from hermes_trader.agents.perception import _momentum_shadow_line
+
+LINE_RE = re.compile(
+    r"^\[momentum-shadow\] (\S+) mode=(live|shadow) "
+    r"(?:net=([-+]?\d+\.\d)%/(UP|DN|flat) )?"
+    r"(live=(UP|DN|flat) )?ts=(([+-]?\d+\.\d)%/)?(UP|DN|flat)$")
+
+
+def _hit(name, fired, **extras):
+    h = {"name": name, "score": 0.0, "reason": "flat", "fired": fired}
+    h.update(extras)
+    return h
+
+
+def _old_live_lines(up, dn, thr):
+    """Verbatim replica of the pre-collapse per-arm live branch."""
+    out = []
+    for h, is_up in ((up, True), (dn, False)):
+        net = h.get("live_net_move")
+        ts = ("UP" if is_up else "DN") if h["fired"] else "flat"
+        if net is not None and (net != 0.0 or h["fired"]):
+            ns = "UP" if net >= thr else ("DN" if net <= -thr else "flat")
+            if ns != ts or h["fired"]:
+                out.append((net, ns, ts))
+    return out
+
+
+def _old_shadow_lines(up, dn):
+    """Verbatim replica of the pre-collapse per-arm shadow branch."""
+    out = []
+    for h, is_up in ((up, True), (dn, False)):
+        if "shadow_ts_move" in h:
+            live = ("UP" if is_up else "DN") if h["fired"] else "flat"
+            ts = ("UP" if is_up else "DN") if h.get("shadow_ts_fired") else "flat"
+            if live != ts or h["fired"] or h.get("shadow_ts_fired"):
+                out.append((live, h["shadow_ts_move"], ts))
+    return out
+
+
+class TestMomentumShadowLine:
+    def test_live_pair_collapses_to_single_golden_line(self):
+        """The 2026-10-19 RUNE tape: old printed uptrendMomentum ts=UP AND a
+        downtrendMomentum ts=flat mirror; the collapse keeps one line."""
+        up = _hit("uptrendMomentum", True, live_net_move=6.3)
+        dn = _hit("downtrendMomentum", False, live_net_move=6.3)
+        assert _momentum_shadow_line("RUNE", up, dn, "live", TH) == (
+            "[momentum-shadow] RUNE mode=live net=+6.3%/UP ts=UP")
+
+    def test_live_downtrend_fired_golden(self):
+        """NXPC shape: net DN, Theil-Sen DN — one line, ts=DN."""
+        up = _hit("uptrendMomentum", False, live_net_move=-9.1)
+        dn = _hit("downtrendMomentum", True, live_net_move=-9.1)
+        assert _momentum_shadow_line("NXPC", up, dn, "live", TH) == (
+            "[momentum-shadow] NXPC mode=live net=-9.1%/DN ts=DN")
+
+    def test_live_disagreement_golden(self):
+        """USELESS shape: ts fired UP but net below thr -> net side flat."""
+        up = _hit("uptrendMomentum", True, live_net_move=4.8)
+        dn = _hit("downtrendMomentum", False, live_net_move=4.8)
+        assert _momentum_shadow_line("USELESS", up, dn, "live", TH) == (
+            "[momentum-shadow] USELESS mode=live net=+4.8%/flat ts=UP")
+
+    def test_live_fire_decision_and_scalars_match_old_union(self):
+        nets = [-9.1, -5.0, 0.0, 4.8, 5.0, 6.3]
+        for fu in (False, True):
+            for fd in (False, True):
+                if fu and fd:
+                    continue  # impossible vs +/-thr (thr > 0)
+                for net in nets:
+                    up = _hit("uptrendMomentum", fu, live_net_move=net)
+                    dn = _hit("downtrendMomentum", fd, live_net_move=net)
+                    old = _old_live_lines(up, dn, TH)
+                    line = _momentum_shadow_line("COIN", up, dn, "live", TH)
+                    assert (line is None) == (not old)
+                    if old and line:
+                        m = LINE_RE.match(line)
+                        assert m, line
+                        net_val, net_side = m.group(3), m.group(4)
+                        ts_side = m.group(9)
+                        assert float(net_val) == pytest.approx(old[0][0], abs=0.05)
+                        assert net_side == old[0][1]
+                        # scalar ts verdict: old arms' non-flat side
+                        old_ts = next((t for _, _, t in old if t != "flat"), "flat")
+                        assert ts_side == old_ts
+
+    def test_shadow_fire_decision_and_scalars_match_old_union(self):
+        for fu in (False, True):
+            for fd in (False, True):
+                if fu and fd:
+                    continue
+                for tfu in (False, True):
+                    for tfd in (False, True):
+                        if tfu and tfd:
+                            continue
+                        tsv = -7.0 if (tfd or not tfu) else 6.0
+                        up = _hit("uptrendMomentum", fu,
+                                  shadow_ts_move=tsv, shadow_ts_fired=tfu)
+                        dn = _hit("downtrendMomentum", fd,
+                                  shadow_ts_move=tsv, shadow_ts_fired=tfd)
+                        old = _old_shadow_lines(up, dn)
+                        line = _momentum_shadow_line("COIN", up, dn, "shadow", TH)
+                        assert (line is None) == (not old)
+                        if old and line:
+                            m = LINE_RE.match(line)
+                            assert m, line
+                            assert m.group(6) == (
+                                "UP" if fu else "DN" if fd else "flat")
+                            assert m.group(9) == (
+                                "UP" if tfu else "DN" if tfd else "flat")
+                            assert float(m.group(8)) == pytest.approx(tsv, abs=0.05)
+
+    def test_both_flat_is_silent(self):
+        up = _hit("uptrendMomentum", False, live_net_move=2.0)
+        dn = _hit("downtrendMomentum", False, live_net_move=2.0)
+        assert _momentum_shadow_line("COIN", up, dn, "live", TH) is None
+        up = _hit("uptrendMomentum", False)
+        dn = _hit("downtrendMomentum", False)
+        assert _momentum_shadow_line("COIN", up, dn, "shadow", TH) is None
+
+    def test_no_extras_is_silent(self):
+        """insufficient_history hits carry no arm extras -> nothing to record."""
+        up = _hit("uptrendMomentum", False)
+        dn = _hit("downtrendMomentum", False)
+        assert _momentum_shadow_line("COIN", up, dn, "live", TH) is None
+
+    def test_perception_wires_the_helper_once(self):
+        """Call-site pin: the emit point goes through the single format owner
+        and the old per-arm f-strings are gone."""
+        import inspect
+
+        src = inspect.getsource(
+            __import__("hermes_trader.agents.perception", fromlist=["x"]))
+        assert src.count("_momentum_shadow_line(") == 2  # def + one call site
+        assert '{h["name"]} mode=live' not in src
+        assert '{h["name"]} mode=shadow' not in src
