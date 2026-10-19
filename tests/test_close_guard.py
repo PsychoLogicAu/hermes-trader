@@ -133,13 +133,6 @@ def test_short_untouched():
     assert p["close_guard_downgraded"] is False
 
 
-def test_veto_untouched():
-    p = parse_verdict('{"verdict":"VETO","confidence":0.9}', "xyz:HOOD",
-                      PERCEPTION, held_coins={"ADA"})
-    assert p["verdict"] == "VETO"
-    assert p["close_guard_downgraded"] is False
-
-
 # ── Case-insensitivity of the raw token ────────────────────────────────────
 
 def test_lowercase_close_downgraded():

@@ -146,7 +146,7 @@ class GateContext:
         # vs chronos 0.863; short: 0.821 vs 0.797; paired bootstrap p<0.001).
         self.tirex_q10_path_pct = tirex_q10_path_pct
         self.tirex_q90_path_pct = tirex_q90_path_pct
-        # The A/B duelist's verdict at entry (LONG / SHORT / PASS / VETO / None),
+        # The A/B duelist's verdict at entry (LONG / SHORT / PASS / None),
         # carried from research.py's `duelist_at_entry` snapshot via
         # maybe_execute. None = the duelist is disabled or failed — the
         # veto has no opinion and passes.
@@ -1636,24 +1636,23 @@ def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
 
     The fifth member of the shadow-gate house pattern. When the primary
     issues a DIRECTIONAL call (LONG/SHORT) and the A/B duelist — a second
-    model answering the same research prompt — EXPLICITLY rejects the setup
-    (verdict VETO) or takes the OPPOSITE side, the entry is vetoed unless it
-    clears the elevated-conviction bar (conf >= `min_conf` OR composite >=
-    `min_composite`). History: the gate shipped keyed on the duelist's PASS
-    as abstention, validated by the 2026-08-31 48h replay (removed 12 of 41
-    entries, net +$1.83 vs the −$2.72 baseline). The 2026-09-03 re-key moved
-    the trigger from PASS to explicit VETO — see RE-KEYED below; the replay
-    numbers above belong to the old key and DO NOT transfer.
+    model answering the same research prompt — takes the OPPOSITE side,
+    the entry is vetoed unless it clears the elevated-conviction bar
+    (conf >= `min_conf` OR composite >= `min_composite`). History: the gate
+    shipped keyed on the duelist's PASS as abstention, validated by the
+    2026-08-31 48h replay (removed 12 of 41 entries, net +$1.83 vs the
+    −$2.72 baseline). The 2026-09-03 re-key moved the trigger from PASS to
+    explicit VETO; when the chat-era VETO verdict was retired (2026-10-19)
+    that trigger went with it — the gate now keys on OPPOSITE-SIDE
+    disagreement only. The replay numbers above belong to the old keys and
+    DO NOT transfer.
 
     The veto is deliberately STRICT by default (no conviction-escape): the
     48h replay's +$1.83 result was computed with the strict rule, and an
     escape bar (conf >= 0.90) would have changed the count because several
     vetoed entries ran at 0.82. `min_conf` / `min_composite` therefore
     implement the "deliberately conservative" escape — set them high to let
-    strong-conviction entries override a duelist objection (note: under the
-    new VETO key, an explicit rejection is stronger evidence than under the
-    old PASS key, so a tighter escape may be warranted once a VETO sample
-    exists).
+    strong-conviction entries override a duelist objection.
 
     SHADOW MODE: with `shadow_mode` true (default, and how it ships) the
     gate STRUCTURALLY returns pass=True and only carries a
@@ -1670,16 +1669,19 @@ def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     A data gap can never block a trade.
 
     RE-KEYED 2026-09-03 (operator decision): the veto used to fire on the
-    duelist's PASS — treating every abstention as an objection. With VETO now
-    a first-class verdict ("this setup is a trap — avoid like the plague",
-    see system prompt), PASS was redefined in the prompt as *neutral*
-    abstention, and the gate fires on EXPLICIT VETO (or an opposite-side call)
-    instead. Motivation: the 2026-09-03 headroom replay (32 trades since the
+    duelist's PASS — treating every abstention as an objection. With VETO
+    then a first-class verdict ("this setup is a trap — avoid like the
+    plague"), PASS was redefined in the prompt as *neutral* abstention, and
+    the gate fired on EXPLICIT VETO (or an opposite-side call) instead.
+    SUPERSEDED 2026-10-19: the chat-era VETO verdict was retired (not in
+    the prompt, not parsed), so the explicit-VETO trigger went with it —
+    opposite-side disagreement remains the only veto shape.
+    Motivation (historical): the 2026-09-03 headroom replay (32 trades since the
     Qwen2.5-Coder-7B anchor) found the PASS-keyed veto blocking 27/32 entries
     — a flow-reducer whose blocked cohort was net +$0.57, i.e. flipping it
     live would have LOST money, because bare PASS carried no quality
-    information (the duelist PASSed ~84% of everything). VETO is the duelist
-    actively saying NO; PASS just means "nothing excited me".
+    information (the duelist PASSed ~84% of everything). An explicit NO was
+    the objection; PASS just means "nothing excited me".
     """
     cfg = gate_cfg or {}
     if not bool(cfg.get("enabled", False)):
@@ -1688,22 +1690,21 @@ def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     if not dl:
         return {"pass": True}
     dl_upper = str(dl).upper()
-    # The veto only fires on an EXPLICIT rejection of the primary's entry.
-    # A PASS primary never reaches this gate (route_verdict routes PASS to
-    # "none" unless a force-execute hint fires, in which case the force path
-    # re-evaluates every gate — including this one — on the upgraded side).
-    if dl_upper == "VETO":
-        pass  # explicit active rejection of this setup — THE veto shape
-    elif (ctx.trade_side == "long" and dl_upper == "SHORT") or \
+    # The veto only fires when the duelist would trade AGAINST the primary's
+    # entry. A PASS primary never reaches this gate (route_verdict routes
+    # PASS to "none" unless a force-execute hint fires, in which case the
+    # force path re-evaluates every gate — including this one — on the
+    # upgraded side).
+    if (ctx.trade_side == "long" and dl_upper == "SHORT") or \
          (ctx.trade_side == "short" and dl_upper == "LONG"):
         # The duelist took the OPPOSITE side — it doesn't just object to this
-        # entry, it would trade against it. Same veto family (kept from the
+        # entry, it would trade against it. The veto shape (kept from the
         # pre-2026-09-03 rule: an explicit directional disagreement).
         pass
     else:
         # The duelist AGREES with the primary (same side), ABSTAINS neutrally
-        # (PASS — no longer a veto: "not excited" != "avoid"), or the verdict
-        # is unrecognised — no objection, pass.
+        # (PASS — "not excited" != "avoid"), or the verdict is unrecognised
+        # (incl. the retired VETO token) — no objection, pass.
         return {"pass": True}
     min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
     min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
@@ -2085,9 +2086,11 @@ def eval_all_gates(
     # bypass-fed entries face it there.
     results["crowded_mover"] = crowded_mover_gate(
         ctx, effective_config.get("crowded_mover_gate") or {})
-    # Duelist veto: the A/B duelist's EXPLICIT VETO or opposite-side call on
-    # the primary's directional entry (re-keyed 2026-09-03: a neutral PASS is
-    # no longer an objection). Strict veto (no escape by default); shadow
+    # Duelist veto: the A/B duelist's OPPOSITE-SIDE call on the primary's
+    # directional entry (re-keyed 2026-09-03 to explicit VETO; the explicit-
+    # VETO trigger retired 2026-10-19 with the chat-era VETO verdict —
+    # opposite-side only now, and a neutral PASS never objected anyway).
+    # Strict veto (no escape by default); shadow
     # until the operator flips shadow_mode to false. Passes when the duelist
     # has no verdict (disabled / failed) or AGREES with the primary — a data
     # gap can never block a trade.

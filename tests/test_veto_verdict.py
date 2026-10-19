@@ -1,16 +1,15 @@
-"""Tests for the VETO first-class verdict (2026-09-03).
+"""The chat-era VETO verdict is RETIRED (2026-10-19); the systemone one is not.
 
-VETO = the model's ACTIVE rejection of a setup ("this is a trap — avoid like
-the plague"), categorically stronger than PASS (neutral abstention). Covers:
+The 2026-09-03 "first-class VETO verdict" (chat prompt enum + doctrine +
+parse_verdict token) was unmerged as-if-never-landed: the chat prompt no
+longer offers VETO, and parse_verdict no longer accepts it — the token from
+a chat model is just an unknown token (degrades to PASS like any other).
 
-1. parse_verdict accepts the token (JSON path; regex fallback stays PASS —
-   an unparseable reply must never invent a VETO).
-2. route_verdict: VETO → action="none" and NEVER routed to maybe_execute,
-   even when every structural-override hint that would route a PASS is on.
-3. maybe_execute's independent top-level guard (direct callers — server
-   /execute, MCP — bypass the router; without the guard an unknown token
-   falls through the PASS equality-checks to `side or "long"` and blind-LONGs).
-4. The duel plumbing carries VETO as just another verdict token.
+What REMAINS is the token's systemone-only life: decision_voice.py produces
+VETO itself (verdict_from_answers none+trap synthesis; the seat trap-veto
+downgrade of its own LONG/SHORT), and the executor keeps the categorical
+contract for those — action="none", never routed/upgraded. This file pins
+both halves: the nix (parser side) and the surviving executor contract.
 """
 from __future__ import annotations
 
@@ -22,28 +21,29 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from hermes_trader.agents.research import parse_verdict  # noqa: E402
 
 
-# ── parse_verdict ───────────────────────────────────────────────────────────
+# ── parse_verdict: the chat token is GONE ───────────────────────────────────
 
 def _parse(text: str):
     return parse_verdict(text, "TEST", {"mid": 1.0})
 
 
-def test_parse_veto_token():
+def test_veto_token_is_not_a_chat_verdict():
+    # The nix pin: a chat model emitting "VETO" is an unknown token — it
+    # degrades to PASS exactly like any other unrecognised verdict.
     p = _parse('{"verdict":"VETO","confidence":0.9,"side":null,'
                '"entryPx":0,"stopPx":0,"tpPx":0,'
                '"reasoning":"late chase into reversion, avoid"}')
-    assert p["verdict"] == "VETO"
-    assert p["confidence"] == 0.9
+    assert p["verdict"] == "PASS"
     assert p["side"] is None
 
 
-def test_parse_veto_lowercase():
+def test_veto_token_lowercase_not_parsed():
     p = _parse('{"verdict":"veto","confidence":0.8}')
-    assert p["verdict"] == "VETO"
+    assert p["verdict"] == "PASS"
 
 
 def test_parse_unknown_token_stays_pass():
-    # Anything outside the five known tokens must fall back to PASS — never a
+    # Anything outside the known tokens must fall back to PASS — never a
     # VETO invented from garbage, never a directional side derived from it.
     p = _parse('{"verdict":"HODL","confidence":0.9,"side":"long"}')
     assert p["verdict"] == "PASS"
@@ -51,21 +51,12 @@ def test_parse_unknown_token_stays_pass():
 
 def test_parse_veto_regex_fallback_stays_pass():
     # JSON-decode failure path: the first-line regex only knows LONG/SHORT/
-    # CLOSE. A VETO mention in unparseable text must NOT arm a veto — it
-    # degrades to PASS exactly like any other malformed reply.
+    # CLOSE. A VETO mention in unparseable text must NOT arm a veto.
     p = _parse("VETO this trade\n{broken json")
     assert p["verdict"] == "PASS"
 
 
-def test_parse_veto_no_side_derivation():
-    # The side-derivation block maps LONG→long / SHORT→short only; a VETO
-    # with an omitted side must stay None (a derived side would let a VETO
-    # sneak a direction into downstream code).
-    p = _parse('{"verdict":"VETO","confidence":0.7}')
-    assert p["side"] is None
-
-
-# ── route_verdict: never routed, never upgraded ─────────────────────────────
+# ── route_verdict: the systemone token is never routed, never upgraded ─────
 
 def _analysis(verdict="VETO", **over):
     a = {
@@ -85,8 +76,9 @@ def _analysis(verdict="VETO", **over):
 
 def test_route_veto_is_noop_even_with_every_force_hint(monkeypatch):
     # Every structural-override hint armed: whale, composite, breakout,
-    # slow-burn, sidestep. A PASS would route to maybe_execute here; a VETO
-    # must NOT — it is categorically stronger than a hedged PASS.
+    # slow-burn, sidestep. A PASS would route to maybe_execute here; a
+    # systemone trap-rejection VETO must NOT — force paths can never
+    # upgrade it.
     from hermes_trader.agents import executor
 
     calls = []

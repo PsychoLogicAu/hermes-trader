@@ -110,7 +110,7 @@ DEFAULT_MAX_STATE_CHARS = 12000
 #   score  -> criteria is an ORDERED list of 2..10 level descriptions
 #   noul   -> probability the statement is true (optional true/false descs)
 # The descriptions carry the doctrine the chat system prompt states in prose
-# (trend-alignment king, VETO = active rejection vs PASS = abstention,
+# (trend-alignment king, active-rejection-vs-abstention,
 # coin-specific news only) — the schema is where that policy now lives.
 DIRECTION_QUESTION = {
     "type": "choice",

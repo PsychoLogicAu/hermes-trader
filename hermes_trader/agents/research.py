@@ -1096,7 +1096,7 @@ def _build_user_message(
         f"Mode: {mode} — {'your verdict will execute against real funds' if mode == 'LIVE' else 'analysis only, no execution'}",
         "",
         'Respond with 3-5 bullet points of reasoning, then output your decision as VALID JSON on the very last line:',
-        '{"verdict":"PASS"|"LONG"|"SHORT"|"CLOSE"|"VETO","confidence":0.0-1.0,"side":"long"|"short"|"null","entryPx":number,"stopPx":number,"tpPx":number,"reasoning":"brief"}',
+        '{"verdict":"PASS"|"LONG"|"SHORT"|"CLOSE","confidence":0.0-1.0,"side":"long"|"short"|"null","entryPx":number,"stopPx":number,"tpPx":number,"reasoning":"brief"}',
         "Nothing after the JSON.",
     ])
 
@@ -1725,10 +1725,6 @@ def parse_verdict(
                 verdict = "SHORT"
             elif raw == "CLOSE":
                 verdict = "CLOSE"
-            elif raw == "VETO":
-                # Active rejection (2026-09-03): "this setup is a bad idea",
-                # distinct from neutral PASS. Never executes, never upgrades.
-                verdict = "VETO"
 
             confidence = parsed.get("confidence", 0)
             side = parsed.get("side") if parsed.get("side") in ("long", "short") else None
@@ -1783,7 +1779,7 @@ def parse_verdict(
         side = "long"
     elif verdict == "SHORT":
         side = "short"
-    # CLOSE/PASS/VETO keep whatever side was parsed (unused downstream).
+    # CLOSE/PASS keep whatever side was parsed (unused downstream).
 
     return {
         "verdict": verdict,
