@@ -531,6 +531,15 @@ def market_liquidity_floor(
     High-confidence overrides: when `gate_config.bypass_low_volume=True`
     and confidence >= `gate_config.bypass_low_volume_min_conf`, allow the
     trade despite thin volume.
+
+    `gate_config.bypass_low_volume_shadow_mode=True` (kanban t_ec2c8bbf
+    follow-up, 2026-10-20) converts the bypass to SHADOW: the release never
+    fires — the entry falls through to the byte-identical floor-block reason
+    (existing parsers unaffected) while a `[gate][SHADOW] low_liquidity_bypass
+    WOULD HAVE RELEASED` accrual line logs conf/vol/floor per episode, so the
+    thin-liquidity counterfactual keeps accruing (sweep evidence: 14 live-era
+    releases all at conf 0.85-0.88, 3 opened, net -$2.63). Key absent/false =
+    byte-identical live behavior.
     """
     is_hip3 = ":" in (ctx.coin or "")
     floor = (min_volume_hip3 if (is_hip3 and min_volume_hip3 is not None) else min_volume)
@@ -542,13 +551,21 @@ def market_liquidity_floor(
         if gate_config.get("bypass_low_volume"):
             min_conf = gate_config.get("bypass_low_volume_min_conf", 0.85)
             if ctx.confidence >= min_conf:
-                return {
-                    "pass": True,
-                    "via": "bypass_low_volume",
-                    "reason": (
-                        f"low-liquidity bypass on {ctx.coin} (conf {ctx.confidence:.2f} >= {min_conf:.2f})"
-                    ),
-                }
+                if gate_config.get("bypass_low_volume_shadow_mode"):
+                    logger.warning(
+                        f"[gate][SHADOW] low_liquidity_bypass WOULD HAVE RELEASED "
+                        f"{ctx.coin} {ctx.trade_side.upper()}: conf {ctx.confidence:.2f} "
+                        f">= {min_conf:.2f}, vol "
+                        f"${ctx.market_volume_24h_usd/1e6:.2f}M below floor "
+                        f"${floor/1e6:.2f}M — NOT releasing (shadow mode; live rule blocks)")
+                else:
+                    return {
+                        "pass": True,
+                        "via": "bypass_low_volume",
+                        "reason": (
+                            f"low-liquidity bypass on {ctx.coin} (conf {ctx.confidence:.2f} >= {min_conf:.2f})"
+                        ),
+                    }
 
     return {"pass": False, "reason": f"market 24h volume ${ctx.market_volume_24h_usd/1e6:.2f}M below floor ${floor/1e6:.2f}M"}
 
