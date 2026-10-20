@@ -603,6 +603,21 @@ def _scan_single_market(
         if _prev > 0 and _cur > 0:
             daily_move_pct = (_cur - _prev) / _prev * 100
 
+        # Signed 3h tape move over the SAME 5m candles the triggers just read
+        # (last close vs 36 bars back) — attached for the [setup-shadow]
+        # setup-tag accrual (t_daf39dec). Log-only primitive: it rides the
+        # perception dict but NEVER the state dict (tags must not change the
+        # prompt bytes while the counterfactual accrues).
+        chg3_pct: Optional[float] = None
+        if len(candles) >= 40:
+            try:
+                _c_3h = float(candles[-37].c)
+                _c_now = float(candles[-1].c)
+                if _c_3h > 0 and _c_now > 0:
+                    chg3_pct = (_c_now - _c_3h) / _c_3h * 100
+            except (AttributeError, TypeError, ValueError):
+                chg3_pct = None
+
         # At least one trigger must fire.
         fired_count = sum(1 for h in hits if h.get("fired"))
         if fired_count < 1:
@@ -716,6 +731,7 @@ def _scan_single_market(
             "triggers": hits,
             "composite_score": score,
             "daily_move_pct": daily_move_pct,
+            "chg3_pct": chg3_pct,
             "whale_signal": whale,  # None unless coin is in oi_funding_anomaly hits
         })
     except Exception as e:

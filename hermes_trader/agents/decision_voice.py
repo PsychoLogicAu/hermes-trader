@@ -435,6 +435,12 @@ def primary_engine_config() -> Dict[str, Any]:
             # the mover as pure strength. Default off = byte-identical
             # state; profile opt-in, hot rollback (same pattern as above).
             "crowded_mover_label": str(slot.get("crowded_mover_label", False)).lower() not in ("false", "0", "off"),
+            # [setup-shadow] setup-tag accrual (t_daf39dec): one log line per
+            # seat scan when a battery-validated LONG setup class (S1/S3/S6/S7,
+            # 2026-10-20 setup battery) fires on the live state. LOG-ONLY —
+            # tags never enter the prompt, the seat stays byte-identical.
+            # Default off; profile opt-in, hot rollback (same pattern as above).
+            "setup_shadow": str(slot.get("setup_shadow", False)).lower() not in ("false", "0", "off"),
             # Seat conf calibration scalar (B.46 gauntlet, 2026-10-16): the
             # conviction scale is MODEL-DEPENDENT — on byte-identical seat
             # prompts d3-flash's conf median is 0.50 vs d2's 0.79 (31% vs
@@ -488,6 +494,7 @@ def systemone_primary_verdict(
         vwap_fields=bool(cfg.get("vwap_fields", False)),
         breakout_side_label=bool(cfg.get("breakout_side_label", False)),
         crowded_mover_label=bool(cfg.get("crowded_mover_label", False)),
+        setup_shadow=bool(cfg.get("setup_shadow", False)),
     )
     questions = build_questions(held, news_live=_news_live(news))
     answers, wall_ms, server_ms = call_systemone(
@@ -602,6 +609,56 @@ def record_dv(entry: Dict[str, Any]) -> None:
 
 # ── state + schema builders ────────────────────────────────────────────────
 
+def _setup_tag_line(
+    coin: str,
+    perception: Dict[str, Any],
+    tf1h: Dict[str, Any],
+    tf4h: Dict[str, Any],
+    tf1d: Dict[str, Any],
+) -> Optional[str]:
+    """[setup-shadow] setup-tag accrual line (t_daf39dec).
+
+    Tags are the ROBUST+ LONG setup classes from the 2026-10-20 setup battery
+    (scratch/_setup_battery.py / .log: same sign >=4/5 regime windows where
+    the bare trend-stack axis is regime-beta). Computed from live scan state
+    ONLY and logged — tags NEVER enter the state dict/prompt (that would
+    contaminate the counterfactual being accrued). Thresholds are the battery's
+    own constants, deliberately hardcoded (flight recorder, not a knob):
+      S1 fresh flip    1h ema8>ema21 AND 4h ema8<ema21 AND 3h tape > +1%
+      S3 fresh move    1d ema8>ema21 AND 24h tape in [+2%, +8%]
+      S6 sqz release   rangeCompression fired AND 3h tape > +0.5%
+      S7 trend expand  1d ema8>ema21 AND adx14(1d) >= 25 AND 3h tape > 0
+    Returns the line, or None when no tag fires (silent, like
+    [momentum-shadow]). Join key: coin + log timestamp -> the scan's decision
+    row + forward returns.
+    """
+    chg3 = perception.get("chg3_pct")
+    d24 = perception.get("daily_move_pct")
+    u1 = _bool_above((tf1h or {}).get("ema8"), (tf1h or {}).get("ema21"))
+    u4 = _bool_above((tf4h or {}).get("ema8"), (tf4h or {}).get("ema21"))
+    ud = _bool_above((tf1d or {}).get("ema8"), (tf1d or {}).get("ema21"))
+    adxd = (tf1d or {}).get("adx14")
+    fired = {t.get("name") for t in (perception.get("triggers") or [])
+             if t.get("fired")}
+    tags: List[str] = []
+    if u1 and not u4 and isinstance(chg3, (int, float)) and chg3 > 1.0:
+        tags.append("S1")
+    if ud and isinstance(d24, (int, float)) and 2.0 <= d24 <= 8.0:
+        tags.append("S3")
+    if "rangeCompression" in fired and isinstance(chg3, (int, float)) and chg3 > 0.5:
+        tags.append("S6")
+    if (ud and isinstance(adxd, (int, float)) and adxd >= 25
+            and isinstance(chg3, (int, float)) and chg3 > 0.0):
+        tags.append("S7")
+    if not tags:
+        return None
+    chg3_s = f"{chg3:+.2f}" if isinstance(chg3, (int, float)) else "na"
+    d24_s = f"{d24:+.2f}" if isinstance(d24, (int, float)) else "na"
+    adx_s = f"{adxd:.1f}" if isinstance(adxd, (int, float)) else "na"
+    return (f"[setup-shadow] {coin} tags={','.join(tags)} "
+            f"chg3={chg3_s} chg24={d24_s} adx1d={adx_s}")
+
+
 def build_state(
     coin: str,
     perception: Dict[str, Any],
@@ -619,6 +676,7 @@ def build_state(
     vwap_fields: bool = False,
     breakout_side_label: bool = False,
     crowded_mover_label: bool = False,
+    setup_shadow: bool = False,
 ) -> Dict[str, Any]:
     """The STATE: a compact structured snapshot of what the chat prompt says
     in prose. Deliberately lean (~1-2k tokens): the decision model's edge is
@@ -798,6 +856,15 @@ def build_state(
                 state["news_recent"] = state["news_recent"][: max(0, max_state_chars // 4)]
     except (TypeError, ValueError):
         pass
+
+    # [setup-shadow] accrual (t_daf39dec): emitted ONLY when the profile
+    # knob setup_shadow is on — and it NEVER touches the state dict above.
+    # Single emit owner is _setup_tag_line. Wire this knob on ONE call path
+    # at a time (primary seat path only today) or lines duplicate per scan.
+    if setup_shadow:
+        _tag_line = _setup_tag_line(coin, perception, tf1h, tf4h, tf1d)
+        if _tag_line:
+            logger.info(_tag_line)
     return state
 
 
