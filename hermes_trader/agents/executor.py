@@ -1430,6 +1430,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _tirex_q90p = _txsig.q90_path_pct if _txsig else None
         except Exception as _xe:
             logger.debug(f"[executor] tirex gate-side read failed for {analysis['coin']}: {_xe}")
+    # Gate-side Timestral-209M read for timestral_tail_trigger_gate: same
+    # warm sync pattern (shares the 300s per-coin cache with the loop fire +
+    # trade-result attach, so steady state is a dict read). Paths only.
+    # Error/disabled -> None -> the gate has no opinion and passes.
+    _tms_q10p = _tms_q90p = None
+    if (config.get("timestral_signal") or {}).get("enabled", False):
+        try:
+            from hermes_trader.agents.timestral_signal import get_timestral_signal_sync as _tms
+            _tmssig = _tms(analysis["coin"], trade_side)
+            _tms_q10p = _tmssig.q10_path_pct if _tmssig else None
+            _tms_q90p = _tmssig.q90_path_pct if _tmssig else None
+        except Exception as _tme:
+            logger.debug(f"[executor] timestral gate-side read failed for {analysis['coin']}: {_tme}")
     # A/B duelist verdict at entry (research.py's `duelist_at_entry` snapshot):
     # LONG / SHORT / PASS, or None when the duelist is disabled /
     # failed. Fed to duelist_veto_gate — the opposite-side
@@ -1476,6 +1489,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         timesfm_median_pct=_timesfm_med,
         tirex_q10_path_pct=_tirex_q10p,
         tirex_q90_path_pct=_tirex_q90p,
+        timestral_q10_path_pct=_tms_q10p,
+        timestral_q90_path_pct=_tms_q90p,
         duelist_verdict=_duelist_verdict,
         cohort_tag=analysis.get("cohort_tag"),
         primary_model=analysis.get("primary_model"),
@@ -1523,6 +1538,17 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_xt.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+    # Timestral tail-trigger mirror accrual (2026-10-21): same would-block
+    # line on the timestral adverse q-path; accrues against the chronos/tirex
+    # lines on the SAME entries until the shadow_mode flip decision.
+    _tm = gate_output["results"].get("timestral_tail_trigger") or {}
+    if _tm.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][SHADOW] timestral_tail_trigger WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_tm.get('reason')} — "
             f"NOT blocking (shadow mode)")
     # Log-only comparator accrual (plan D4, 2026-09-15): per evaluated entry,
     # what the PATH-tail veto vs the band-WIDTH veto would each have done. The
