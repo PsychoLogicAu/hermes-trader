@@ -438,6 +438,39 @@ def _attach_tirex_to_result(result: Dict[str, Any], coin: str, side: str) -> Non
         result["tirex_error"] = str(e)
 
 
+def _attach_timestral_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
+    """Attach compact Timestral shadow fields to a trade result dict.
+
+    SHADOW ONLY (Mistral Timestral-209M, Oct 2026): logged next to the
+    Chronos, TimesFM and TiRex fields so all four forecasters are directly
+    comparable on the identical 5m context. Never gates, never sizes.
+    Chosen for shadow because the model card tops GIFT-Eval / TIME /
+    fev-bench among zero-shot forecasters — candidate for the accrual's
+    next head-to-head against chronos (card numbers use clampsym TAA; our
+    shadow read is single-pass, so measure before quoting them). Cache-first
+    sync read (the loop fire warms it); config-gated off by default.
+    Wrapped in try/except so it never breaks the trade path. Output shape:
+      timestral_median_pct: float | null
+      timestral_aligned: bool | null (True if median move agrees with side)
+      timestral_error: str | null
+    """
+    try:
+        from hermes_trader.agents.timestral_signal import get_timestral_signal_sync
+        sig = get_timestral_signal_sync(coin, side)
+        result["timestral_median_pct"] = round(sig.median_pct * 10) / 10 if sig.median_pct is not None else None
+        if sig.median_pct is not None:
+            result["timestral_aligned"] = (
+                (side == "long" and sig.median_pct > 0) or (side == "short" and sig.median_pct < 0)
+            )
+        else:
+            result["timestral_aligned"] = None
+        result["timestral_error"] = sig.error
+    except Exception as e:
+        result["timestral_median_pct"] = None
+        result["timestral_aligned"] = None
+        result["timestral_error"] = str(e)
+
+
 def _attach_expert_select_to_result(result: Dict[str, Any], coin: str, side: str) -> None:
     """Attach compact MoiraiAgent expert-selection shadow fields to a trade
     result dict.
@@ -858,6 +891,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             _attach_chronos_to_result(result, coin, side)
             _attach_timesfm_to_result(result, coin, side)
             _attach_tirex_to_result(result, coin, side)
+            _attach_timestral_to_result(result, coin, side)
             _attach_expert_select_to_result(result, coin, side)
             return result
 
@@ -876,6 +910,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _attach_chronos_to_result(result, coin, side)
         _attach_timesfm_to_result(result, coin, side)
         _attach_tirex_to_result(result, coin, side)
+        _attach_timestral_to_result(result, coin, side)
         _attach_expert_select_to_result(result, coin, side)
         return result
 
@@ -1801,6 +1836,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _attach_chronos_to_result(result, coin, side)
         _attach_timesfm_to_result(result, coin, side)
         _attach_tirex_to_result(result, coin, side)
+        _attach_timestral_to_result(result, coin, side)
         _attach_expert_select_to_result(result, coin, side)
         return result
 
@@ -1816,6 +1852,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         _attach_chronos_to_result(_res, coin, _side)
         _attach_timesfm_to_result(_res, coin, _side)
         _attach_tirex_to_result(_res, coin, _side)
+        _attach_timestral_to_result(_res, coin, _side)
         _attach_expert_select_to_result(_res, coin, _side)
         return _res
 
@@ -2082,6 +2119,7 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     _attach_chronos_to_result(result, coin, trade_side)
     _attach_timesfm_to_result(result, coin, trade_side)
     _attach_tirex_to_result(result, coin, trade_side)
+    _attach_timestral_to_result(result, coin, trade_side)
     _attach_expert_select_to_result(result, coin, trade_side)
     return result
 
@@ -2548,6 +2586,24 @@ def route_verdict(analysis: Dict[str, Any], *, execute_fn=None, close_fn=None) -
             _res["tirex_aligned_if_long"] = None
             _res["tirex_aligned_if_short"] = None
             _res["tirex_error"] = str(e)
+        # Timestral shadow read, same PASS shape (direction-agnostic: one
+        # median + both-side alignment flags). Separate try/except so a
+        # timestral outage can never blank the chronos/timesfm/tirex fields
+        # above. Disabled => error field only.
+        try:
+            from hermes_trader.agents.timestral_signal import get_timestral_signal_sync
+            _msig = get_timestral_signal_sync(coin or "unknown", "long")
+            mm = _msig.median_pct if _msig.median_pct is not None else None
+            _res["timestral_median_pct"] = round(mm * 10) / 10 if mm is not None else None
+            _res["timestral_aligned_if_long"] = bool(mm is not None and mm > 0)
+            _res["timestral_aligned_if_short"] = bool(mm is not None and mm < 0)
+            if _msig.error:
+                _res["timestral_error"] = _msig.error
+        except Exception as e:
+            _res["timestral_median_pct"] = None
+            _res["timestral_aligned_if_long"] = None
+            _res["timestral_aligned_if_short"] = None
+            _res["timestral_error"] = str(e)
         # MoiraiAgent expert-selection shadow, same PASS shape as chronos/
         # timesfm (direction-agnostic: one re-centered-mixture median + both-
         # side alignment flags — the selection is side-independent, so one
