@@ -150,6 +150,46 @@ services:
               count: all
               capabilities: [gpu]
 
+  # d3-27b-artemis — primary-seat candidate after SBS (board t_269e7d82,
+  # 2026-10-20): gauntlet n=19,955 tie with pplx (93.1% agree, zero
+  # opposite-side conflicts); live-tape byte-exact replay n=5,878 leans this
+  # way (its skips of pplx calls right-leaning -7.47% Scf, entries pplx
+  # skipped +18.93% Scf, zero veto friction on the 5 joinable real opens).
+  # Config profile d3-27b-artemis points here at http://d3-27b-serve:8090;
+  # its OWN trap_veto live@0.50 (same-input dist med 0.29 p90 0.45 — never
+  # carry the pplx 0.55 bar across seats).
+  # Same tree/binary as pplx-serve (0a731cc; decision support lives in
+  # libllama-common.so — verified present, NO rebuild). Flags are the proven
+  # .16 co-resident run: -b/-ub 4096 + -np 1 card PINS, and --n-gpu-layers 99
+  # is load-bearing (auto-fit silently CPU-offloads ~1.1 GB of layers under
+  # co-residency and inflates wall +22%, 2226->1737 ms paired).
+  # VRAM: process ~12.4 GB at -c 2048. NEVER co-start with pplx-serve
+  # (14.9 GB) — stop pplx-serve first; flip = stop pplx-serve,
+  # `docker compose up -d d3-27b-serve`. Rollback <60 s: start pplx-serve +
+  # hot-flip model_profile back.
+  d3-27b-serve:
+    image: nvidia/cuda:12.8.1-devel-ubuntu22.04
+    container_name: d3-27b-serve
+    environment:
+      - LD_LIBRARY_PATH=/srv/bin
+    command: /srv/bin/llama-server
+      -m /models/d3-27b-gguf/d3-27B-Artemis-Q3_K_S.gguf
+      -c 2048 -b 4096 -ub 4096 --n-gpu-layers 99 -np 1
+      --host 0.0.0.0 --port 8090
+    volumes:
+      - ${HOME}/llama-master/build:/srv:ro
+      - ${HOME}/models:/models:ro
+    networks:
+      - llama-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
 networks:
   llama-net:
     external: true
