@@ -269,6 +269,17 @@ try:
         _tx_preload(float(os.environ.get('HERMES_TIREX_PRELOAD_TIMEOUT_S', '120')))
 except Exception as e:
     logger.warning(f"[startup] tirex preload skipped (lazy fallback): {e}")
+# Timestral shadow signal (Mistral, Oct 2026). Standalone singleton (not
+# shared with expert_pool). Bounded + lazy-fallback like the others; longer
+# default timeout because the first-ever load also downloads the ~837MB
+# fp32 209M checkpoint into the hf-cache volume. Skipped unless
+# timestral_signal is enabled (ships disabled).
+try:
+    if startup_agent_config.get("timestral_signal", {}).get("enabled", False):
+        from hermes_trader.agents.timestral_signal import preload_model as _tms_preload
+        _tms_preload(float(os.environ.get('HERMES_TIMESTRAL_PRELOAD_TIMEOUT_S', '180')))
+except Exception as e:
+    logger.warning(f"[startup] timestral preload skipped (lazy fallback): {e}")
 # The universe carries prevDayPx / dayNtlVlm / funding which DRIFT over the
 # day; fetched once here they'd freeze at loop-start for the whole process,
 # so mover-selection + volume-ranking would rank stale 24h windows (a coin
@@ -922,6 +933,17 @@ def _process_coin_run(perception, ctx):
                 _tx.get_tirex_signal_async(coin, analysis.get("side", "long"))
         except Exception as _e:
             logger.debug(f"[tirex] async fire skipped for {coin}: {_e}")
+        # Timestral shadow signal: same fire-and-forget pattern so the
+        # `Trade result:` attaches and the PASS branch read a warm cache.
+        # Logs one `[timestral]` accrual line per real compute; disabled
+        # config or any failure is a no-op (worker self-guards).
+        try:
+            if (startup_agent_config.get("timestral_signal", {}) or {}).get("enabled", False) or \
+               (read_agent_config().get("timestral_signal", {}) or {}).get("enabled", False):
+                from hermes_trader.agents import timestral_signal as _tms
+                _tms.get_timestral_signal_async(coin, analysis.get("side", "long"))
+        except Exception as _e:
+            logger.debug(f"[timestral] async fire skipped for {coin}: {_e}")
         routed = route_verdict(analysis)
         action = routed["action"]
         result = routed["result"] or {}
