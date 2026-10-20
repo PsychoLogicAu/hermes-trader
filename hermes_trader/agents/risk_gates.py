@@ -55,6 +55,8 @@ class GateContext:
         timesfm_median_pct: Optional[float] = None,
         tirex_q10_path_pct: Optional[List[float]] = None,
         tirex_q90_path_pct: Optional[List[float]] = None,
+        timestral_q10_path_pct: Optional[List[float]] = None,
+        timestral_q90_path_pct: Optional[List[float]] = None,
         duelist_verdict: Optional[str] = None,
         # Cohort admission (B.46): with-the-signal vwap entries carry the
         # cohort tag + answering model so the classic confidence gate can
@@ -146,6 +148,14 @@ class GateContext:
         # vs chronos 0.863; short: 0.821 vs 0.797; paired bootstrap p<0.001).
         self.tirex_q10_path_pct = tirex_q10_path_pct
         self.tirex_q90_path_pct = tirex_q90_path_pct
+        # Timestral-209M per-step quantile paths, % vs last close (gate-side
+        # warm sync read from timestral_signal, same pattern as the
+        # chronos/timesfm/tirex paths above; None on error/disabled). Fed to
+        # timestral_tail_trigger_gate — accrual mirror so the newest
+        # forecaster's adverse tail is scored against the armed chronos gate
+        # and the tirex mirror on the SAME executed entries.
+        self.timestral_q10_path_pct = timestral_q10_path_pct
+        self.timestral_q90_path_pct = timestral_q90_path_pct
         # The A/B duelist's verdict at entry (LONG / SHORT / PASS / None),
         # carried from research.py's `duelist_at_entry` snapshot via
         # maybe_execute. None = the duelist is disabled or failed — the
@@ -1088,6 +1098,72 @@ def tirex_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateR
             comp_escape_open and ctx.composite_score >= min_composite):
         return {"pass": True}
     reason = (f"tirex_tail_trigger ({ctx.trade_side} entry, adverse q-path "
+              f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
+              f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
+              f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
+              f"{min_composite:.0f})")
+    if not comp_escape_open:
+        reason += "; composite escape closed on fresh-impulse class"
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True,
+                "tail_pct": tail, "window_steps": k}
+    return {"pass": False, "reason": reason}
+
+
+def timestral_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Timestral tail-trigger conviction gate (shadow-capable; same shape as
+    ``chronos_tail_trigger_gate`` / ``tirex_tail_trigger_gate``).
+
+    Why a timestral mirror: Timestral-209M entered the stack as a shadow
+    forecaster (2026-10-21) and as the fifth expert_select candidate; its
+    stop-out discrimination on OUR tape is unpriced. The only honest way to
+    rank it against the armed chronos gate and the tirex mirror is the same
+    accrual-mirror pattern the tirex gate shipped with: identical rule,
+    identical escape bar, its own would-block marker, so live logs answer
+    "who trips on which entries" with executed-cohort P/L, not benchmark
+    tables (GIFT-Eval rank != 5m-crypto-tail rank).
+
+    Rule (identical semantics to the other tail gates): when the ADVERSE
+    quantile of the cached timestral path (q10 for longs, q90 for shorts)
+    breaches ``-min_adv_path_pct`` at ANY of the first ``window_steps``
+    steps, veto unless the entry clears the elevated-conviction bar
+    (conf >= min_conf OR composite >= min_composite, composite escape closed
+    on the fresh-impulse class when configured). Default trip X=2.5 matches
+    the tirex/timesfm mirrors; timestral reports the FULL 21-level grid, so
+    a later sweep can re-site the trip on a wider knot (0.05/0.95) without
+    touching the gate shape.
+
+    SHADOW MODE: with ``shadow_mode`` true (default) the gate structurally
+    returns pass=True and carries a ``shadow_would_block`` marker + join
+    vars; it cannot alter execution until the operator flips shadow_mode in
+    .agent-config.json.
+
+    Fail-safes (no-opinion pass): disabled; paths missing/short (cold cache,
+    model down, error signal); tail not breached. A data gap can never block.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    k = int(cfg.get("window_steps", 6) or 6)
+    x = float(cfg.get("min_adv_path_pct", 2.5) or 2.5)
+    if k <= 0 or x <= 0:
+        return {"pass": True}
+    path = (ctx.timestral_q10_path_pct if ctx.trade_side == "long"
+            else ctx.timestral_q90_path_pct)
+    if not path or len(path) < k:
+        return {"pass": True}
+    window = path[:k]
+    tail = min(window) if ctx.trade_side == "long" else max(window)
+    breached = tail <= -x if ctx.trade_side == "long" else tail >= x
+    if not breached:
+        return {"pass": True}
+    min_conf = float(cfg.get("min_conf", 0.90) or 0.90)
+    min_composite = float(cfg.get("min_composite", 60.0) or 60.0)
+    comp_escape_open = _tail_composite_escape_allowed(ctx, cfg)
+    if ctx.confidence >= min_conf or (
+            comp_escape_open and ctx.composite_score >= min_composite):
+        return {"pass": True}
+    reason = (f"timestral_tail_trigger ({ctx.trade_side} entry, adverse q-path "
               f"{'min' if ctx.trade_side == 'long' else 'max'} of first {k} steps "
               f"= {tail:+.2f}% beyond {x:.1f}%; conf {ctx.confidence:.2f} < "
               f"{min_conf:.2f}, composite {ctx.composite_score:.1f} < "
@@ -2135,6 +2211,12 @@ def eval_all_gates(
     # docstring), so it shadows until executed-cohort evidence picks either.
     results["tirex_tail_trigger"] = tirex_tail_trigger_gate(
         ctx, effective_config.get("tirex_tail_trigger_gate") or {})
+    # Timestral tail-trigger mirror (2026-10-21): accrual-first twin on the
+    # newest forecaster — its 5m-crypto-tail skill is unpriced on our tape,
+    # so it shadows until executed-cohort would-block counts vs the chronos
+    # gate and tirex mirror settle the ranking.
+    results["timestral_tail_trigger"] = timestral_tail_trigger_gate(
+        ctx, effective_config.get("timestral_tail_trigger_gate") or {})
     # Quiet broad-tape entry gate (2026-09-10, WATCHLIST §B.17): blocks a new
     # entry when BTC's trailing-24h vol AND |drift| are both below the sweep-
     # chosen thresholds (2.5/2.0). The bleed-day broad-tape was the quietest

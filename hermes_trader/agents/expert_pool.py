@@ -1,16 +1,19 @@
 """Expert-selection candidate pool (MoiraiAgent integration, Task 1.0).
 
-Four time-series candidate forecasters behind one uniform interface, for the
+Five time-series candidate forecasters behind one uniform interface, for the
 `expert_select` shadow signal (salesforce MoiraiAgent expert-selection
 agent, vendored selection math in `expert_select.py`):
 
-    chronos  — Chronos-2 (amazon/chronos-2)         — borrows the already-loaded
+    chronos    — Chronos-2 (amazon/chronos-2)         — borrows the already-loaded
                  chronos_signal pipeline (no second load)
-    timesfm  — TimesFM-3 (google/timesfm-3.0-pytorch) — borrows the already-loaded
+    timesfm    — TimesFM-3 (google/timesfm-3.0-pytorch) — borrows the already-loaded
                  timesfm_signal forecaster
-    tirex    — TiRex 1.1 (NX-AI/TiRex, tirex-ts)    — own lazy singleton
-    moirai2  — Moirai-2 (Salesforce/moirai-2.0-R-small) — vendored port
+    tirex      — TiRex 1.1 (NX-AI/TiRex, tirex-ts)    — own lazy singleton
+    moirai2    — Moirai-2 (Salesforce/moirai-2.0-R-small) — vendored port
                  (hermes_trader/agents/moirai2_vendor/, D3a-A)
+    timestral  — Timestral-209M (mistralai/Timestral-209M) — borrows the
+                 already-loaded timestral_signal forecaster (no second load);
+                 read single-pass (clampsym TAA off), same as the shadow line
 
 Every adapter forecasts UNIVARIATE closes and returns the SAME contract:
 
@@ -33,7 +36,9 @@ LICENSE NOTES: chronos-2 / timesfm-3 weights carry the licenses accepted
 by their existing signal integrations; TiRex weights are NXAI Community
 License (Llama-3-style — free unless >€100M consolidated annual revenue
 AND commercial product use); moirai-2.0-R-small weights are CC-BY-NC-4.0
-(non-commercial). Vendored code is Apache-2.0 (Salesforce uni2ts @
+(non-commercial); Timestral weights are Modified MIT (misuse clause, not
+non-commercial; same posture as the timestral_signal integration).
+Vendored code is Apache-2.0 (Salesforce uni2ts @
 8062ef5). Same posture as the TimesFM-3 integration: shadow-only, and the
 pool ships behind `expert_select.enabled: false`.
 """
@@ -55,17 +60,18 @@ from hermes_trader.models.types import Candle
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAMES = ("chronos", "timesfm", "tirex", "moirai2")
+MODEL_NAMES = ("chronos", "timesfm", "tirex", "moirai2", "timestral")
 
 # Adapter-specific context windows (each model sees what it was designed
 # for; MoiraiAgent runs every candidate on the same history and lets each
 # model truncate internally). Values are candle counts at the signal's
 # 5m interval.
 _ADAPTER_CTX_DEFAULTS = {
-    "chronos": 50,    # match the live chronos_signal context
-    "timesfm": 100,   # match the live timesfm_signal context
-    "tirex": 256,     # xLSTM context; bounded for CPU
-    "moirai2": 1024,  # patch model; its predict() slices to context_length=4000 anyway
+    "chronos": 50,     # match the live chronos_signal context
+    "timesfm": 100,    # match the live timesfm_signal context
+    "tirex": 256,      # xLSTM context; bounded for CPU
+    "moirai2": 1024,   # patch model; its predict() slices to context_length=4000 anyway
+    "timestral": 50,   # match the live timestral_signal context (model max 32768)
 }
 # Default per-adapter caller timeout (seconds). Cold first inference can
 # exceed this (weights load ~10s) — cold runs are expected to degrade to
@@ -200,6 +206,32 @@ def _get_timesfm_forecaster():
             return None
 
 
+def _get_timestral_forecaster():
+    """Borrow the timestral_signal forecaster singleton — never a second load.
+
+    Same borrow direction as chronos/timesfm (the signal module owns the
+    load + preload; the pool just points at it). If timestral_signal is
+    disabled or failed to load, record a sticky error and let the pool
+    serve the rest — same degradation posture as the chronos borrow."""
+    with _locks["timestral"]:
+        if "timestral" in _resources:
+            return _resources["timestral"]
+        if _load_errors.get("timestral"):
+            return None
+        try:
+            from hermes_trader.agents import timestral_signal
+            forecaster = timestral_signal._get_forecaster()
+            if forecaster is None:
+                _load_errors["timestral"] = "timestral_signal forecaster unavailable (disabled or load error)"
+                return None
+            _resources["timestral"] = forecaster
+            return forecaster
+        except Exception as e:
+            _load_errors["timestral"] = str(e)
+            logger.warning(f"[expert_pool] timestral borrow failed: {e}")
+            return None
+
+
 def _get_tirex():
     with _locks["tirex"]:
         if "tirex" in _resources:
@@ -244,6 +276,8 @@ def _ensure_loaded(model: str):
         return _get_chronos_pipeline()
     if model == "timesfm":
         return _get_timesfm_forecaster()
+    if model == "timestral":
+        return _get_timestral_forecaster()
     if model == "tirex":
         return _get_tirex()
     if model == "moirai2":
@@ -321,6 +355,32 @@ def _forecast_raw(model: str, closes: List[float], horizon: int) -> Dict[str, An
         q = np.asarray(out.quantiles, dtype=np.float64)[:horizon]  # (h, n_quantiles)
         qlevels = [float(x) for x in forecaster.config.quantiles][: q.shape[1]]
         return {"quantiles": {lv: q[:, i].tolist() for i, lv in enumerate(qlevels)}}
+
+    if model == "timestral":
+        # Any: _ensure_loaded's cross-branch inferred type confuses static
+        # checkers about the borrowed forecaster's callables.
+        ts_forecaster: Any = _ensure_loaded("timestral")
+        if ts_forecaster is None:
+            raise RuntimeError(_load_errors.get("timestral", "unavailable"))
+        # Same single-pass read as timestral_signal (clampsym TAA off) so the
+        # pool candidate and the [timestral] accrual line never diverge.
+        # 1-D context -> quantiles (1, 1, H, 21); levels are checkpoint-fixed
+        # (0.01, 0.05, 0.10, 0.15, ..., 0.95, 0.99) and reported on the
+        # Forecast itself. The mixture pools only the named features
+        # (median + 0.1..0.9, see expert_select._MIXTURE_LEVELS); the extra
+        # levels ride along for diagnostics, like the other adapters' grids.
+        ts_fc = ts_forecaster.forecast(
+            np.asarray(closes, dtype=np.float64),
+            prediction_length=horizon,
+            symmetric_averaging=False,
+            clip_nonnegative=False,
+        )
+        ts_q = np.asarray(ts_fc.quantiles)[0, 0, :horizon, :]  # (h, 21)
+        qlevels = [float(x) for x in ts_fc.quantile_levels][: ts_q.shape[1]]
+        if len(qlevels) != ts_q.shape[1]:
+            raise RuntimeError(
+                f"quantile_levels ({len(ts_fc.quantile_levels)}) != quantile axis ({ts_q.shape[1]})")
+        return {"quantiles": {lv: ts_q[:, i].tolist() for i, lv in enumerate(qlevels)}}
 
     if model == "tirex":
         m = _ensure_loaded("tirex")
