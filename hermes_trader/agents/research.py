@@ -504,6 +504,71 @@ def _timestral_block(coin: str) -> str:
         return ""
 
 
+def _tirex2_block(coin: str) -> str:
+    """TiRex-2 forward forecast for the AI prompt, when `tirex2_signal.in_prompt`
+    is true (2026-10-21 mirror of _tirex_block; ships DISABLED — added so the
+    chronos->tirex2 prompt swap is a config flip once the tirex2 shadow accrual
+    and the C.11 board decision settle).
+
+    Same determinism contract as the other blocks: sync cache-first read
+    (shares the 300s per-coin cache with the loop fire), '' on disabled /
+    failed / absent so the prompt shape is unchanged.
+
+    Rendered lean like the tirex/timestral blocks (headline median + band +
+    early tail). Sweep framing (scratch/eval/tirex2_sweep, n=47,400): the
+    edge over chronos is on magnitude calibration AND a small but real
+    direction edge (the only family model clearing coinflip overall), but
+    the direction call is still weak in absolute terms and INVERTS on >2%
+    tape — so the block again frames the tail as the informative read and
+    says no-confident-direction below the shared min_conf_ratio floor.
+    """
+    try:
+        cfg = read_agent_config().get("tirex2_signal", {})
+        if not cfg.get("in_prompt", False) or not cfg.get("enabled", False):
+            return ""
+        from hermes_trader.agents import tirex2_signal as _tx2
+        sig = _tx2.get_tirex2_signal_sync(coin, "long")
+        if sig is None or sig.error or sig.median_pct is None:
+            return ""
+        med = sig.median_pct
+        span = ""
+        if sig.q_low is not None and sig.q_high is not None and sig.context_last:
+            lo_pct = (sig.q_low - sig.context_last) / sig.context_last * 100
+            hi_pct = (sig.q_high - sig.context_last) / sig.context_last * 100
+            span = f", p10 avg {lo_pct:+.1f}% / p90 avg {hi_pct:+.1f}%"
+        tail_bits = []
+        _tail_steps = 6
+        p10p = sig.q10_path_pct or []
+        p90p = sig.q90_path_pct or []
+        if p10p[:_tail_steps]:
+            tail_bits.append(f"p10 min {min(p10p[:_tail_steps]):+.1f}%")
+        if p90p[:_tail_steps]:
+            tail_bits.append(f"p90 max {max(p90p[:_tail_steps]):+.1f}%")
+        tail_s = f"; early tail, first {_tail_steps * 5}m: {' / '.join(tail_bits)}" if tail_bits else ""
+        hours = sig.horizon * 5 / 60
+        hours_s = f"{hours:.0f}" if hours == int(hours) else f"{hours:g}"
+        min_conf_ratio = _tx2.resolve_min_conf_ratio(cfg)
+        ratio = _tx2.confidence_ratio(sig)
+        if ratio < min_conf_ratio:
+            note = (f"no confident direction over ~{hours_s}h (median inside its "
+                    f"own band, ratio {ratio:.2f} < {min_conf_ratio:.2f})")
+        elif med > 0:
+            note = f"sees continuation over ~{hours_s}h"
+        else:
+            note = f"expects the move to FADE within ~{hours_s}h"
+        return (
+            "TiRex-2 forecast (shadow signal, successor to TiRex — best-calibrated "
+            "forecaster in our stack, but direction is still weak for all these "
+            "models, so weigh the tail against stop-risk rather than as a sign "
+            "call):\n"
+            f"  - Path-average over the next ~{hours_s}h: {med:+.2f}%{span}{tail_s} — "
+            + note + "."
+        )
+    except Exception as e:
+        logger.debug(f"[research] tirex2 block failed for {coin}: {e}")
+        return ""
+
+
 def _build_user_message(
     coin: str,
     perception: Dict[str, Any],
@@ -1152,6 +1217,7 @@ def _build_user_message(
         _timesfm_block(coin),
         _tirex_block(coin),
         _timestral_block(coin),
+        _tirex2_block(coin),
         "",
         f"Funding rate (latest): {funding_rate}",
         f"Recent news: {news}",
