@@ -111,7 +111,7 @@ if _preflight_blocking:
 logger.info(
     f"[preflight] credential setup OK ({len(_preflight_findings) - len(_preflight_blocking)} warning(s))")
 
-from hermes_trader.agents.perception import scan_once
+from hermes_trader.agents.perception import scan_once, take_aligned_short_lane_candidates
 from hermes_trader.agents.ta_filter import analyze_perception
 from hermes_trader.agents.research import research
 from hermes_trader.agents.executor import close_position_market, fast_exit_pass, maybe_execute, monitor_exits, momentum_reentry_allowed, route_verdict
@@ -1344,6 +1344,14 @@ while True:
         _blocklist = set(_cfg_cd.get("coin_blocklist", []) or [])
         now_ms = int(time.time() * 1000)
 
+        # ALIGNED-SHORT lane shadow accrual (board t_2e23804b): take this
+        # scan's probe records right after scan_once (the probe list is the
+        # per-cycle side channel, like the data-gap counters). Emission runs
+        # AFTER the research phase below so conf-if-asked reflects this
+        # cycle's seat calls. Take ALWAYS (even when the lane is disabled) to
+        # keep the channel drained.
+        _as_lane_cands = take_aligned_short_lane_candidates()
+
         # Research + execute on a bounded thread pool so the (slow) LLM calls
         # overlap instead of serializing. scan_once returns triggers sorted by
         # composite_score DESC, so submitting in order preserves priority (the
@@ -1387,6 +1395,30 @@ while True:
                 for _fut in as_completed(_futures):
                     _fut.result()
                     _last_progress_ts = time.time()
+        # ALIGNED-SHORT lane WOULD-ADMIT emit (board t_2e23804b) — shadow
+        # accrual only: risk_gates.aligned_short_lane_emit logs
+        # [aligned-short-lane][SHADOW] lines for this scan's candidates with
+        # live slot/position/conf context, and NOTHING here enters the entry
+        # path. Failure-isolated: a broken lane pass must never break the
+        # trading cycle.
+        if _as_lane_cands:
+            try:
+                from hermes_trader.agents.risk_gates import aligned_short_lane_emit
+                _open = memory.open_position_coins()
+                _conf_map: dict = {}
+                for _a in memory.get_recent_analyses(limit=64):
+                    if _a.get("coin") and int(_a.get("created_at", 0) or 0) >= now_ms:
+                        _conf_map[_a["coin"]] = _a.get("confidence")
+                aligned_short_lane_emit(
+                    _as_lane_cands,
+                    _cfg_cd.get("aligned_short_lane") or {},
+                    open_coins=_open,
+                    slots_used=len(_open),
+                    max_slots=int(_cfg_cd.get("max_concurrent", 8) or 8),
+                    conf_by_coin=_conf_map,
+                )
+            except Exception as _ale:
+                logger.warning(f"[aligned-short-lane] shadow emit pass failed: {_ale}")
         _last_progress_ts = time.time()  # watchdog: a full cycle completed
         logger.info(f"Sleeping {scan_interval}s until next scan...")
         time.sleep(scan_interval)

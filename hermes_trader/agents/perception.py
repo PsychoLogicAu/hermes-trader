@@ -21,7 +21,7 @@ from hermes_trader.agents.config import get_config
 from hermes_trader.client.hl_client import fetch_all_mids, fetch_hl_candles
 from hermes_trader.client.universe import get_universe
 from hermes_trader.indicators import triggers as trigger_mod
-from hermes_trader.indicators.math import atr
+from hermes_trader.indicators.math import atr, ema as _ema_fn
 from hermes_trader.models.types import Candle, TriggerHit
 
 logger = logging.getLogger(__name__)
@@ -162,6 +162,126 @@ def _hip3_prefilter_verdict(score: float, hits: List[Any], market: Dict[str, Any
     if score >= bar or short_lane:
         return (False, False)
     return (True, bool(pf.get("shadow_mode", False)))
+
+
+# ── ALIGNED-SHORT lane shadow probe (board t_2e23804b) ──────────────────────
+# A dn-momentum selloff ALIGNED with the 4h trend (ema8(4h) < ema21(4h)) is a
+# candidate SHORT the live path never admits (it opens no lane here). The
+# accrual question — would the live DSL exit mirror (max_loss 5 / protect 1 /
+# retrace .25 / breach n=2 / stale 720m, per scratch/_optD2_walk.py books:
+# NOTIONAL 316.86, FEE_RT 0.017) make money on this cohort? — is priced
+# offline by joining the WOULD ADMIT lines to 5m history. So the probe here is
+# pure observer plumbing, mirroring the data-gap counter pattern: the scan
+# thread appends candidate records to a lock-guarded list; the trading loop
+# takes them after scan_once and risk_gates.aligned_short_lane_emit turns them
+# into [aligned-short-lane][SHADOW] lines with the live slot/position/conf
+# context. Surfacing/research/execution bytes are UNTOUCHED — the probe never
+# gates or bypasses anything, and it only pays its one extra 4h-candle fetch
+# for coins that already pass the cheap 5m preconditions (~1-8/day).
+_lane_lock = threading.Lock()
+_lane_candidates: List[Dict[str, Any]] = []
+
+
+def take_aligned_short_lane_candidates() -> List[Dict[str, Any]]:
+    """Drain and return this scan's ALIGNED-SHORT lane candidate probes."""
+    with _lane_lock:
+        out = list(_lane_candidates)
+        _lane_candidates.clear()
+    return out
+
+
+def _note_lane_candidate(cand: Dict[str, Any]) -> None:
+    with _lane_lock:
+        _lane_candidates.append(cand)
+
+
+def _aligned_short_probe(
+    coin: str,
+    candles: List[Candle],
+    mid: float,
+    score: float,
+    hits: List[TriggerHit],
+    lane_cfg: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Evaluate ONE aligned-short lane candidate. None = not a candidate.
+
+    Entry-candidate semantics (shadow v1, task-specified):
+      dn arm per momentum-shadow semantics — 6h close-to-close net
+      (same primitive the [momentum-shadow] line uses, _sustained_move_pct
+      over trendMomentumLookback bars) <= -mom_pct. Deliberately NOT the
+      arm's live fired flag: momentum_theilsen is LIVE, so `fired` answers
+      with the Theil-Sen scalar, while the lane cohort is defined by the
+      net rule the accrual scripts price.
+      ema8(4h) < ema21(4h) on the 4h closes as fetched (last bar is the
+      forming one — the live read at scan time; the review re-derives both
+      EMAs from the logged values anyway, so both ride the probe).
+      composite >= comp_bar (default: runner_entry_gate.min_composite).
+    BTC tape is a LOG field, not a block, in shadow v1 — btc_tape_activity()
+    is read by the emitter, not here.
+
+    Pure w.r.t. everything but the one TTL-cached 4h candle fetch (only for
+    coins that already passed the 5m preconditions)."""
+    thresholds = config.get("thresholds") or {}
+    lookback = int(lane_cfg.get("mom_lookback_bars",
+                                thresholds.get("trendMomentumLookback", 72)))
+    mom_pct = float(lane_cfg.get("mom_pct",
+                                 thresholds.get("trendMomentumPct", 3.0)))
+    comp_bar = float(lane_cfg.get(
+        "comp_bar",
+        float((config.get("runner_entry_gate") or {}).get("min_composite", 30.0))))
+
+    if len(candles) < lookback + 1:
+        return None
+    try:
+        _start = float(candles[-lookback - 1].c)
+        _end = float(candles[-1].c)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if _start <= 0:
+        return None
+    net = (_end - _start) / _start * 100
+    if net > -mom_pct:
+        return None
+    if score < comp_bar:
+        return None
+    # The dn arm must have been evaluated (not insufficient_history) — the
+    # net rule above already carries the direction; this just keeps the
+    # probe honest about arm presence.
+    dn_hit = next((h for h in hits if h["name"] == "downtrendMomentum"), None)
+    if dn_hit is None or dn_hit.get("reason") == "insufficient_history":
+        return None
+
+    fast_p = int(lane_cfg.get("ema_fast", 8))
+    slow_p = int(lane_cfg.get("ema_slow", 21))
+    # 40 bars = ~160h: EMA21's first-value seed bias decays to ~2% by bar 40,
+    # and both EMAs share the same seed so the COMPARISON is what matters.
+    _c4 = _fetch_candles_sync(coin, "4h", fast_p + slow_p + 11,
+                              config["scan"].get("cacheTtlMs4h", 900_000))
+    if not _c4 or len(_c4) < slow_p + 5:
+        return None  # data gap = no opinion (a gap can never admit a shadow)
+    try:
+        closes4 = [float(c.c) for c in _c4 if float(c.c) > 0]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(closes4) < slow_p + 5:
+        return None
+    e_fast = _ema_fn(closes4, fast_p)
+    e_slow = _ema_fn(closes4, slow_p)
+    if math.isnan(e_fast[-1]) or math.isnan(e_slow[-1]):
+        return None
+    if not (e_fast[-1] < e_slow[-1]):
+        return None  # 4h trend not aligned down — not this lane
+    return {
+        "coin": coin,
+        "ts": int(time.time() * 1000),
+        "mid": mid,
+        "comp": round(score, 1),
+        "mom6h_net": round(net, 2),
+        "ema4h_fast": round(e_fast[-1], 8),
+        "ema4h_slow": round(e_slow[-1], 8),
+        "ema4h_pair": f"{fast_p}/{slow_p}",
+    }
 
 
 # ── Scan single market (returns result or (False, error)) ────────────────────
@@ -624,6 +744,17 @@ def _scan_single_market(
             return (True, None)
 
         score = trigger_mod.composite_score(hits, _score_weights)
+        # ALIGNED-SHORT lane shadow probe (board t_2e23804b) — runs BEFORE the
+        # hip3-prefilter drop and the composite gate return on purpose: the
+        # lane cohort must accrue whether or not the coin surfaces for research
+        # (conf rides the line later IF-asked, coin+ts is the join key).
+        # Observer-only: appended probes never gate anything downstream.
+        _as_lane = config.get("aligned_short_lane") or {}
+        if bool(_as_lane.get("enabled", False)):
+            _as_probe = _aligned_short_probe(
+                market["coin"], candles, mid, score, hits, _as_lane, config)
+            if _as_probe:
+                _note_lane_candidate(_as_probe)
         # HIP-3 pre-research drop (2026-09-22): apply the executor's long-side
         # composite floor HERE so doomed candidates never pay a research cycle
         # (measured: 2,176 full research runs ended at that one gate). Short

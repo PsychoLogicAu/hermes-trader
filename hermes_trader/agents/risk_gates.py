@@ -2236,3 +2236,89 @@ def eval_all_gates(
             block_reasons.append(result.get("reason", key))
 
     return {"results": results, "blocked": blocked, "block_reasons": block_reasons}
+
+
+# ── ALIGNED-SHORT lane shadow emitter (board t_2e23804b) ────────────────────
+# Turn the per-scan probe records perception._aligned_short_probe collected
+# into `[aligned-short-lane][SHADOW] WOULD ADMIT` accrual lines — the lane's
+# ONLY live trace (no lane code touches entry/exit state; promotion is a
+# separate decision, priced by the counterfactual review off these lines).
+# Mirrors the quiet_tape SHADOW/ACC pattern: mode-gated at the caller, loud
+# warning line, join key = coin + ts.
+#
+# Cadence control: a coin grinding down stays a candidate across MANY scans
+# (~90s apart), so an un-filtered emit would print dozens of clones per
+# episode. Re-entry cooldown per coin (default 180 min — the same COOLDOWN
+# the scratch/_optD2_walk.py cohort walk applies) keeps cadence in the
+# plausible 1-8/day range the accrual review assumes.
+_as_lane_last_emit: Dict[str, float] = {}
+
+
+def aligned_short_lane_emit(
+    candidates: List[Dict[str, Any]],
+    lane_cfg: Dict[str, Any],
+    *,
+    open_coins: set,
+    slots_used: int,
+    max_slots: int,
+    conf_by_coin: Dict[str, Optional[float]],
+) -> int:
+    """Emit the cycle's WOULD ADMIT lines. Returns the number emitted.
+
+    Shadow-v1 admission mirror (what a LIVE lane admit would have faced at
+    emit time): slots_used < max_slots (max_concurrent), no existing position
+    in the coin, per-coin re-entry cooldown. BTC tape is a LOG field only —
+    recorded, never a block in shadow v1. conf rides the line only if the
+    seat was actually asked this cycle (conf-if-asked).
+
+    Caller owns failure isolation (the trading loop wraps this in try/except);
+    internally a btc_tape data gap degrades to `btc_tape=n/a`, never a skip.
+    """
+    if not candidates or not bool((lane_cfg or {}).get("enabled", False)):
+        return 0
+    cooldown_ms = float(lane_cfg.get("reentry_cooldown_min", 180.0)) * 60_000
+    now_ms = int(time.time() * 1000)
+
+    tape = None
+    try:
+        from hermes_trader.agents.market_regime import btc_tape_activity
+        tape = btc_tape_activity()
+    except Exception:
+        tape = None
+    tape_s = (f"vol{tape['vol']:+.2f}%/drift{tape['drift']:+.2f}%"
+              if tape else "n/a")
+
+    emitted = 0
+    for cand in candidates:
+        coin = str(cand.get("coin") or "")
+        if not coin:
+            continue
+        if coin in (open_coins or set()):
+            logger.debug(f"[aligned-short-lane] {coin} skipped: position open")
+            continue
+        if slots_used >= max_slots:
+            logger.debug(
+                f"[aligned-short-lane] {coin} skipped: slots "
+                f"{slots_used}/{max_slots} full")
+            continue
+        _last = _as_lane_last_emit.get(coin, 0.0)
+        if now_ms - _last < cooldown_ms:
+            logger.debug(f"[aligned-short-lane] {coin} skipped: cooldown")
+            continue
+        if coin in conf_by_coin:
+            _cf = conf_by_coin[coin]
+            conf_s = f"conf={_cf:.2f}" if _cf is not None else "conf=n/a"
+        else:
+            conf_s = "conf=n/a(not-asked)"
+        logger.warning(
+            f"[aligned-short-lane][SHADOW] WOULD ADMIT {coin} SHORT "
+            f"ts={cand.get('ts')} mid={cand.get('mid')} comp={cand.get('comp')} "
+            f"mom6h_net={float(cand.get('mom6h_net', 0)):+.1f}% "
+            f"ema4h={cand.get('ema4h_pair')} "
+            f"{cand.get('ema4h_fast'):.6g}<{cand.get('ema4h_slow'):.6g} "
+            f"btc_tape={tape_s} {conf_s} slots={slots_used}/{max_slots} "
+            f"— NOT admitting (shadow v1; exit mirror max_loss 5 / protect 1 / "
+            f"retrace .25 / breach 2 / stale 720m priced off-line)")
+        _as_lane_last_emit[coin] = now_ms
+        emitted += 1
+    return emitted
