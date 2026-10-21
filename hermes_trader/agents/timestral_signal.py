@@ -209,6 +209,14 @@ class TimestralSignal:
     # four with one code path. None on every failure path.
     q10_path_pct: Optional[List[float]] = None
     q90_path_pct: Optional[List[float]] = None
+    # Wider-knot paths (2026-10-21 accrual): the 0.05/0.95 knots these
+    # 21-level checkpoints natively report but no tail gate has ever
+    # consumed. Same %-vs-context_last contract as the q10/q90 paths.
+    # None on every failure path, and None for any checkpoint whose grid
+    # has no knot at ~0.05/0.95 (the value guard — timesfm/tirex grids
+    # top out at 0.1/0.9 and their modules do not carry these fields).
+    q05_path_pct: Optional[List[float]] = None
+    q95_path_pct: Optional[List[float]] = None
 
 
 # ── Per-coin cache (TTL-based) ────────────────────────────────────────────────
@@ -311,6 +319,10 @@ def _forecast_from_candles(
         idx_low = _find_quantile_index(levels, 0.1)
         idx_med = _find_quantile_index(levels, 0.5)
         idx_high = _find_quantile_index(levels, 0.9)
+        # Wide-knot columns only if the grid genuinely reports ~0.05/0.95
+        # (value guard, same anti-mislabelling logic as p10/p50/p90).
+        _wl, _wh = _find_quantile_index(levels, 0.05), _find_quantile_index(levels, 0.95)
+        _wide_ok = abs(levels[_wl] - 0.05) <= 0.005 and abs(levels[_wh] - 0.95) <= 0.005
 
         # Path averages — same reduction chronos/timesfm/tirex use, so
         # median_pct / spread_pct are directly comparable across all four.
@@ -321,6 +333,12 @@ def _forecast_from_candles(
                         ((q[:, idx_low] - last_close) / last_close * 100)]
         q90_path_pct = [float(v) for v in
                         ((q[:, idx_high] - last_close) / last_close * 100)]
+        q05_path_pct = ([float(v) for v in
+                         ((q[:, _wl] - last_close) / last_close * 100)]
+                        if _wide_ok else None)
+        q95_path_pct = ([float(v) for v in
+                         ((q[:, _wh] - last_close) / last_close * 100)]
+                        if _wide_ok else None)
     except Exception as e:
         return _err(str(e), last_close)
 
@@ -341,6 +359,8 @@ def _forecast_from_candles(
         inference_ms=inference_ms,
         q10_path_pct=q10_path_pct,
         q90_path_pct=q90_path_pct,
+        q05_path_pct=q05_path_pct,
+        q95_path_pct=q95_path_pct,
     )
 
 
@@ -471,6 +491,18 @@ def confidence_ratio(sig: TimestralSignal) -> float:
 
 
 # ── Log formatting ────────────────────────────────────────────────────────────
+def _wide_tail_suffix(signal: TimestralSignal, k: int = 6) -> str:
+    """Compact wide-knot accrual suffix (see chronos_signal._wide_tail_suffix
+    — identical shape by design): min of the first K q05-path steps / max of
+    the first K q95-path steps. Timestral's 0.10/0.90 knots trip ~never at
+    X=2.5; this accrues the wider knots so a re-site decision rides on live
+    data. Log-only: nothing consumes it yet."""
+    lo, hi = signal.q05_path_pct, signal.q95_path_pct
+    if not lo or not hi or len(lo) < k or len(hi) < k:
+        return ""
+    return f" | wide_tail6(q05/q95)={min(lo[:k]):+.2f}%/{max(hi[:k]):+.2f}%"
+
+
 def _format_signal_log(
     signal: TimestralSignal, debug: bool, min_conf_ratio: float = 0.25
 ) -> str:
@@ -504,6 +536,7 @@ def _format_signal_log(
         f"spread={spread_str} horizon={signal.horizon} "
         f"{direction} {alignment}"
     )
+    base += _wide_tail_suffix(signal)
     if debug:
         base += (
             f" | q_low={signal.q_low:.4f} q_high={signal.q_high:.4f} "
