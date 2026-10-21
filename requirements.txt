@@ -22,6 +22,16 @@ tirex-ts==1.3.0
 # container; ships behind timestral_signal.enabled: false.
 timestral @ git+https://github.com/mistralai/timestral.git@a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff
 
+# TiRex-2 shadow signal (NX-AI successor of TiRex 1.1, Oct 2026). Not on
+# PyPI (0.4.0) — pinned to the exact commit the 2026-10-21 offline sweep
+# validated (scratch/eval/tirex2_sweep/); re-check for a tag at each rebuild.
+# Code AND weights Apache-2.0 (verified vs model card + dist-info). Deps
+# torch>=2.8/numpy>=2.1.3 satisfied by the container (torch 2.14.1/numpy
+# 2.5.4); flashrnn/mlstm_kernels install from PyPI and fall back to CPU
+# kernels (sweep ran CPU-only at 68ms/anchor). Ships behind
+# tirex2_signal.enabled: false.
+tirex-2 @ git+https://github.com/NX-AI/tirex-2.git@614f46fd7c60e332d8a32e525403b341c2c1ce1e
+
 # Dashboard + operator console (python -m hermes_trader.server)
 fastapi>=0.141
 uvicorn>=0.52

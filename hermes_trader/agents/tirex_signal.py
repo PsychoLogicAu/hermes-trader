@@ -22,8 +22,9 @@ SINGLETON SHARING: the model object is borrowed from `expert_pool`
 loaded TiRex (~284MB checkpoint). Same ownership pattern as expert_pool
 borrowing chronos_signal/timesfm_signal singletons, just pointed at tirex.
 
-LICENSE: NX-AI/TiRex weights are Apache-2.0 — no non-commercial caveat
-(unlike TimesFM-3); enabling is a pure perf decision.
+LICENSE: NX-AI/TiRex weights are under the NXAI Community License per the
+model card (https://huggingface.co/NX-AI/TiRex); check terms before any
+commercial-scale use — enabling is otherwise a pure perf decision.
 
 Config-driven via `.agent-config.json` under `tirex_signal`:
     tirex_signal:
