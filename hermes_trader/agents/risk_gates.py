@@ -2347,13 +2347,16 @@ def aligned_short_lane_emit(
         if (cand.get("lane") == "early_long" and "aligned" in variant
                 and not struct and tape is not None and tape["drift"] >= 0):
             antis.append("tapeup_only")
-        side = str(cand.get("side") or "SHORT")
+        # probe records carry lowercase short/long; the line + every
+        # downstream parse (test LINE_RE, review script) is UPPERCASE.
+        side = str(cand.get("side") or "short").upper()
         _f = float(cand.get("ema4h_fast", 0))
         _s = float(cand.get("ema4h_slow", 0))
+        _f1 = float(cand.get("ema1d_fast", 0))
+        _s1 = float(cand.get("ema1d_slow", 0))
         ema1d_s = ("n/a" if side == "SHORT" else
-                   f"{cand.get('ema1d_pair')}:"
-                   f"{float(cand.get('ema1d_fast', 0)):.6g}>"
-                   f"{float(cand.get('ema1d_slow', 0)):.6g}")
+                   f"{cand.get('ema1d_pair')}"
+                   f":{_f1:.6g}{'>' if _f1 > _s1 else '<'}{_s1:.6g}")
         logger.warning(
             f"[aligned-short-lane][SHADOW] WOULD ADMIT {coin} {side} "
             f"ts={cand.get('ts')} mid={cand.get('mid')} comp={cand.get('comp')} "

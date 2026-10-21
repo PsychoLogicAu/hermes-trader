@@ -429,7 +429,7 @@ class TestEmit:
         assert m.group(9) == ">"          # 4h fast ABOVE slow (4hT long)
         assert m.group(15) == "early_long"
         assert m.group(16) == "momhi_1dF"
-        assert m.group(19) == "8/21:7.8>8.2"
+        assert m.group(19) == "8/21:7.8<8.2"  # 1d fast BELOW slow (1dF)
         assert m.group(20) == "-"
         assert m.group(21) == "-4.20%"
         assert "conf=n/a(not-asked)" in line
@@ -566,3 +566,66 @@ class TestLanePriority:
 def re_match(line):
     import re
     return re.match(LINE_RE, line)
+
+
+# ── integration: RAW probe record -> emit line ──────────────────────────────
+# In production the emitter's input is exactly what the probe returns
+# (lowercase side, no ema1d fields on shorts). The fixture classes above
+# hand-build records, so they cannot catch a producer/consumer shape drift
+# (a lowercase side reaching the line would break the review script's
+# (SHORT|LONG) parse and the ema1d n/a guard). Feed the REAL probe output
+# through the REAL emitter and assert the accrued line parses.
+
+class TestProbeToEmitIntegration:
+    def setup_method(self):
+        risk_gates._as_lane_last_emit.clear()
+
+    def _lines(self, caplog):
+        return [r.getMessage() for r in caplog.records
+                if "WOULD ADMIT" in r.getMessage()]
+
+    def test_probe_short_record_emits_parseable_line(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            perception, "_fetch_candles_sync",
+            lambda coin, interval, count, ttl: _closes_candles(
+                [200.0 - i for i in range(40)], step=14_400_000))
+        closes = [100.0] * 100
+        closes[-1] = 95.0
+        rec = perception._aligned_short_probe(
+            "TESTC", _closes_candles(closes), 97.5, 35.0, [_dn_hit(-5.0)],
+            {"enabled": True}, _scan_config())
+        assert rec is not None and rec["side"] == "short"  # lowercase producer
+        assert "ema1d_pair" not in rec
+        assert _emit_lane(monkeypatch, caplog, cands=[rec],
+                          conf={"TESTC": 0.66}) == 1
+        line = self._lines(caplog)[0]
+        m = re_match(line)
+        assert m, line
+        assert m.group(2) == "SHORT"           # normalized on the line
+        assert m.group(15) == "aligned_short"
+        assert m.group(19) == "n/a"            # short: no 1d fetch, honest n/a
+
+    def test_probe_long_record_emits_parseable_line(self, monkeypatch, caplog):
+        def fake(coin, interval, count, ttl):
+            if interval == "4h":
+                return _closes_candles([100.0 - i for i in range(40)],
+                                       step=14_400_000)
+            if interval == "1d":
+                return _closes_candles([200.0 - i for i in range(40)],
+                                       step=86_400_000)
+            return None
+        monkeypatch.setattr(perception, "_fetch_candles_sync", fake)
+        closes = [100.0] * 100
+        closes[-1] = 107.0
+        rec = perception._aligned_short_probe(
+            "TESTC", _closes_candles(closes), 107.0, 35.0, [_up_hit(7.0)],
+            {"enabled": True, "early_long_enabled": True}, _scan_config())
+        assert rec is not None and rec["side"] == "long"
+        assert _emit_lane(monkeypatch, caplog, cands=[rec], conf={}) == 1
+        line = self._lines(caplog)[0]
+        m = re_match(line)
+        assert m, line
+        assert m.group(2) == "LONG"
+        assert m.group(15) == "early_long" and m.group(16) == "momhi_1dF"
+        assert "<" in m.group(19)              # 1dF: fast below slow
+        assert "btc_tape_drift=" in line and "lane_priority=short_first#1" in line
