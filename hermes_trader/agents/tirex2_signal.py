@@ -121,20 +121,30 @@ def _load_model(model_id: str, device: str) -> Any:
     the first-ever load also downloads the ~330MB checkpoint into the
     hf-cache volume (warm from cache <1s).
 
-    NO-COMPILE READ PATH (verified 2026-10-21 in the prod image): the
-    container image has no C++ compiler, and two tirex2 model components
-    carry bare @torch.compile decorators (ResidualBlock, flex-attention)
-    that raise InductorError at call time without one. Two knobs keep the
-    whole path eager — `use_flex_attention=False` swaps the flex kernel for
-    torch SDPA (same attention semantics), and torch._dynamo.config.disable
-    neutralizes the decorators. The flag is torch-global and set only here
-    (once per process, when this module first loads a model): no other
-    torch user in the bot torch.compiles, so the blast radius is nil. The
-    2026-10-21 host sweep ran WITH inductor compile at 68ms/anchor; the
-    eager path is re-measured in the scratch container and must stay within
-    the same order before enabling (see board t_f02823ab addendum).
+    NO-COMPILE READ PATH (re-verified 2026-10-21 after the InvalidCxxCompiler
+    outage): the container image has no C++ compiler, and two tirex2 model
+    components carry bare @torch.compile decorators (ResidualBlock,
+    flex-attention) that raise InductorError at call time without one.
+    `use_flex_attention=False` swaps the flex kernel for torch SDPA (same
+    attention semantics). For the decorators, the PROD guard is the env var
+    TORCHDYNAMO_DISABLE=1 (docker-compose environment): setting
+    torch._dynamo.config.disable = True in-process proved UNRELIABLE on
+    torch 2.14.1 — probes in the prod image showed it bypasses
+    @torch.compile frames called on the MAIN thread, but worker threads
+    (every forecast runs on a fresh daemon thread) still entered inductor
+    and died with InvalidCxxCompiler (the 14:25-21:15 UTC outage, ~1.4k
+    errored accrual lines). The env is read at torch import, before any
+    thread exists, and held across fresh-thread forecasts. The assignment
+    below stays only as defense-in-depth for bare invocations that forget
+    the env — do NOT rely on it. No other torch user in the bot
+    torch.compiles, so the process-wide disable has nil blast radius. Eager
+    cost measured in the prod image 2026-10-21: 166-554ms per single-series
+    50-candle forecast — same order as the compiled sweep's 68ms/anchor
+    (batched), well inside timeout_seconds.
     """
     import torch  # lazy: keeps the module importable without torch present
+    # Defense-in-depth ONLY — unreliable for worker threads on torch
+    # 2.14.1; TORCHDYNAMO_DISABLE=1 in docker-compose is the guard.
     torch._dynamo.config.disable = True
     from tirex2 import load_model
     return load_model(model_id, device=device, use_flex_attention=False)

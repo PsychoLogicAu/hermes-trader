@@ -44,6 +44,16 @@ services:
       # Decision-voice shadow log — same reason (clef-gate accrual join reads
       # this after recreates).
       - HERMES_DV_FILE=/app/dv-logs/hermes-trader-dv.jsonl
+      # Eager-torch guard (2026-10-21): the image has no C++ compiler, so any
+      # torch.compile attempt dies with InvalidCxxCompiler. tirex2's in-proc
+      # torch._dynamo.config.disable assignment is NOT reliable on worker
+      # threads under torch 2.14.1 (probes in the prod image: main-thread
+      # calls bypass, fresh-thread calls still enter inductor — and every
+      # signal forecast runs on a fresh daemon thread). This env is read at
+      # torch import, before any thread exists; verified to hold across
+      # fresh-thread tirex2 forecasts. Blast radius nil: no other torch user
+      # in the bot torch.compiles.
+      - TORCHDYNAMO_DISABLE=1
     networks:
       - llama-net
     restart: unless-stopped
