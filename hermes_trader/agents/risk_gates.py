@@ -2238,13 +2238,18 @@ def eval_all_gates(
     return {"results": results, "blocked": blocked, "block_reasons": block_reasons}
 
 
-# ── ALIGNED-SHORT lane shadow emitter (board t_2e23804b) ────────────────────
+# ── Lane shadow emitter: ALIGNED-SHORT + EARLY-LONG (board t_2e23804b) ─────
 # Turn the per-scan probe records perception._aligned_short_probe collected
 # into `[aligned-short-lane][SHADOW] WOULD ADMIT` accrual lines — the lane's
 # ONLY live trace (no lane code touches entry/exit state; promotion is a
 # separate decision, priced by the counterfactual review off these lines).
 # Mirrors the quiet_tape SHADOW/ACC pattern: mode-gated at the caller, loud
 # warning line, join key = coin + ts.
+# SPEC ADDENDUM (review round-1) fields on every line: lane/variant (both
+# sides tagged), ema4h_dist + bucket (nearx = the anti band, recorded not
+# blocking), struct_flags, btc_tape_drift, anti= tags, and lane_priority
+# (mode#rank — slot order across the two lanes is explicit per line; cell
+# P/L is book-order-dependent, so the accrual replays books under each mode).
 #
 # Cadence control: a coin grinding down stays a candidate across MANY scans
 # (~90s apart), so an un-filtered emit would print dozens of clones per
@@ -2266,10 +2271,21 @@ def aligned_short_lane_emit(
     """Emit the cycle's WOULD ADMIT lines. Returns the number emitted.
 
     Shadow-v1 admission mirror (what a LIVE lane admit would have faced at
-    emit time): slots_used < max_slots (max_concurrent), no existing position
-    in the coin, per-coin re-entry cooldown. BTC tape is a LOG field only —
+    emit time): slots_used + this-cycle's already-emitted admits <
+    max_slots (max_concurrent), no existing position in the coin, per-coin
+    re-entry cooldown. Candidates are WALKED in lane_priority order —
+    short_first (default: the proven cell books first) | long_first |
+    composite — so when slots bind, the slot goes to the top-ranked line;
+    lane_priority=<mode>#<rank> names the mode and the candidate's rank in
+    this cycle's ordering (rank is among ALL candidates, so skipped lines
+    leave gaps — honest book order). BTC tape is a LOG field only —
     recorded, never a block in shadow v1. conf rides the line only if the
     seat was actually asked this cycle (conf-if-asked).
+
+    Anti-rules are RECORDED in anti=, never blocking: nearx (the near-cross
+    bucket) and tapeup_only (an aligned early-long with NO struct support
+    while BTC 24h drift >= 0 — the tapeup-only anti-cell from the
+    early-upswing decomp).
 
     Caller owns failure isolation (the trading loop wraps this in try/except);
     internally a btc_tape data gap degrades to `btc_tape=n/a`, never a skip.
@@ -2278,6 +2294,9 @@ def aligned_short_lane_emit(
         return 0
     cooldown_ms = float(lane_cfg.get("reentry_cooldown_min", 180.0)) * 60_000
     now_ms = int(time.time() * 1000)
+    mode = str((lane_cfg or {}).get("lane_priority", "short_first"))
+    if mode not in ("short_first", "long_first", "composite"):
+        mode = "short_first"
 
     tape = None
     try:
@@ -2287,19 +2306,29 @@ def aligned_short_lane_emit(
         tape = None
     tape_s = (f"vol{tape['vol']:+.2f}%/drift{tape['drift']:+.2f}%"
               if tape else "n/a")
+    drift_s = f"{tape['drift']:+.2f}%" if tape else "n/a"
+
+    def _prio(c: Dict[str, Any]):
+        _comp = -float(c.get("comp") or 0.0)
+        if mode == "composite":
+            return (0, _comp, str(c.get("coin")))
+        rank = 0 if c.get("lane") == "aligned_short" else 1
+        if mode == "long_first":
+            rank = 1 - rank
+        return (rank, _comp, str(c.get("coin")))
 
     emitted = 0
-    for cand in candidates:
+    for rank, cand in enumerate(sorted(candidates, key=_prio), 1):
         coin = str(cand.get("coin") or "")
         if not coin:
             continue
         if coin in (open_coins or set()):
             logger.debug(f"[aligned-short-lane] {coin} skipped: position open")
             continue
-        if slots_used >= max_slots:
+        if slots_used + emitted >= max_slots:
             logger.debug(
                 f"[aligned-short-lane] {coin} skipped: slots "
-                f"{slots_used}/{max_slots} full")
+                f"{slots_used + emitted}/{max_slots} full")
             continue
         _last = _as_lane_last_emit.get(coin, 0.0)
         if now_ms - _last < cooldown_ms:
@@ -2310,13 +2339,37 @@ def aligned_short_lane_emit(
             conf_s = f"conf={_cf:.2f}" if _cf is not None else "conf=n/a"
         else:
             conf_s = "conf=n/a(not-asked)"
+        variant = cand.get("variant") or []
+        struct = cand.get("struct_flags") or []
+        antis = []
+        if cand.get("ema4h_bucket") == "nearx":
+            antis.append("nearx")
+        if (cand.get("lane") == "early_long" and "aligned" in variant
+                and not struct and tape is not None and tape["drift"] >= 0):
+            antis.append("tapeup_only")
+        # probe records carry lowercase short/long; the line + every
+        # downstream parse (test LINE_RE, review script) is UPPERCASE.
+        side = str(cand.get("side") or "short").upper()
+        _f = float(cand.get("ema4h_fast", 0))
+        _s = float(cand.get("ema4h_slow", 0))
+        _f1 = float(cand.get("ema1d_fast", 0))
+        _s1 = float(cand.get("ema1d_slow", 0))
+        ema1d_s = ("n/a" if side == "SHORT" else
+                   f"{cand.get('ema1d_pair')}"
+                   f":{_f1:.6g}{'>' if _f1 > _s1 else '<'}{_s1:.6g}")
         logger.warning(
-            f"[aligned-short-lane][SHADOW] WOULD ADMIT {coin} SHORT "
+            f"[aligned-short-lane][SHADOW] WOULD ADMIT {coin} {side} "
             f"ts={cand.get('ts')} mid={cand.get('mid')} comp={cand.get('comp')} "
             f"mom6h_net={float(cand.get('mom6h_net', 0)):+.1f}% "
             f"ema4h={cand.get('ema4h_pair')} "
-            f"{cand.get('ema4h_fast'):.6g}<{cand.get('ema4h_slow'):.6g} "
+            f"{_f:.6g}{'<' if _f < _s else '>'}{_s:.6g} "
             f"btc_tape={tape_s} {conf_s} slots={slots_used}/{max_slots} "
+            f"lane={cand.get('lane')} variant={','.join(variant) or '-'} "
+            f"ema4h_dist={float(cand.get('ema4h_dist_pct', 0)):+.3f}% "
+            f"ema4h_dist_bucket={cand.get('ema4h_bucket') or 'n/a'} "
+            f"ema1d={ema1d_s} struct_flags={','.join(struct) or '-'} "
+            f"btc_tape_drift={drift_s} anti={','.join(antis) or '-'} "
+            f"lane_priority={mode}#{rank} "
             f"— NOT admitting (shadow v1; exit mirror max_loss 5 / protect 1 / "
             f"retrace .25 / breach 2 / stale 720m priced off-line)")
         _as_lane_last_emit[coin] = now_ms
