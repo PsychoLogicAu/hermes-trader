@@ -164,26 +164,45 @@ def _hip3_prefilter_verdict(score: float, hits: List[Any], market: Dict[str, Any
     return (True, bool(pf.get("shadow_mode", False)))
 
 
-# ── ALIGNED-SHORT lane shadow probe (board t_2e23804b) ──────────────────────
-# A dn-momentum selloff ALIGNED with the 4h trend (ema8(4h) < ema21(4h)) is a
-# candidate SHORT the live path never admits (it opens no lane here). The
-# accrual question — would the live DSL exit mirror (max_loss 5 / protect 1 /
-# retrace .25 / breach n=2 / stale 720m, per scratch/_optD2_walk.py books:
-# NOTIONAL 316.86, FEE_RT 0.017) make money on this cohort? — is priced
-# offline by joining the WOULD ADMIT lines to 5m history. So the probe here is
-# pure observer plumbing, mirroring the data-gap counter pattern: the scan
-# thread appends candidate records to a lock-guarded list; the trading loop
-# takes them after scan_once and risk_gates.aligned_short_lane_emit turns them
-# into [aligned-short-lane][SHADOW] lines with the live slot/position/conf
-# context. Surfacing/research/execution bytes are UNTOUCHED — the probe never
-# gates or bypasses anything, and it only pays its one extra 4h-candle fetch
-# for coins that already pass the cheap 5m preconditions (~1-8/day).
+# ── Lane shadow probe: ALIGNED-SHORT + EARLY-LONG tag variant ───────────────
+# (board t_2e23804b; SPEC ADDENDUM 2026-10-22, review round-1)
+# The probe evaluates BOTH sides of the lane family and rides the records on
+# a side channel, with cut attributes so the accrual arbitrates sub-rules
+# across regimes:
+#   lane=aligned_short (the proven cell, entry rule UNCHANGED): dn-momentum
+#   selloff (6h close-to-close net <= -mom_pct, momentum-shadow semantics)
+#   ALIGNED with the 4h trend (ema8(4h) < ema21(4h)) — a SHORT the live path
+#   never admits.
+#   lane=early_long (TAG variant, tagged not filtered): up arm evaluated and
+#   6h net >= +mom_pct and composite >= bar. The promising cells from the
+#   early-upswing decomp are recorded in `variant` (momhi_1dF = 1d not
+#   bullish + net >= +mom_hi; struct_1dT = 1d bullish + 1h-structure flags
+#   fired; aligned = fully aligned 4hT+1dT); rows matching none ride as
+#   other_upfired. Anti-rules (nearx bucket, tapeup-only aligned longs) are
+#   RECORDED at emit time, never a block in shadow v1.
+# The accrual question — would the live DSL exit mirror (max_loss 5 /
+# protect 1 / retrace .25 / breach n=2 / stale 720m, per scratch/_optD2_walk
+# books: NOTIONAL 316.86, FEE_RT 0.017) make money on these cohorts, in
+# which slot order? — is priced offline by joining the WOULD ADMIT lines to
+# 5m history (lane_priority on the line fixes the slot-order question).
+# Observer plumbing, mirroring the data-gap counter pattern: the scan thread
+# appends candidate records to a lock-guarded list; the trading loop takes
+# them after scan_once and risk_gates.aligned_short_lane_emit turns them into
+# [aligned-short-lane][SHADOW] lines with the live slot/position/conf
+# context. Surfacing/research/execution bytes are UNTOUCHED — the probe
+# never gates or bypasses anything, and it pays its extra 4h/1d candle
+# fetches only for coins that already pass the cheap 5m preconditions.
 _lane_lock = threading.Lock()
 _lane_candidates: List[Dict[str, Any]] = []
 
+# The 1h-structure flags that define the pullback-in-1d-uptrend early-long
+# cell (parent t_757ed56a decomp 2026-10-22). Names are the trigger-engine
+# hits; higherLows1h carries weight 0 but is still evaluated.
+_LANE_STRUCT_FLAGS = ("higherLows1h", "trendFlip1h", "volumeBuildup1h")
+
 
 def take_aligned_short_lane_candidates() -> List[Dict[str, Any]]:
-    """Drain and return this scan's ALIGNED-SHORT lane candidate probes."""
+    """Drain and return this scan's lane candidate probes (both lanes)."""
     with _lane_lock:
         out = list(_lane_candidates)
         _lane_candidates.clear()
@@ -204,29 +223,45 @@ def _aligned_short_probe(
     lane_cfg: Dict[str, Any],
     config: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    """Evaluate ONE aligned-short lane candidate. None = not a candidate.
+    """Evaluate ONE lane candidate probe. None = no candidate / no opinion.
 
-    Entry-candidate semantics (shadow v1, task-specified):
-      dn arm per momentum-shadow semantics — 6h close-to-close net
-      (same primitive the [momentum-shadow] line uses, _sustained_move_pct
-      over trendMomentumLookback bars) <= -mom_pct. Deliberately NOT the
-      arm's live fired flag: momentum_theilsen is LIVE, so `fired` answers
-      with the Theil-Sen scalar, while the lane cohort is defined by the
-      net rule the accrual scripts price.
-      ema8(4h) < ema21(4h) on the 4h closes as fetched (last bar is the
-      forming one — the live read at scan time; the review re-derives both
-      EMAs from the logged values anyway, so both ride the probe).
-      composite >= comp_bar (default: runner_entry_gate.min_composite).
+    Shared cheap stage (5m only): 6h close-to-close net (same primitive the
+    [momentum-shadow] line uses, _sustained_move_pct over trendMomentumLook-
+    back bars — deliberately NOT the arm's live fired flag: momentum_theil-
+    sen is LIVE, so `fired` answers with the Theil-Sen scalar, while the lane
+    cohort is defined by the net rule the accrual scripts price), composite
+    >= comp_bar, and the relevant arm EVALUATED (not insufficient_history —
+    keeps the probe honest about arm presence; the net rule carries the
+    direction).
+
+      side=short  -> lane=aligned_short, gated on ema8(4h) < ema21(4h)
+                     (4h closes as fetched; last bar is the forming one —
+                     the live read at scan time; the review re-derives both
+                     EMAs from the logged values anyway, so both ride).
+      side=long   -> lane=early_long, only when lane_cfg early_long_enabled
+                     (code default OFF: a code deploy stays byte-identical
+                     until the config flip). TAGGED not filtered: variant
+                     tags the matched cells, everything else accrues as
+                     other_upfired. Needs the 1d EMAs (same fast/slow pair) —
+                     this branch alone pays the 1d fetch.
+
+    Attributes on every record: ema4h_dist_pct (signed, (f-s)/s*100) and
+    ema4h_bucket (deep = |dist| >= nearx_band_pct (0.7), nearx = the
+    anti-cell near-cross band — recorded, never blocked).
+
     BTC tape is a LOG field, not a block, in shadow v1 — btc_tape_activity()
     is read by the emitter, not here.
 
-    Pure w.r.t. everything but the one TTL-cached 4h candle fetch (only for
-    coins that already passed the 5m preconditions)."""
+    Pure w.r.t. everything but the TTL-cached 4h (both sides) and 1d
+    (early-long only) candle fetches — only for coins that already passed
+    the 5m preconditions."""
     thresholds = config.get("thresholds") or {}
     lookback = int(lane_cfg.get("mom_lookback_bars",
                                 thresholds.get("trendMomentumLookback", 72)))
     mom_pct = float(lane_cfg.get("mom_pct",
                                  thresholds.get("trendMomentumPct", 3.0)))
+    mom_hi = float(lane_cfg.get("mom_hi_pct", 6.0))
+    nearx_band = float(lane_cfg.get("nearx_band_pct", 0.7))
     comp_bar = float(lane_cfg.get(
         "comp_bar",
         float((config.get("runner_entry_gate") or {}).get("min_composite", 30.0))))
@@ -241,23 +276,25 @@ def _aligned_short_probe(
     if _start <= 0:
         return None
     net = (_end - _start) / _start * 100
-    if net > -mom_pct:
-        return None
     if score < comp_bar:
         return None
-    # The dn arm must have been evaluated (not insufficient_history) — the
-    # net rule above already carries the direction; this just keeps the
-    # probe honest about arm presence.
+
     dn_hit = next((h for h in hits if h["name"] == "downtrendMomentum"), None)
-    if dn_hit is None or dn_hit.get("reason") == "insufficient_history":
+    up_hit = next((h for h in hits if h["name"] == "uptrendMomentum"), None)
+    if net <= -mom_pct and dn_hit is not None and dn_hit.get("reason") != "insufficient_history":
+        side = "short"
+    elif (net >= mom_pct and bool(lane_cfg.get("early_long_enabled", False))
+          and up_hit is not None and up_hit.get("reason") != "insufficient_history"):
+        side = "long"
+    else:
         return None
 
     fast_p = int(lane_cfg.get("ema_fast", 8))
     slow_p = int(lane_cfg.get("ema_slow", 21))
+    _ttl = config["scan"].get("cacheTtlMs4h", 900_000)
     # 40 bars = ~160h: EMA21's first-value seed bias decays to ~2% by bar 40,
     # and both EMAs share the same seed so the COMPARISON is what matters.
-    _c4 = _fetch_candles_sync(coin, "4h", fast_p + slow_p + 11,
-                              config["scan"].get("cacheTtlMs4h", 900_000))
+    _c4 = _fetch_candles_sync(coin, "4h", fast_p + slow_p + 11, _ttl)
     if not _c4 or len(_c4) < slow_p + 5:
         return None  # data gap = no opinion (a gap can never admit a shadow)
     try:
@@ -270,18 +307,61 @@ def _aligned_short_probe(
     e_slow = _ema_fn(closes4, slow_p)
     if math.isnan(e_fast[-1]) or math.isnan(e_slow[-1]):
         return None
-    if not (e_fast[-1] < e_slow[-1]):
-        return None  # 4h trend not aligned down — not this lane
-    return {
+    dist_pct = (e_fast[-1] - e_slow[-1]) / e_slow[-1] * 100.0
+    rec = {
         "coin": coin,
         "ts": int(time.time() * 1000),
         "mid": mid,
         "comp": round(score, 1),
+        "side": side,
         "mom6h_net": round(net, 2),
         "ema4h_fast": round(e_fast[-1], 8),
         "ema4h_slow": round(e_slow[-1], 8),
         "ema4h_pair": f"{fast_p}/{slow_p}",
+        "ema4h_dist_pct": round(dist_pct, 3),
+        "ema4h_bucket": "nearx" if abs(dist_pct) < nearx_band else "deep",
     }
+
+    if side == "short":
+        if not (e_fast[-1] < e_slow[-1]):
+            return None  # 4h trend not aligned down — not this lane
+        rec["lane"] = "aligned_short"
+        rec["variant"] = ["aligned_dn4h"]
+        return rec
+
+    # early_long: 1d EMAs decide the variant cells (this branch pays the fetch)
+    _c1d = _fetch_candles_sync(coin, "1d", fast_p + slow_p + 11, _ttl)
+    if not _c1d or len(_c1d) < slow_p + 5:
+        return None  # data gap = no opinion
+    try:
+        closes1d = [float(c.c) for c in _c1d if float(c.c) > 0]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(closes1d) < slow_p + 5:
+        return None
+    f1 = _ema_fn(closes1d, fast_p)
+    s1 = _ema_fn(closes1d, slow_p)
+    if math.isnan(f1[-1]) or math.isnan(s1[-1]):
+        return None
+    struct = [h["name"] for h in hits
+              if h["name"] in _LANE_STRUCT_FLAGS and h.get("fired")]
+    bull1d = f1[-1] > s1[-1]
+    variant: List[str] = []
+    if not bull1d and net >= mom_hi:
+        variant.append("momhi_1dF")
+    if bull1d and struct:
+        variant.append("struct_1dT")
+    if bull1d and e_fast[-1] > e_slow[-1]:
+        variant.append("aligned")
+    rec.update({
+        "lane": "early_long",
+        "variant": variant or ["other_upfired"],  # TAGGED, not filtered
+        "ema1d_fast": round(f1[-1], 8),
+        "ema1d_slow": round(s1[-1], 8),
+        "ema1d_pair": f"{fast_p}/{slow_p}",
+        "struct_flags": struct,
+    })
+    return rec
 
 
 # ── Scan single market (returns result or (False, error)) ────────────────────
