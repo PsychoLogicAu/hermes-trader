@@ -178,6 +178,13 @@ class ChronosSignal:
     # it; None on every failure path (old caches, errors, disabled).
     q10_path_pct: Optional[List[float]] = None
     q90_path_pct: Optional[List[float]] = None
+    # Wider-knot paths (2026-10-21 accrual): Chronos-2's native grid carries
+    # 0.01..0.99 (21 knots); the tail gate has only ever tripped on
+    # 0.10/0.90. Expose 0.05/0.95 (same %-vs-context_last contract) so the
+    # accrual lines can price a wider-knot re-site without a model change.
+    # None on every failure path and for grids with no knot at ~0.05/0.95.
+    q05_path_pct: Optional[List[float]] = None
+    q95_path_pct: Optional[List[float]] = None
 
 
 # ── Per-coin cache (TTL-based) ────────────────────────────────────────────────
@@ -249,6 +256,13 @@ def _forecast_from_candles(
     idx_low = _find_quantile_index(model_quantiles, q_target_low)
     idx_med = _find_quantile_index(model_quantiles, q_target_med)
     idx_high = _find_quantile_index(model_quantiles, q_target_high)
+    # Wide-knot columns only if the grid genuinely reports ~0.05/0.95
+    # (value guard; Chronos-2's 21-knot grid does, but a checkpoint swap
+    # to a coarser grid must not silently mislabel neighbouring columns).
+    _wl = _find_quantile_index(model_quantiles, 0.05)
+    _wh = _find_quantile_index(model_quantiles, 0.95)
+    _wide_ok = (abs(float(model_quantiles[_wl]) - 0.05) <= 0.005
+                and abs(float(model_quantiles[_wh]) - 0.95) <= 0.005)
 
     try:
         start = time.time()
@@ -276,6 +290,12 @@ def _forecast_from_candles(
                         ((f[0, idx_low, :] - last_close) / last_close * 100).tolist()]
         q90_path_pct = [float(v) for v in
                         ((f[0, idx_high, :] - last_close) / last_close * 100).tolist()]
+        q05_path_pct = ([float(v) for v in
+                         ((f[0, _wl, :] - last_close) / last_close * 100).tolist()]
+                        if _wide_ok else None)
+        q95_path_pct = ([float(v) for v in
+                         ((f[0, _wh, :] - last_close) / last_close * 100).tolist()]
+                        if _wide_ok else None)
     except torch.cuda.OutOfMemoryError as e:
         return ChronosSignal(
             coin=coin, side=side, context_last=last_close,
@@ -312,6 +332,8 @@ def _forecast_from_candles(
         inference_ms=inference_ms,
         q10_path_pct=q10_path_pct,
         q90_path_pct=q90_path_pct,
+        q05_path_pct=q05_path_pct,
+        q95_path_pct=q95_path_pct,
     )
 
 
@@ -431,6 +453,18 @@ def confidence_ratio(sig: ChronosSignal) -> float:
 
 
 # ── Async daemon wrapper (the entry point) ────────────────────────────────────
+def _wide_tail_suffix(signal: ChronosSignal, k: int = 6) -> str:
+    """Compact wide-knot accrual suffix: min of the first K q05-path steps /
+    max of the first K q95-path steps — exactly how the tail gates judge
+    tails, so these numbers are directly comparable with the chronos/
+    tirex/timestral WOULD-HAVE-BLOCKED reasons. Empty when no wide paths
+    (error signal, coarser grid). Log-only: nothing consumes it yet."""
+    lo, hi = signal.q05_path_pct, signal.q95_path_pct
+    if not lo or not hi or len(lo) < k or len(hi) < k:
+        return ""
+    return f" | wide_tail6(q05/q95)={min(lo[:k]):+.2f}%/{max(hi[:k]):+.2f}%"
+
+
 def _format_signal_log(
     signal: ChronosSignal, debug: bool, min_conf_ratio: float = 0.25
 ) -> str:
@@ -463,6 +497,7 @@ def _format_signal_log(
         f"spread={spread_str} horizon={signal.horizon} "
         f"{direction} {alignment}"
     )
+    base += _wide_tail_suffix(signal)
     if debug:
         base += (
             f" | q_low={signal.q_low:.4f} q_high={signal.q_high:.4f} "
