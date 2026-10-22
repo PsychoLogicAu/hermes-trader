@@ -99,6 +99,15 @@
       "api_key_env": "",
       "timeout_s": 60.0,
       "note": "DECISION MODEL (vLLM Decision 2.0 Lux 9B Q8_0) \u2014 fork build ~/llama-decision2, container d2-serve :8081, flags per _model_gauntlet.sh (--embeddings --pooling none -c 8192 -b 8192 -ub 8192). FULL-COHORT re-run 2026-10-17 on CURRENT state shape to settle d2-vs-pplx authoritatively; old 908-row old-shape results archived to scratch/preshape/ (resume-poison rule)."
+    },
+    {
+      "tag": "d3-27b-artemis-q3ks",
+      "kind": "systemone",
+      "base_url": "http://192.168.1.16:8090",
+      "model": "d3-27b-artemis",
+      "api_key_env": "",
+      "timeout_s": 60.0,
+      "note": "DECISION MODEL (d3 family, vllm-sr d3-27B TurinTech Artemis Q3_K_S 12.26GB, arch qwen35) \u2014 container d3-27b-serve :8090 (llama-master cbe28bb, same tree as d3-nano-serve; d2-serve stopped per owner 2026-10-20, nano STAYS LIVE as DV seat \u2014 co-resident run). Flags per card: -c 4096 -b 4096 -ub 4096 --parallel 1 (-np 1 mandatory, #30402). Cohort: same _ab_cohort.jsonl n=19955 as pplx-decider-iq3m + decision2-lux-q8 full runs -> true SBS. sha256 34c640d250afb383a63aee495f2c0d9ab01d8a1f309789ffd35f3f7e298e3224"
     }
   ]
 }
