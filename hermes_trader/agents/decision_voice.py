@@ -441,6 +441,17 @@ def primary_engine_config() -> Dict[str, Any]:
             # tags never enter the prompt, the seat stays byte-identical.
             # Default off; profile opt-in, hot rollback (same pattern as above).
             "setup_shadow": str(slot.get("setup_shadow", False)).lower() not in ("false", "0", "off"),
+            # F3 momentum doctrine (t_757ed56a round-4 gauntlet, 2026-10-22):
+            # qual-row-only direction clause + conviction band (arm fired +
+            # 4h EMA >0.7% from cross + decisive 6h net). Default off =
+            # questions + state byte-identical for every row. The ONLY
+            # net-positive doctrine arm measured (+$9.27 book, ex-b3 $23.07
+            # vs ctrl $13.8) and the only one with a perfect canary (0.000
+            # drift / 0 flips on all unfired rows) — emission scope is the
+            # whole safety story (F1/F2 churned 184 verdicts by emitting on
+            # ALL fired rows). Profile opt-in per seat model, hot rollback
+            # (same pattern as above).
+            "momentum_doctrine": str(slot.get("momentum_doctrine", False)).lower() not in ("false", "0", "off"),
             # Seat conf calibration scalar (B.46 gauntlet, 2026-10-16): the
             # conviction scale is MODEL-DEPENDENT — on byte-identical seat
             # prompts d3-flash's conf median is 0.50 vs d2's 0.79 (31% vs
@@ -496,7 +507,24 @@ def systemone_primary_verdict(
         crowded_mover_label=bool(cfg.get("crowded_mover_label", False)),
         setup_shadow=bool(cfg.get("setup_shadow", False)),
     )
-    questions = build_questions(held, news_live=_news_live(news))
+    # F3 momentum doctrine (t_757ed56a): emitted ONLY when the qual predicate
+    # fires (arm fired + deep 4h EMA distance + decisive 6h net). Everything
+    # off-knob stays byte-identical: doctrine=None is the pre-F3 schema and
+    # no trend_context_6h key is added. The DV observer (below, ~1191) never
+    # passes a doctrine — the shadow baseline keeps seeing today's doctrine.
+    doctrine = momentum_doctrine_eval(perception, tf4h or {}) if cfg.get("momentum_doctrine") else None
+    if doctrine:
+        state["trend_context_6h"] = {
+            "side": doctrine["side"],
+            "mom6h_pct": doctrine["mom6h_pct"],
+            "ema4h_to_cross_pct": doctrine["ema4h_to_cross_pct"],
+        }
+        logger.info(
+            f"[mom-doctrine] {coin} qual={doctrine['side']} "
+            f"mom6h={doctrine['mom6h_pct']:+.1f}% "
+            f"ema4h_dist={doctrine['ema4h_to_cross_pct']:+.2f}% text=applied"
+        )
+    questions = build_questions(held, news_live=_news_live(news), doctrine=doctrine)
     answers, wall_ms, server_ms = call_systemone(
         cfg["base_url"], cfg["api_key"], cfg["model"], state, questions,
         timeout_s=cfg["timeout_s"],
@@ -873,15 +901,107 @@ def _news_live(news: Any) -> bool:
     return bool(news) and str(news).strip().lower() not in ("no news", "none")
 
 
-def build_questions(held: bool, news_live: bool = False) -> Dict[str, Dict[str, Any]]:
+# ---------------------------------------------------------------------------
+# Momentum doctrine (F3 arm, t_757ed56a round-4 gauntlet 2026-10-22): a
+# QUAL-conditional rewrite of the direction criteria for rows where the 6h
+# momentum arm has fired decisively while the 4h EMA structure is still far
+# (>0.7%) from its 8/21 cross — the population the EMA doctrine taught the
+# seat to PASS (rescue class: ctrl converted 1/54 long-breakaways and 68/108
+# established shorts, med conf 0.33-0.38, ~1 row/scan cleared 0.65). The
+# gauntlet's arm taxonomy (all scored on t_757ed56a): emission scope is the
+# whole safety story — F1/F2 emitted the clause on ALL fired rows and lost
+# ground on churn (184 dirflips on fired-nonqual rows); F3 emitted on qual
+# rows ONLY and was the only net-positive arm (+$9.27, ex-b3 $23.07 vs ctrl
+# $13.8, canary perfect: 0.000 drift on all 1,328 unfired rows). The strings
+# below are BYTE-IDENTICAL to the measured F3 arm's transforms (band text
+# replaces "as trend authority" the same way), so the live patch IS the
+# tested arm. Profile knob `momentum_doctrine`, default OFF = questions and
+# state byte-identical to today for every row (hot, per-seat, rollback by
+# profile like breakout_side_label).
+MOM_DOCTRINE_DIST_MAX_PCT = -0.7   # ema8(4h) vs ema21(4h) distance, must be <=
+MOM_DOCTRINE_MOM_LONG_PCT = 6.0    # up arm: live 6h net must be >=
+MOM_DOCTRINE_MOM_SHORT_PCT = -5.0  # dn arm: live 6h net must be <=
+_MOM_LONG_CRIT_OLD = "Clean bullish 4h/1d EMA alignment"
+_MOM_LONG_CRIT_NEW = ("Clean bullish 4h/1d EMA alignment, or a fired uptrendMomentum "
+                      "trigger (a fresh 6h trend momentum up) as trend authority")
+_MOM_SHORT_CRIT_OLD = "Clean bearish 4h/1d EMA alignment"
+_MOM_SHORT_CRIT_NEW = ("Clean bearish 4h/1d EMA alignment, or a fired downtrendMomentum "
+                       "trigger (a fresh 6h trend momentum down) as trend authority")
+_MOM_LONG_BAND = (" \u2014 this is a BREAKAWAY: the 6h momentum trigger fired decisively "
+                  "while the 4h EMA8 is still far (>0.7%) from the EMA21 cross, i.e. "
+                  "the move is far from confirmation rather than chasing it; if entry "
+                  "structure is clean, conviction in the 0.66-0.78 band is warranted")
+_MOM_SHORT_BAND = (" \u2014 this confirms an ESTABLISHED downtrend: the 6h momentum "
+                   "trigger is firing down decisively while the 4h EMA8 sits far "
+                   "(>0.7%) below the EMA21 cross; if entry structure is clean, "
+                   "conviction in the 0.66-0.78 band is warranted")
+
+
+def momentum_doctrine_eval(perception: Dict[str, Any],
+                           tf4h: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Qual predicate for the F3 doctrine: arm FIRED + deep EMA distance +
+    decisive live 6h net. Returns {side, mom6h_pct, ema4h_to_cross_pct} or
+    None (= no doctrine emission this scan; questions stay byte-identical).
+    The net is the momentum hit's `live_net_move` (the raw 6h close-to-close
+    the [momentum-shadow] line prices), NOT the Theil-Sen score that decides
+    `fired` — the gauntlet cohort is defined by the net rule, same as the
+    aligned-short lane probe."""
+    hits = {t.get("name"): t for t in (perception.get("triggers") or [])
+            if isinstance(t, dict)}
+    try:
+        e8 = float(tf4h.get("ema8"))
+        e21 = float(tf4h.get("ema21"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not e8 or not e21:
+        return None
+    dist = (e8 / e21 - 1.0) * 100.0
+    if dist > MOM_DOCTRINE_DIST_MAX_PCT:
+        return None
+    for name, side, ok_net in (("uptrendMomentum", "long", MOM_DOCTRINE_MOM_LONG_PCT),
+                               ("downtrendMomentum", "short", MOM_DOCTRINE_MOM_SHORT_PCT)):
+        h = hits.get(name) or {}
+        if not h.get("fired"):
+            continue
+        net = h.get("live_net_move")
+        if net is None:
+            continue
+        try:
+            net = float(net)
+        except (TypeError, ValueError):
+            continue
+        if (net >= ok_net) if side == "long" else (net <= ok_net):
+            return {"side": side, "mom6h_pct": round(net, 1),
+                    "ema4h_to_cross_pct": round(dist, 2)}
+    return None
+
+
+def build_questions(held: bool, news_live: bool = False,
+                    doctrine: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
     """The question schema for one research call. `close_now` is asked ONLY
     when the coin is held — a decision model can't misread a CLOSE for a
     coin it was never asked about, so the phantom-CLOSE class (2026-09-04
     xyz:HOOD) is structurally impossible here, not just guarded.
     `news_negative` is asked ONLY when the news feed is live (B.45) —
-    verdict_from_answers treats its absence as news_risk=none."""
+    verdict_from_answers treats its absence as news_risk=none.
+    `doctrine` (F3 momentum doctrine, qualified row only) rewrites the ONE
+    side's direction criterion (clause + conviction band); doctrine=None is
+    byte-identical to the pre-F3 schema — the DV observer always passes
+    None, so the shadow baseline never sees the edit."""
+    direction = DIRECTION_QUESTION
+    if doctrine and doctrine.get("side") in ("long", "short"):
+        crit = dict(DIRECTION_QUESTION["criteria"])
+        if doctrine["side"] == "long":
+            crit["long"] = _MOM_LONG_CRIT_OLD in crit["long"] and \
+                crit["long"].replace(_MOM_LONG_CRIT_OLD, _MOM_LONG_CRIT_NEW + _MOM_LONG_BAND) \
+                or crit["long"]
+        else:
+            crit["short"] = _MOM_SHORT_CRIT_OLD in crit["short"] and \
+                crit["short"].replace(_MOM_SHORT_CRIT_OLD, _MOM_SHORT_CRIT_NEW + _MOM_SHORT_BAND) \
+                or crit["short"]
+        direction = {**DIRECTION_QUESTION, "criteria": crit}
     q = {
-        "direction": DIRECTION_QUESTION,
+        "direction": direction,
         "conviction": CONVICTION_QUESTION,
         "trap": TRAP_QUESTION,
     }
