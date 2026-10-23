@@ -409,6 +409,32 @@ def _momentum_shadow_line(coin: str, up_hit: TriggerHit,
             f"live={live_side} ts={ts_move:+.1f}%/{ts_side}")
 
 
+def resolve_scan_gate(agent_cfg: Optional[Dict[str, Any]],
+                      static_default: float) -> float:
+    """Resolve the scan composite gate per tick (t_b1d64fe2).
+
+    Pure. `.agent-config.json` → scan.minCompositeScore wins when it parses
+    to a positive number; anything else (missing key, garbage, <=0, NaN, no
+    scan block) falls back to the static TRIGGER_CONFIG default.
+
+    Why it exists: trading_loop used to read the gate from get_config() ONCE
+    at boot, making the operator-visible key in .agent-config.json a dead
+    knob (config said 25, live gate was 54 — nil 2026-10-23 post-mortem).
+    The fallback is deliberately the static default, NEVER the old dead-knob
+    value: a missing/garbage key must not silently change the live gate.
+    """
+    raw = ((agent_cfg or {}).get("scan") or {}).get("minCompositeScore")
+    if raw is None:
+        return float(static_default)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return float(static_default)
+    if not (v > 0):  # also rejects NaN (NaN > 0 is False)
+        return float(static_default)
+    return v
+
+
 def _scan_single_market(
     market: Dict[str, Any],
     mid: float,
@@ -918,6 +944,19 @@ def _scan_single_market(
                 and not trend_bypass and not pattern_bypass and not snapback_bypass
                 and not daily_mover_bypass and not divergence_bypass
                 and not mfi_bypass and not vwap_bypass):
+            # Composite-gate accrual (t_b1d64fe2): log-only [scan][gate-shadow]
+            # line recording every below-bar candidate, so the gate can be
+            # re-tuned on evidence instead of the inherited TS-era selectivity
+            # (54 = old-35 x 1.54 from the P230 reweight, never re-derived).
+            # This is the population the bar ACTS on — bypass holders never
+            # reach it, and below-bar drops were previously invisible at INFO.
+            # Gated by .agent-config.json `scan_gate_shadow_log` (hot-read,
+            # default OFF). Log-only: no behavior change.
+            if bool(config.get("scan_gate_shadow_log")):
+                logger.info(
+                    f"[scan][gate-shadow] DROPPED {market['coin']} "
+                    f"composite {score:.1f} < bar {min_score:g} "
+                    f"fired={[h['name'] for h in hits if h.get('fired')]}")
             # Near-miss logging (LEAK #2 observability) — OFF by default. Surfaces
             # coins that scored just below the gate so we can see whether extended
             # movers land just-under (tune threshold) or far-under (need the
