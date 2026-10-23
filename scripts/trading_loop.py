@@ -111,7 +111,7 @@ if _preflight_blocking:
 logger.info(
     f"[preflight] credential setup OK ({len(_preflight_findings) - len(_preflight_blocking)} warning(s))")
 
-from hermes_trader.agents.perception import scan_once, take_aligned_short_lane_candidates
+from hermes_trader.agents.perception import scan_once, take_aligned_short_lane_candidates, resolve_scan_gate
 from hermes_trader.agents.ta_filter import analyze_perception
 from hermes_trader.agents.research import research
 from hermes_trader.agents.executor import close_position_market, fast_exit_pass, maybe_execute, monitor_exits, momentum_reentry_allowed, route_verdict
@@ -489,9 +489,16 @@ if _startup_grace_s > 0:
 # Scan cadence: env-overridable, default 60s. Keep it above the candle cache
 # TTL (config.scan.cacheTtlMs) so every scan reads a fresh candle snapshot.
 scan_interval = int(os.environ.get('HERMES_SCAN_INTERVAL', '60'))
-min_score = config['scan']['minCompositeScore']
+# t_b1d64fe2: the scan composite gate is HOT-tunable via .agent-config.json
+# scan.minCompositeScore (re-read every tick below via resolve_scan_gate).
+# Pre-fix this line read the static TRIGGER_CONFIG ONCE at boot and the
+# operator-visible key in .agent-config.json was a dead knob (config said 25,
+# live gate was 54). Fallback stays the static default — never the old value.
+_gate_static = float(config['scan']['minCompositeScore'])
+min_score = resolve_scan_gate(startup_agent_config, _gate_static)
 
-logger.info(f"Scan interval: {scan_interval}s, Min score: {min_score}")
+logger.info(f"Scan interval: {scan_interval}s, Min score: {min_score} "
+            f"(static default {_gate_static})")
 log_event({
     "event": "loop_start",
     "scan_interval": scan_interval,
@@ -1303,6 +1310,12 @@ while True:
                 logger.warning(f"[universe] periodic refresh failed, keeping prior snapshot: {e}")
 
         logger.info("Scanning markets...")
+        # Hot-read the scan gate from this tick's agent config (t_b1d64fe2);
+        # log only when the effective bar actually moves.
+        _gate_now = resolve_scan_gate(_cfg, _gate_static)
+        if _gate_now != min_score:
+            logger.info(f"[scan] composite gate hot-update: {min_score} -> {_gate_now}")
+            min_score = _gate_now
         results = scan_once(universe=universe, min_score=min_score, config=config)
         _last_progress_ts = time.time()  # scan survived; research heartbeats per coin
         logger.info(f"Scan found {len(results)} triggers")
