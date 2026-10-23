@@ -85,9 +85,10 @@ def test_helper_shadow_defaults_true_and_only_explicit_false_goes_live():
 
 
 def test_helper_nondirectional_side_inert():
-    assert risk_gates.state_admission(_analysis(side="none"),
-                                     dict(_CLAUSE, shadow=True),
-                                     True) == (False, "", True)
+    admit, why, shadow = risk_gates.state_admission(_analysis(side="none"),
+                                                    dict(_CLAUSE, shadow=True),
+                                                    True)
+    assert (admit, shadow) == (False, True) and "non-directional" in why
 
 
 # ── helper: long clause ──────────────────────────────────────────────────
@@ -114,7 +115,10 @@ def test_helper_long_sanity_floor():
 
 
 def test_helper_long_unset_subblock_inert():
-    assert risk_gates.state_admission(_analysis(), {"short": {}}, True)[:2] == (False, "")
+    # Inert STILL carries a labelled why: the call sites log a SKIP line for
+    # any clause dict, so a blank why breaks the greppable skip accrual.
+    admit, why = risk_gates.state_admission(_analysis(), {"short": {}}, True)[:2]
+    assert not admit and "no 'long' block" in why
 
 
 def test_helper_long_ceiling_is_half_open_and_absent_means_none():
@@ -145,16 +149,21 @@ def test_helper_short_respects_allow_shorts():
 def test_helper_short_missing_dmove_inert():
     admit, why, _ = risk_gates.state_admission(
         _analysis(side="short", daily_move_pct=None), _CLAUSE, True)
-    assert (admit, why) == (False, "")
+    assert not admit and "daily_move_pct" in why
 
 
 def test_helper_short_unset_band_inert():
-    assert not risk_gates.state_admission(_short(-6.0), {"long": {}}, True)[0]
+    admit, why = risk_gates.state_admission(_short(-6.0), {"long": {}}, True)[:2]
+    assert not admit and "no 'short' block" in why
+    admit, why = risk_gates.state_admission(
+        _short(-6.0), {"short": {"min_conf": 0.40}}, True)[:2]
+    assert not admit and "band unset" in why
 
 
 def test_helper_short_malformed_band_inert():
     clause = {"short": {"min_decline_pct": "five", "max_decline_pct": 8.0}}
-    assert not risk_gates.state_admission(_short(-6.0), clause, True)[0]
+    admit, why = risk_gates.state_admission(_short(-6.0), clause, True)[:2]
+    assert not admit and "malformed clause values" in why
 
 
 def test_helper_short_sanity_floor():
@@ -253,6 +262,18 @@ def test_gate_no_skip_line_when_clause_absent(monkeypatch, caplog):
     _stub_profile(monkeypatch, None)
     executor._runner_entry_block_reason(_analysis(), _gate())
     assert "STATE-ADMIT" not in caplog.text
+
+
+def test_gate_inert_short_clause_skip_line_is_labelled(monkeypatch, caplog):
+    # Live regression 2026-10-23: d3-27b seat profile has long-only
+    # state_admission -> every SHORT candidate logged
+    # "[gate][STATE-ADMIT][SKIP] <coin> SHORT:" with NOTHING after the
+    # colon. Inert must carry a labelled reason.
+    caplog.set_level(logging.INFO, logger="hermes_trader.agents.executor")
+    _stub_profile(monkeypatch, {"long": {"min_conf": 0.40, "max_conf": 0.50}})
+    reason = executor._runner_entry_block_reason(_short(-6.0), _gate())
+    assert reason == "runner_gate_blocked (confidence 0.47 < 0.65)"
+    assert "[gate][STATE-ADMIT][SKIP] TEST SHORT: clause has no 'short' block" in caplog.text
 
 
 # ── classic conf gate hook (the live no-op fix, 2026-10-17) ─────────────

@@ -245,6 +245,14 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
     block). ``shadow`` defaults to True (log-only, entry still blocked);
     shadow:true is also the kill-switch — only an explicit false goes
     live. Returns (admit, why, shadow). Pure: no I/O, no logging.
+    Side-level inert paths (no side sub-block, unset band, missing
+    dmove, malformed values) return a LABELLED why — the call sites log
+    a SKIP line whenever the clause dict exists, so an empty why would
+    emit "... SHORT:" with no reason and break the greppable skip
+    accrual (live 2026-10-23: d3-27b seat profile has long-only
+    state_admission -> blank SKIP line for every short candidate).
+    Only the no-clause / not-a-dict-clause returns keep why="" —
+    those emit no SKIP line at all.
     """
     if not isinstance(clause_cfg, dict):
         return False, "", True
@@ -256,7 +264,7 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
         if side == "long":
             sub = clause_cfg.get("long")
             if not isinstance(sub, dict):
-                return False, "", shadow
+                return False, "clause has no 'long' block (inert)", shadow
             if bool(analysis.get("daily_mover_fired")):
                 return False, "dailyMover fired (crowded-extension class)", shadow
             min_conf = float(sub.get("min_conf", 0.40))
@@ -273,15 +281,18 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                 return False, "shorts disabled (allow_shorts off)", shadow
             sub = clause_cfg.get("short")
             if not isinstance(sub, dict):
-                return False, "", shadow
+                return False, "clause has no 'short' block (inert)", shadow
             min_conf = float(sub.get("min_conf", 0.40))
             _mn, _mx = sub.get("min_decline_pct"), sub.get("max_decline_pct")
             if _mn is None or _mx is None:
-                return False, "", shadow  # band unset -> short clause inert
+                # band unset -> short clause inert
+                return False, ("short clause band unset "
+                               "(min_decline_pct/max_decline_pct) (inert)"), shadow
             min_dec, max_dec = float(_mn), float(_mx)
             dmove = analysis.get("daily_move_pct")
             if dmove is None:
-                return False, "", shadow  # fail-open: no 24h move read
+                # fail-open: no 24h move read
+                return False, "no 24h daily_move_pct read (inert)", shadow
             decline = -float(dmove)
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
@@ -296,8 +307,8 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                           f"[{min_dec:.1f}, {max_dec:.1f})%, conf {conf:.2f} >= "
                           f"clause floor {min_conf:.2f}"), shadow
     except (TypeError, ValueError):
-        return False, "", shadow  # malformed clause values -> inert
-    return False, "", shadow  # non-directional side
+        return False, "malformed clause values (inert)", shadow
+    return False, "non-directional side (inert)", shadow
 
 
 def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
