@@ -1383,10 +1383,17 @@ def _duelist_verdict(
     primary_ms: int = 0,
     primary_server_ms: int | None = None,
     held_coins: set | None = None,
+    primary_model: str = "",
 ) -> Dict[str, Any] | None:
     """Run the A/B duelist: the SAME prompt to the second model, recorded but
     never used. Returns the parsed verdict dict (for the session-log event +
     the entry-context snapshot), or None when the duelist is disabled/failed.
+
+    `primary_model` is the engine-resolved name of the model that ANSWERED
+    the primary leg (the systemone seat model under `llm.primary_engine`,
+    else the chat slot's). The call site resolves it once so the duel row
+    and the ledger join name the same model; under the systemone era the chat
+    slot's name (effective_primary_model) mislabels the answering seat.
 
     Best-effort end to end: a duelist outage logs a warning and returns None —
     the primary path above has already produced the verdict that executes, so
@@ -1432,7 +1439,7 @@ def _duelist_verdict(
             "coin": coin,
             "perception_id": perception.get("id", "unknown"),
             "mode": str(read_agent_config().get("mode", "OFF")),
-            "primary_model": effective_primary_model(),
+            "primary_model": primary_model or effective_primary_model(),
             "duelist_model": cfg["model"],
             "primary_verdict": primary_verdict,
             "primary_confidence": primary_confidence,
@@ -2136,6 +2143,19 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
             prior_block_computed=bool(prior_block),
         ))
 
+    # The model name that ANSWERED this call (config `llm.model` → env),
+    # resolved at the call site so the `Verdict:` log line, the `Trade
+    # result` row AND the duel row always show the model that actually spoke
+    # — the 2026-08-25 model-switch forensics gap (a name read later from
+    # env can disagree with the one used when the config has since been
+    # flipped). Same principle for the systemone seat: the decision model
+    # that answered is the primary_model the ledger join AND the A/B duel
+    # attribute to. Resolved once, ahead of the duelist hook, shared below.
+    primary_model = (
+        engine_cfg["model"] if engine_cfg["engine"] == "systemone"
+        else effective_primary_model()
+    )
+
     # A/B duelist: the SAME prompt to the second model, recorded but never
     # used. Runs AFTER the primary verdict so a duelist outage (slow 9B server
     # included) can never delay or break execution. `duelist_at_entry` is
@@ -2149,6 +2169,7 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         primary_ms=primary_ms,
         primary_server_ms=primary_server_ms,
         held_coins=held_coins,
+        primary_model=primary_model,
     )
     # Decision-voice observer (2026-10-07): a DIFFERENT CLASS of LLM call —
     # a decision model (Cloudflare Clef family) answering a typed
@@ -2215,17 +2236,10 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # The model name that ANSWERED this call (config `llm.model` → env),
-    # resolved at the call site so the `Verdict:` log line and the
-    # `Trade result` row always show the model that actually spoke — the
-    # 2026-08-25 model-switch forensics gap (a name read later from env can
-    # disagree with the one used when the config has since been flipped).
-    # Same principle for the systemone seat: the decision model that
-    # answered is the primary_model the ledger join attributes the trade to.
-    primary_model = (
-        engine_cfg["model"] if engine_cfg["engine"] == "systemone"
-        else effective_primary_model()
-    )
+    # The model name that ANSWERED this call — resolved ahead of the duelist
+    # hook (single resolution shared with the duel row; the 2026-08-25
+    # forensics rule applies: name the model that spoke, not what env says
+    # later after a config flip).
 
     # Fired breakout hit (t_1999904f): the direction gate needs the break
     # DIRECTION + context, not just the boolean. None when no breakout fired

@@ -241,6 +241,54 @@ def test_research_systemone_long(monkeypatch):
     assert prim[0]["parsed"]["verdict"] == "LONG"
 
 
+def test_research_systemone_duel_row_names_answering_seat(monkeypatch):
+    # t_440e0bb7 (2026-10-24): with the systemone seat answering the primary
+    # leg, the duel row (and the [duel] line built from it) must name the
+    # SEAT model, not the legacy chat slot's model — the same 2026-08-25
+    # "name the model that spoke" rule the Verdict/Trade-result lines follow.
+    answers = _answers({"long": 0.8, "short": 0.05, "none": 0.15},
+                       {0: 0.0, 1: 0.0, 2: 0.2, 3: 0.6, 4: 0.2})
+    _arm_systemone(monkeypatch, answers)
+    import hermes_trader.agents.config_store as cs
+    with open(cs.CONFIG_PATH) as f:
+        cfg = json.load(f)
+    cfg["llm"]["primary"] = {"model": "chat-model"}
+    cfg["llm"]["duelist"] = {"model": "spark-4b"}
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump(cfg, f)
+    _patch_research_deps(monkeypatch)
+    duel_rows = []
+    monkeypatch.setattr(
+        research, "call_duelist",
+        lambda *a, **k: ('x\n{"verdict":"PASS","confidence":0.4}', 55))
+    monkeypatch.setattr(research, "record_duel", lambda row: duel_rows.append(row))
+    a = research.research("BTC", _perception())
+    assert a["verdict"] == "LONG"
+    assert len(duel_rows) == 1
+    assert duel_rows[0]["primary_model"] == "d2-lux"
+    assert duel_rows[0]["duelist_model"] == "spark-4b"
+
+
+def test_research_chat_path_duel_row_labels_chat_slot(monkeypatch):
+    # Parity: with the chat engine (no primary_engine slot) the duel row
+    # keeps labelling the chat slot's model — byte-for-byte old behaviour.
+    import hermes_trader.agents.config_store as cs
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump({"mode": "SHADOW", "llm": {
+            "primary": {"model": "chat-model"},
+            "duelist": {"model": "spark-4b"},
+        }}, f)
+    _patch_research_deps(monkeypatch, 'x\n{"verdict":"PASS","confidence":0.2}')
+    duel_rows = []
+    monkeypatch.setattr(
+        research, "call_duelist",
+        lambda *a, **k: ('x\n{"verdict":"PASS","confidence":0.4}', 55))
+    monkeypatch.setattr(research, "record_duel", lambda row: duel_rows.append(row))
+    research.research("BTC", _perception())
+    assert len(duel_rows) == 1
+    assert duel_rows[0]["primary_model"] == "chat-model"
+
+
 def test_research_systemone_prior_block_observability(monkeypatch):
     """B.32 (2026-10-19): the systemone seat does NOT receive the prior-call
     block. The archive must record computed=True / injected=False and carry
