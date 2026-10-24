@@ -401,6 +401,22 @@ def confidence_ratio(sig: TimesfmSignal) -> float:
 
 
 # ── Log formatting ────────────────────────────────────────────────────────────
+def _wide_tail_suffix(signal: TimesfmSignal, k: int = 6) -> str:
+    """Compact wide-knot accrual suffix: min of the first K q10-path steps /
+    max of the first K q90-path steps. Mirrors chronos/timestral's suffix (those
+    two models emit q05/q95, hence their different label) so every forecaster
+    accrual line is comparable and the numbers line up with the tail gates'
+    WOULD-HAVE-BLOCKED reasons. Empty when there are no wide paths (error
+    signal, coarser quantile grid). LOG-ONLY: nothing consumes it yet — it
+    exists so the tirex/tirex2/timesfm tail accrual is available for the
+    forecaster-facts gauntlet arms (t_7e561307) without an offline re-run.
+    """
+    lo, hi = signal.q10_path_pct, signal.q90_path_pct
+    if not lo or not hi or len(lo) < k or len(hi) < k:
+        return ""
+    return f" | wide_tail6(q10/q90)={min(lo[:k]):+.2f}%/{max(hi[:k]):+.2f}%"
+
+
 def _format_signal_log(
     signal: TimesfmSignal, debug: bool, min_conf_ratio: float = 0.25
 ) -> str:
@@ -433,6 +449,7 @@ def _format_signal_log(
         f"spread={spread_str} horizon={signal.horizon} "
         f"{direction} {alignment}"
     )
+    base += _wide_tail_suffix(signal)
     if debug:
         base += (
             f" | q_low={signal.q_low:.4f} q_high={signal.q_high:.4f} "
