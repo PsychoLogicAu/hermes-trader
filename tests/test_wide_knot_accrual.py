@@ -11,7 +11,9 @@ Pins:
       mislabelling of neighbouring columns (the value guard);
   (c) suffix renders exactly how the tail gates judge tails (min/max of
       the first 6 steps) and is absent for error/None/short paths;
-  (d) accrual line still parses the old way (prefix contract intact).
+  (d) accrual line still parses the old way (prefix contract intact);
+  (e) the q10/q90-only family (timesfm/tirex/tirex2) renders the SAME suffix
+      with its own label — no q05/q95 mislabelling of a shallower knot.
 """
 from __future__ import annotations
 
@@ -26,6 +28,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from hermes_trader.agents import chronos_signal as cs  # noqa: E402
 from hermes_trader.agents import timestral_signal as tms  # noqa: E402
+from hermes_trader.agents import timesfm_signal as tfs  # noqa: E402
+from hermes_trader.agents import tirex_signal as tx  # noqa: E402
+from hermes_trader.agents import tirex2_signal as tx2  # noqa: E402
 
 KNOTS_21 = [0.01, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45,
             0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 0.99]
@@ -168,3 +173,51 @@ def test_accrual_line_contract_preserved():
                               median_pct=None, spread_pct=None, horizon=12,
                               model_id="m", inference_ms=0.0, error="boom")
     assert "wide_tail6" not in tms._format_signal_log(err, debug=False)
+
+
+# ── (e) q10/q90 family: timesfm / tirex / tirex2 (added 2026-10-24) ──────────
+# Those three checkpoints only ever expose the 0.10/0.90 columns, so their
+# suffix carries the q10/q90 LABEL (mislabelling it q05/q95 would silently
+# mis-state how deep the tail is). Same min/max-of-first-6 gate semantics.
+Q10_FAMILY = ((tfs, tfs.TimesfmSignal), (tx, tx.TirexSignal),
+              (tx2, tx2.Tirex2Signal))
+
+
+_MISSING = object()
+
+
+def _q10sig(cls, lo=_MISSING, hi=_MISSING):
+    lo = [-1.0, -2.0, -3.5, -2.0, -1.0, -0.5, -9.9] if lo is _MISSING else lo
+    hi = [1.0, 2.0, 3.2, 2.0, 1.0, 0.5, 9.9] if hi is _MISSING else hi
+    return cls(coin="X", side="long", context_last=100.0, median=101.0,
+               q_low=100.0, q_high=102.0, median_pct=1.0, spread_pct=2.0,
+               horizon=12, model_id="m", inference_ms=1.0,
+               q10_path_pct=lo, q90_path_pct=hi)
+
+
+def test_q10_family_suffix_gate_semantics():
+    for mod, cls in Q10_FAMILY:
+        s = mod._wide_tail_suffix(_q10sig(cls))
+        assert s == " | wide_tail6(q10/q90)=-3.50%/+3.20%", (mod.__name__, s)
+
+
+def test_q10_family_suffix_absent_without_paths():
+    for mod, cls in Q10_FAMILY:
+        assert mod._wide_tail_suffix(_q10sig(cls, None, None)) == ""
+        assert mod._wide_tail_suffix(_q10sig(cls, [-1.0] * 5, [1.0] * 5)) == ""
+
+
+def test_q10_family_accrual_line_contract_preserved():
+    # suffix appends AFTER the fields existing parsers regex-SEARCH, and an
+    # error line still carries none of it.
+    for mod, cls in Q10_FAMILY:
+        line = mod._format_signal_log(_q10sig(cls), debug=False,
+                                      min_conf_ratio=0.25)
+        assert "ALIGN" in line, (mod.__name__, line)
+        assert "| wide_tail6(q10/q90)=-3.50%/+3.20%" in line, line
+        assert line.index("horizon=12") < line.index("wide_tail6"), line
+        err = cls(coin="X", side="long", context_last=0.0, median=None,
+                  q_low=None, q_high=None, median_pct=None, spread_pct=None,
+                  horizon=12, model_id="m", inference_ms=0.0, error="boom")
+        assert "wide_tail6" not in mod._format_signal_log(err, debug=False)
+
