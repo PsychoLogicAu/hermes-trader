@@ -6,6 +6,10 @@ services:
     container_name: hermes-trader
     volumes:
       - .env.local:/app/.env.local:ro
+      # BIND SOURCE, not just a target: if .agent-config.json is missing here,
+      # `docker up` auto-creates it as an EMPTY ROOT-OWNED DIR and the bot
+      # silently boots configless on the next recreate (t_693367d7). scripts/
+      # build.sh pre-flights this; never recreate over a non-regular-file.
       - .agent-config.json:/app/.agent-config.json:ro
       # Per-model tuning profiles referenced from the main JSON by
       # "model_profile": "<name>" (config_store.resolve_model_slot).
