@@ -3193,8 +3193,16 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             _pm = str(analysis.get("primary_model") or "").strip()
             if _pm:
                 _clause = (read_model_profile_for_model(_pm) or {}).get("state_admission")
+                # Tape keys need the BTC trail-24h read (same TTL-cached sensor
+                # the quiet_tape gate consumes; cold path only, so the read is
+                # cheap here). Callers inject; missing read = inert clause.
+                _ca = dict(analysis)
+                if _ca.get("btc_drift_24h") is None:
+                    _tt = _late_chase_tape_read()
+                    if _tt and _tt.get("drift") is not None:
+                        _ca["btc_drift_24h"] = float(_tt["drift"])
                 _admit, _why, _shadow = state_admission(
-                    analysis, _clause, bool(gate.get("allow_shorts", False)))
+                    _ca, _clause, bool(gate.get("allow_shorts", False)))
                 if _admit:
                     _detail = (f"{coin} {side.upper()}: {_why} — general floor "
                                f"{min_conf:.2f} rescued by profile clause; every "
@@ -3208,7 +3216,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                         return ""
                 elif isinstance(_clause, dict):
                     # Clause active but declined this candidate: log the reason
-                    # (ceiling / mover / floor / band) so the excluded population
+                    # (tape / mover / floor / inert) so the excluded population
                     # accrues in the same greppable family as the admits.
                     logger.info(f"[gate][STATE-ADMIT][SKIP] {coin} {side.upper()}: {_why}")
             return block

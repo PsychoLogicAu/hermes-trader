@@ -201,31 +201,37 @@ def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> boo
 
 def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                     allow_shorts: bool):
-    """Model-profile state-admission clause (kanban t_1999904f, 2026-10-17).
+    """Model-profile state-admission clause (kanban t_1999904f, 2026-10-17;
+    re-keyed to tape 2026-10-25, kanban t_05afd186).
 
-    A sub-conf-floor rescue for two empirically separated state patterns
-    (d2-seat window 2026-10-14..17, 543 conf-floor blocked decisions,
-    priced in both breach brackets — see board task comments 2-3, 10):
+    A sub-conf-floor rescue gated by TAPE CONDITION. The original shape —
+    conf band [0.40, 0.50) + max_conf 0.50 ceiling (long) and a 24h decline
+    band [5, 8)% (short), welded from a 3-day d2-seat window — failed
+    cross-corpus re-derivation on the d3-27b scale: every conf band between
+    0.40 and 0.80 prices negative (the rescue band merely least-bad), and
+    the decline band is ~zero/negative archived (split-halves +0.49/-2.38).
+    The discriminators that DO replicate in both independent corpora
+    (archived gauntlet book 10-04..13 + live shadow accrual, BN1+BN2 mark
+    mirror, board t_05afd186): the BTC trail-24h drift at decision time
+    and the dailyMover flag.
 
-      LONG  — conf in [min_conf, max_conf) and NOT a crowded dailyMover.
-              The mover flag (>=10% 24h move AND >=$3M volume, perception.py
-              runner_mover_surface) marks the poison class (n=158,
-              -$2.08/trade, 28 max_loss); non-mover longs are positive
-              overall and >10% THIN movers are the best cell in the window
-              (n=32, 91% WR) — hence no dmove condition on the long clause;
-              the flag is the discriminator. The optional max_conf ceiling
-              (live 0.50) excludes the conf dead zone: 0.50-0.64 longs were
-              negative in the band tables AND under the mover split, and
-              stayed -$55.70/-$75.37 across the re-entry-corrected sim
-              (34 of 71 executable; board comment 10). Absent = no ceiling.
-      SHORT — a mature 24h decline in [min_decline_pct, max_decline_pct)
-              (live band 5-8%): WR 82-85%, +$2.32/trade, vs -$1.96 in the
-              flat 0-5% zone and -$1.77 beyond -8% (crash-bounce risk).
-              The mover flag never fires on declines, so the band is the
-              discriminator here. The same optional max_conf ceiling applies
-              (live 0.50): in-band shorts conf >=0.50 were 0/2, -$17.21
-              (STRK -$16 max_loss tail) vs 89% WR +$118.81 below 0.50 — thin
-              n, but zero-cost and symmetric with the long dead zone.
+      LONG  — BTC 24h drift <= `btc24_max_pct` (rescue cell: oversold tape;
+              joint n=21 BN2 alpha +15.17, WR 20/21) AND NOT a crowded
+              dailyMover (crowded-extension poison: d2 n=158 -$2.08/trade,
+              reproduced on the d3 scale; >10% THIN movers — flag off — are
+              the best cell, so the flag, not dmove, is the discriminator).
+              No conf band: optional `min_conf` survives only as a
+              re-narrowing knob (default 0.0 = open envelope).
+      SHORT — BTC 24h drift in [btc24_min_pct, btc24_max_pct) (kept cell
+              [-3, 0): joint n=57 BN2 alpha +6.83; drift [0, 3) negative).
+              Inert until BOTH tape keys are set — an unbounded sub-floor
+              short rescue has no evidence behind it.
+
+    ``btc_drift_24h`` (%, lookback — the SAME cached 5m-candle BTC read the
+    quiet_tape gate consumes) is injected by the CALLERS: the executor
+    copies it from ``_late_chase_tape_read()``, the classic gate fetches
+    ``market_regime.btc_tape_activity()``. No tape read = inert (a data
+    gap can never trigger a rescue — fail-open to the normal block).
 
     Applied at BOTH conf gates — the runner gate (executor) and the classic
     confidence gate below — because either alone re-blocks what the other
@@ -241,12 +247,13 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
     (config-models/<primary_model>.json -> "state_admission"), read hot by
     the callers — the weld is structural: another model in the seat has
     no block = byte-identical general path. Absent/malformed block,
-    missing dmove, or unset short band = inert (fail-open to the normal
-    block). ``shadow`` defaults to True (log-only, entry still blocked);
-    shadow:true is also the kill-switch — only an explicit false goes
-    live. Returns (admit, why, shadow). Pure: no I/O, no logging.
-    Side-level inert paths (no side sub-block, unset band, missing
-    dmove, malformed values) return a LABELLED why — the call sites log
+    unset side tape keys, or no tape read = inert (fail-open to the
+    normal block). ``shadow`` defaults to True (log-only, entry still
+    blocked); shadow:true is also the kill-switch — only an explicit
+    false goes live. Returns (admit, why, shadow). Pure: no I/O, no
+    logging.
+    Side-level inert paths (no side sub-block, unset tape keys, no tape
+    read, malformed values) return a LABELLED why — the call sites log
     a SKIP line whenever the clause dict exists, so an empty why would
     emit "... SHORT:" with no reason and break the greppable skip
     accrual (live 2026-10-23: d3-27b seat profile has long-only
@@ -267,44 +274,47 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                 return False, "clause has no 'long' block (inert)", shadow
             if bool(analysis.get("daily_mover_fired")):
                 return False, "dailyMover fired (crowded-extension class)", shadow
-            min_conf = float(sub.get("min_conf", 0.40))
+            min_conf = float(sub.get("min_conf", 0.0) or 0.0)
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
-            _mxc = sub.get("max_conf")
-            if _mxc is not None and conf >= float(_mxc):
-                return False, (f"conf {conf:.2f} >= clause ceiling "
-                               f"{float(_mxc):.2f} (dead-zone exclusion)"), shadow
-            return True, (f"non-mover long, conf {conf:.2f} >= clause floor "
-                          f"{min_conf:.2f}"), shadow
+            _mx = sub.get("btc24_max_pct")
+            if _mx is None:
+                return False, "long tape key unset (btc24_max_pct) (inert)", shadow
+            drift = analysis.get("btc_drift_24h")
+            if drift is None:
+                return False, "no BTC trail-24h drift read (inert)", shadow
+            _mx = float(_mx)
+            if float(drift) > _mx:
+                return False, (f"TAPE-SKIP: BTC trail-24h drift {float(drift):+.2f}% > "
+                               f"clause max {_mx:+.1f}% "
+                               f"(outside rescue tape, conf {conf:.2f})"), shadow
+            return True, (f"non-mover long on rescue tape: BTC 24h "
+                          f"{float(drift):+.2f}% <= {_mx:+.1f}%, conf {conf:.2f}"), shadow
         if side == "short":
             if not allow_shorts:
                 return False, "shorts disabled (allow_shorts off)", shadow
             sub = clause_cfg.get("short")
             if not isinstance(sub, dict):
                 return False, "clause has no 'short' block (inert)", shadow
-            min_conf = float(sub.get("min_conf", 0.40))
-            _mn, _mx = sub.get("min_decline_pct"), sub.get("max_decline_pct")
-            if _mn is None or _mx is None:
-                # band unset -> short clause inert
-                return False, ("short clause band unset "
-                               "(min_decline_pct/max_decline_pct) (inert)"), shadow
-            min_dec, max_dec = float(_mn), float(_mx)
-            dmove = analysis.get("daily_move_pct")
-            if dmove is None:
-                # fail-open: no 24h move read
-                return False, "no 24h daily_move_pct read (inert)", shadow
-            decline = -float(dmove)
+            min_conf = float(sub.get("min_conf", 0.0) or 0.0)
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
-            _mxc = sub.get("max_conf")
-            if _mxc is not None and conf >= float(_mxc):
-                return False, (f"conf {conf:.2f} >= clause ceiling "
-                               f"{float(_mxc):.2f} (dead-zone exclusion)"), shadow
-            if not (min_dec <= decline < max_dec):
-                return False, (f"24h decline {decline:+.1f}% outside clause band "
-                               f"[{min_dec:.1f}, {max_dec:.1f})%"), shadow
-            return True, (f"mature-decline short: 24h {float(dmove):+.1f}% in band "
-                          f"[{min_dec:.1f}, {max_dec:.1f})%, conf {conf:.2f} >= "
+            _mn, _mx = sub.get("btc24_min_pct"), sub.get("btc24_max_pct")
+            if _mn is None or _mx is None:
+                # tape keys unset -> short clause inert (never an unbounded rescue)
+                return False, ("short tape keys unset "
+                               "(btc24_min_pct/btc24_max_pct) (inert)"), shadow
+            drift = analysis.get("btc_drift_24h")
+            if drift is None:
+                # fail-open: no BTC tape read (a gap never triggers a rescue)
+                return False, "no BTC trail-24h drift read (inert)", shadow
+            _mn, _mx = float(_mn), float(_mx)
+            if not (_mn <= float(drift) < _mx):
+                return False, (f"TAPE-SKIP: BTC trail-24h drift {float(drift):+.2f}% outside "
+                               f"clause window [{_mn:+.1f}, {_mx:+.1f})% "
+                               f"(conf {conf:.2f})"), shadow
+            return True, (f"short on kept tape: BTC 24h {float(drift):+.2f}% in "
+                          f"[{_mn:+.1f}, {_mx:+.1f})%, conf {conf:.2f} >= "
                           f"clause floor {min_conf:.2f}"), shadow
     except (TypeError, ValueError):
         return False, "malformed clause values (inert)", shadow
@@ -331,12 +341,19 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
     clause = (read_model_profile_for_model(model) or {}).get("state_admission")
     if not isinstance(clause, dict):
         return res
+    try:
+        from hermes_trader.agents.market_regime import btc_tape_activity
+        _tt = btc_tape_activity()
+    except Exception:
+        _tt = None
     admit, why, shadow = state_admission(
         {
             "side": getattr(ctx, "trade_side", ""),
             "confidence": getattr(ctx, "confidence", 0) or 0,
             "daily_move_pct": getattr(ctx, "daily_move_pct", None),
             "daily_mover_fired": getattr(ctx, "daily_mover_fired", False),
+            "btc_drift_24h": (float(_tt["drift"])
+                              if _tt and _tt.get("drift") is not None else None),
         },
         clause,
         bool((cfg.get("runner_entry_gate") or {}).get("allow_shorts", False)),
