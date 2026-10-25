@@ -43,6 +43,18 @@ if [ "$BAD" -ne 0 ]; then
   exit 1
 fi
 
+# --- Pre-flight: .agent-config.json bind SOURCE must be a regular file ---
+# Incident 2026-10-25 (kanban t_693367d7): docker auto-creates a MISSING bind
+# source as an empty root-owned dir. The running container keeps the old
+# unlinked inode (bot looks healthy) while the next `up` would bind the empty
+# dir = silent config loss. Refuse to build/recreate over a missing or
+# non-file live path.
+if [ ! -f ".agent-config.json" ]; then
+  echo "[build] PRE-FLIGHT FAILED: .agent-config.json is $(stat -c '%F %U' .agent-config.json 2>/dev/null || echo 'MISSING') — expected regular file." >&2
+  echo "[build] restore first: cp ~/src/hermes-trader-config/.agent-config.json .agent-config.json (see t_693367d7)" >&2
+  exit 1
+fi
+
 # Pre-create the duel log file so the container's append writes never race a
 # fresh-inode creation (same rationale as the directory pre-flight above).
 touch duel-logs/hermes-trader-duel.jsonl
