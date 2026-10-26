@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from hermes_trader.agents.config_store import (
     read_agent_config,
     read_model_profile_for_model,
+    seat_gate_cfg,
 )
 from hermes_trader.agents.duel_store import effective_primary_model
 from hermes_trader.agents.chronos_signal import (
@@ -848,8 +849,12 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # Upgrade to the configured confidence floor (not a hardcoded 0.70) so a
         # structural/whale override still clears the confidence_gate after the bar
         # is raised. Otherwise raising min_ai_confidence would silently kill the
-        # whale overrides — empirically the one flat-positive bucket.
-        _conf_floor = float(config.get("min_ai_confidence", 0.70))
+        # whale overrides — empirically the one flat-positive bucket. Seat-profile
+        # gate_bars win over the config block (t_623a4dcf; unprofiled seat =
+        # byte-identical config value).
+        _conf_floor = float(seat_gate_cfg(
+            config, "min_ai_confidence",
+            str(analysis.get("primary_model") or ""), 0.70))
         logger.info(
             f"[executor] Structural override on {analysis['coin']}: "
             f"AI PASS but {trigger} → upgrading to LONG conf {_conf_floor:.2f}"
@@ -3075,7 +3080,14 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     VVV −$18.81 max_loss; the old exemption let the 28-trade mover cohort
     (−$77.97, −$2.78/trade) in with zero gate coverage).
     """
-    gate = config.get("runner_entry_gate") or {}
+    # Seat-profile gate_bars (t_623a4dcf) set this seat's EFFECTIVE runner
+    # bars (min_confidence / min_short_confidence / mover_min_confidence /
+    # bypass_* conf keys merge in at sub-key level; non-conf siblings like
+    # cohort_admissions and allow_shorts survive). Unprofiled seat = the
+    # config block byte-identical. Distinct from the entry_min_* seat bars
+    # below (sub-floor admission), which stay keyed to the ANSWERING model.
+    gate = seat_gate_cfg(config, "runner_entry_gate",
+                         str(analysis.get("primary_model") or ""), {}) or {}
     if not bool(gate.get("enabled", False)):
         return ""
 

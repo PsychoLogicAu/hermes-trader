@@ -9,7 +9,10 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from hermes_trader.agents.config_store import read_model_profile_for_model
+from hermes_trader.agents.config_store import (
+    apply_seat_gate_bars,
+    read_model_profile_for_model,
+)
 
 GateResult = Dict[str, Any]  # {pass: bool, reason?: str}
 
@@ -2104,6 +2107,13 @@ def eval_all_gates(
     from hermes_trader.agents.config import get_config
     runtime_config = get_config()
     effective_config = config or runtime_config
+    # Per-seat gate bars (t_623a4dcf): the ANSWERING seat's profile may
+    # override conf bars via its gate_bars block (hot, fail-open; the config
+    # block stays the fallback for unprofiled seats — byte-identical when no
+    # profile matches). The reason strings below interpolate the merged
+    # value, so block/SHADOW lines date the EFFECTIVE bar.
+    effective_config = apply_seat_gate_bars(
+        effective_config, str(getattr(ctx, "primary_model", "") or ""))
     results = {}
     # Regime-aware confidence floor: a WITH-TREND (aligned) trade — long in an up
     # regime, SHORT in a DOWN regime — gets a lower bar (`aligned_min_conf`) than
