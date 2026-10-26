@@ -107,6 +107,61 @@ def resolve_model_slot(slot: Any) -> Any:
     merged.update(inline)
     return merged
 
+
+def apply_seat_gate_bars(config: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+    """Overlay a seat's OWN gate bars from its model profile (t_623a4dcf).
+
+    A profile file (config-models/<seat>.json) may carry a ``gate_bars``
+    block keyed EXACTLY like the main config's gate keys:
+
+        "gate_bars": {
+            "min_ai_confidence": 0.65,
+            "runner_entry_gate": {"min_short_confidence": 0.65},
+            "duelist_veto_gate": {"min_conf": 0.90}
+        }
+
+    Precedence: the profile's gate_bars OVERRIDE the config block; the
+    config block stays the fallback for unprofiled seats — byte-identical
+    behavior when nothing matches. Dict values merge at SUB-KEY level so
+    non-bar siblings (mode, shadow_mode, drift_confirmed_release,
+    cohort_admissions...) survive untouched; scalars replace.
+
+    The lookup keys on the ANSWERING model whose conf the bar is compared
+    against (same weld as the state_admission clause in risk_gates) — a bar
+    that compares against a DIFFERENT seat's conf belongs in THAT seat's
+    profile (e.g. duelist_veto_gate's conviction escape is compared against
+    the primary's conf, so its bar lives in the primary-engine profile).
+    Distinct from the profile's entry_min_confidence /
+    entry_min_short_confidence seat bars (runner-gate sub-floor admission,
+    2026-10-13/16): gate_bars sets the EFFECTIVE bar itself.
+    Hot (no cache, per-decision), fail-open: absent/unreadable profile or a
+    seat with no gate_bars returns the SAME config object untouched.
+    """
+    if not isinstance(config, dict):
+        return config
+    name = str(model_name or "").strip()
+    if not name:
+        return config
+    bars = read_model_profile_for_model(name).get("gate_bars")
+    if not isinstance(bars, dict) or not bars:
+        return config
+    out = dict(config)
+    for key, bar in bars.items():
+        base = out.get(key)
+        if isinstance(base, dict) and isinstance(bar, dict):
+            out[key] = {**base, **bar}
+        else:
+            out[key] = bar
+    return out
+
+
+def seat_gate_cfg(config: Dict[str, Any], key: str, model_name: str,
+                  default: Any = None) -> Any:
+    """Single-gate-key convenience over apply_seat_gate_bars (same
+    contract: hot, fail-open, profile overrides the config block)."""
+    merged = apply_seat_gate_bars(config, model_name)
+    return merged.get(key, default) if isinstance(merged, dict) else default
+
 DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}
 
 # Documented block shape for the LLM slots (hot-read at call time by the
