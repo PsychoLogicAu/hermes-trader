@@ -1540,6 +1540,10 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # the 24h-move state or it re-blocks every clause admit.
         daily_move_pct=analysis.get("daily_move_pct"),
         daily_mover_fired=bool(analysis.get("daily_mover_fired")),
+        # Late-chase bypass lane tag: the runner gate tagged the analysis dict
+        # when THIS entry got in via the LIVE late-chase bypass — consumed by
+        # timesfm_tail_trigger_gate's lane-scoped block (B.49, 2026-10-27).
+        entry_class=analysis.get("_entry_class"),
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
@@ -2999,6 +3003,55 @@ def _late_chase_composite_gate(gate: Dict[str, Any], coin: str, side: str,
     return False, note
 
 
+def _late_chase_trigger_gate(gate: Dict[str, Any], coin: str, side: str,
+                             conf: float, bar: float,
+                             analysis: Dict[str, Any],
+                             suppresses: bool) -> Tuple[bool, str]:
+    """Fired-trigger evidence floor on the late-chase bypass (2026-10-27).
+
+    B.49 ruling evidence (bypass-cohort survey, t_54d26fee, 2026-09-18→10-26,
+    n=85 net −$13.49): the cohort splits cleanly on trigger evidence — the 31
+    admits with ≥1 fired entry trigger (volume_spike / breakout /
+    momentum_burst / daily_mover / whale) net −$0.23, the 54 with NONE fired
+    net −$13.26 (the entire cohort loss; BABY 10-26 15:34 −$2.26 max_loss was
+    a zero-trigger bypass admit). `bypass_late_chase_require_trigger: true`
+    therefore denies the bypass to candidates with zero fired triggers; the
+    standard late-chase block reason then stands (byte-identical for parsers).
+
+    Semantics mirror `_late_chase_composite_gate`: consulted ONLY at bypass
+    candidates (conf >= bar); knob off/absent ⇒ (True, "") with no behavior
+    change (byte-identical to pre-feature). A deny suppresses even a LIVE
+    bypass and logs a loud [gate][TRIGGER] DENIED line. Shadow accrual lines
+    carry TRIGGER=allow|deny so the cohort keeps its counterfactual record.
+    Fail-safe: a missing flag reads as not fired (deliberate — the floor asks
+    for positive trigger evidence, same posture as the composite floor).
+    Slow-burn does NOT count: it is structure, not a fired trigger (the
+    survey's triggered/untriggered split keys on the five fire flags).
+    """
+    if not bool(gate.get("bypass_late_chase_require_trigger", False)):
+        return True, ""
+    fired = []
+    if bool(analysis.get("volume_spike_fired")):
+        fired.append("volspk")
+    if bool(analysis.get("breakout_fired")):
+        fired.append("breakout")
+    if bool(analysis.get("momentum_burst_fired")):
+        fired.append("burst")
+    if bool(analysis.get("daily_mover_fired")):
+        fired.append("mover")
+    if bool(analysis.get("whale_signal")):
+        fired.append("whale")
+    if fired:
+        return True, f" TRIGGER=allow({'+'.join(fired)})"
+    note = " TRIGGER=deny(none fired)"
+    if suppresses:
+        logger.warning(
+            f"[gate][TRIGGER] late_chase_bypass DENIED for {coin} "
+            f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but NO trigger "
+            f"fired (volspk/breakout/burst/mover/whale) — blocked")
+    return False, note
+
+
 # B.27 shadow accrual (2026-09-21): per-coin throttle for the volume-accumulation
 # probe so a repeatedly-blocked coin can't spend candleSnapshot weight every scan.
 _LC_VA_LAST: Dict[str, float] = {}
@@ -3387,10 +3440,19 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 gate, coin, side, conf, bar, score, suppresses=bypassed)
             if bypassed and not _allowed_c:
                 bypassed = False
+            # Fired-trigger evidence floor (2026-10-27, B.49 ruling): a
+            # zero-trigger bypass admit has NO setup evidence beyond the LLM
+            # verdict itself — see helper docstring for the cohort numbers.
+            # Runs after the composite gate so both annotations land on
+            # shadow accruals; knob off ⇒ no-op, byte-identical.
+            _allowed_t, trig_note = _late_chase_trigger_gate(
+                gate, coin, side, conf, bar, analysis, suppresses=bypassed)
+            if bypassed and not _allowed_t:
+                bypassed = False
             if bypassed:
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
                             f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
-                            f"{tape_note}{comp_note}")
+                            f"{tape_note}{comp_note}{trig_note}")
                 # B.27 scope-knob tag (2026-09-21): this entry got in via the
                 # late-chase bypass — carried on the analysis dict so the open
                 # path can hand it to select_exit_params(entry_class=...). Only
@@ -3401,7 +3463,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
                     f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
-                    f"{bar:.2f}{bar_note}{tape_note}{comp_note} — NOT "
+                    f"{bar:.2f}{bar_note}{tape_note}{comp_note}{trig_note} — NOT "
                     f"bypassing (shadow mode), live rule stands")
         else:
             bypassed = False

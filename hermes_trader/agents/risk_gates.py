@@ -73,6 +73,15 @@ class GateContext:
         # None/False = clause inert at every other construction site.
         daily_move_pct: Optional[float] = None,
         daily_mover_fired: bool = False,
+        # Late-chase bypass lane tag (2026-10-27): the runner gate tags the
+        # analysis dict `_entry_class = "late_chase"` when a candidate got in
+        # via the LIVE late-trend-chase bypass (executor.py). Carried here so
+        # a tail gate can price a LANE-SCOPED promotion — block only on this
+        # admission class — while its universal posture stays shadow (B.49:
+        # the universal promote is net-negative, the lane-scoped one is the
+        # owner call). Default None = byte-identical for every other
+        # construction site.
+        entry_class: Optional[str] = None,
     ):
         self.confidence = confidence
         self.current_positions = current_positions
@@ -168,6 +177,7 @@ class GateContext:
         self.primary_model = primary_model
         self.daily_move_pct = daily_move_pct
         self.daily_mover_fired = daily_mover_fired
+        self.entry_class = entry_class
 
 
 def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> bool:
@@ -1342,6 +1352,17 @@ def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
     Fail-safes (pass, no marker, no raise): disabled; path missing or
     shorter than the window (cold cache / disabled / error / pre-change
     signal); tail not breached. A data gap can never flag or block.
+
+    LANE-SCOPED promotion (2026-10-27, B.49 owner ruling "both live"):
+    ``block_late_chase_bypass: true`` arms the gate LIVE for one admission
+    class only — entries the runner gate admitted via the LIVE late-chase
+    bypass (``ctx.entry_class == "late_chase"``) — while ``shadow_mode: true``
+    keeps the universal accrual posture for everything else. Evidence: the
+    bypass cohort's tail-flag subset is clean alpha in the lane (flagged n=44
+    net −$14.27 vs unflagged +$0.78) where the universal gate is net-negative
+    (B.22). Blocked trades carry the reason string in ``blocked_by`` (the
+    after-the-fact costing join). With ``shadow_mode: false`` the gate blocks
+    globally regardless of this knob (the pre-existing C.9 live posture).
     """
     cfg = gate_cfg or {}
     if not bool(cfg.get("enabled", True)):
@@ -1372,7 +1393,9 @@ def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
               f"{min_composite:.0f})")
     if not comp_escape_open:
         reason += "; composite escape closed on fresh-impulse class"
-    if bool(cfg.get("shadow_mode", True)):
+    lane_block = (bool(cfg.get("block_late_chase_bypass", False))
+                  and (getattr(ctx, "entry_class", None) or "") == "late_chase")
+    if bool(cfg.get("shadow_mode", True)) and not lane_block:
         return {
             "pass": True,
             "reason": reason,
@@ -1380,6 +1403,8 @@ def timesfm_tail_trigger_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gat
             "tail_pct": tail,
             "window_steps": k,
         }
+    if lane_block:
+        reason += "; late-chase bypass lane block (scoped promotion)"
     return {"pass": False, "reason": reason}
 
 

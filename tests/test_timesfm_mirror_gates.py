@@ -92,6 +92,7 @@ def _ctx(
     tq10=None,
     tq90=None,
     coin: str = "TON",
+    entry_class=None,
 ) -> GateContext:
     return GateContext(
         confidence=conf,
@@ -108,6 +109,7 @@ def _ctx(
         timesfm_median_pct=tmed,
         timesfm_q10_path_pct=tq10,
         timesfm_q90_path_pct=tq90,
+        entry_class=entry_class,
     )
 
 
@@ -542,3 +544,107 @@ def test_maybe_execute_timesfm_aligned_signal_is_silent(monkeypatch, caplog):
                    for r in caplog.records), caplog.text
     assert not any("timesfm_tail_trigger WOULD HAVE BLOCKED" in r.getMessage()
                    for r in caplog.records), caplog.text
+
+
+# ===========================================================================
+# (d3) LANE-SCOPED promotion (2026-10-27, B.49 owner ruling "both live"):
+# `block_late_chase_bypass: true` arms the gate LIVE for late-chase bypass
+# admits only (ctx.entry_class == "late_chase", tagged by the runner gate)
+# while shadow_mode:true keeps the universal accrual posture for everything
+# else. Blocked trades return pass:False — the reason rides in blocked_by.
+# ===========================================================================
+
+LANE_CFG = dict(TT_CFG, block_late_chase_bypass=True)
+
+
+def test_lane_block_blocks_bypass_lane_entry():
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP, entry_class="late_chase"),
+        dict(LANE_CFG))
+    assert r["pass"] is False
+    assert "timesfm_tail_trigger" in r["reason"]
+    assert "late-chase bypass lane block (scoped promotion)" in r["reason"]
+    assert "shadow_would_block" not in r
+
+
+def test_lane_block_non_lane_entries_stay_shadow():
+    """Same shape, same cfg, but the entry is NOT a bypass admit (no tag /
+    some other class) -> universal shadow posture unchanged."""
+    for ec in (None, "fresh_impulse", "cohort"):
+        r = timesfm_tail_trigger_gate(
+            _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP, entry_class=ec),
+            dict(LANE_CFG))
+        assert r["pass"] is True, f"entry_class={ec}"
+        assert r.get("shadow_would_block") is True
+        assert "tail_pct" in r
+
+
+def test_lane_block_respects_escape_bar():
+    """The escape bar is untouched: a bypass-lane entry at conf >= 0.90
+    still passes (conviction escape, not a lane exemption)."""
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.90, 30.0, tq10=LONG_Q10_DEEP, entry_class="late_chase"),
+        dict(LANE_CFG))
+    assert r == {"pass": True}
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 60.0, tq10=LONG_Q10_DEEP, entry_class="late_chase"),
+        dict(LANE_CFG))
+    assert r == {"pass": True}
+
+
+def test_lane_knob_absent_byte_identical():
+    """Knob absent (the shipped config today) -> a tagged bypass entry gets
+    the exact pre-feature shadow marker, never a block."""
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP, entry_class="late_chase"),
+        dict(TT_CFG))
+    assert r["pass"] is True
+    assert r.get("shadow_would_block") is True
+    assert "late-chase bypass lane block" not in r["reason"]
+
+
+def test_lane_knob_no_shape_no_block():
+    """A tagged entry with NO adverse shape passes regardless of the knob."""
+    r = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_SHALLOW, entry_class="late_chase"),
+        dict(LANE_CFG))
+    assert r == {"pass": True}
+
+
+def test_global_live_mode_ignores_lane_knob_semantics():
+    """shadow_mode:false (the C.9 global-live posture) blocks on shape for
+    EVERY entry; the lane suffix only appears for tagged bypass admits."""
+    cfg = dict(TT_CFG, shadow_mode=False, block_late_chase_bypass=True)
+    r_lane = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP, entry_class="late_chase"),
+        dict(cfg))
+    assert r_lane["pass"] is False
+    assert "late-chase bypass lane block" in r_lane["reason"]
+    r_plain = timesfm_tail_trigger_gate(
+        _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP), dict(cfg))
+    assert r_plain["pass"] is False
+    assert "late-chase bypass lane block" not in r_plain["reason"]
+
+
+def test_lane_block_eval_all_gates_blocks_the_stack():
+    """End-to-end through eval_all_gates: a tagged bypass admit with the
+    armed lane knob becomes a real block reason; an untagged identical
+    entry does not."""
+    base = {
+        "min_ai_confidence": 0.5, "max_concurrent": 5,
+        "max_trade_notional_usd": 300, "min_market_volume_usd": 1_000_000,
+        "coin_allowlist": [], "coin_blocklist": [], "cooldown_min": 0,
+        "max_crypto_long_correlated": 2, "max_total_notional_pct": 1.0,
+        "counter_regime_min_conf": 0.0, "block_counter_trend_bypass": False,
+        "timesfm_tail_trigger_gate": dict(LANE_CFG),
+    }
+    ctx_lane = _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP,
+                    entry_class="late_chase")
+    out = eval_all_gates(ctx_lane, dict(base), last_trade_time=None)
+    assert out["blocked"] is True
+    assert any("timesfm_tail_trigger" in r for r in out["block_reasons"])
+
+    ctx_plain = _ctx("long", 0.70, 30.0, tq10=LONG_Q10_DEEP)
+    out2 = eval_all_gates(ctx_plain, dict(base), last_trade_time=None)
+    assert out2["blocked"] is False
+    assert out2["block_reasons"] == []
