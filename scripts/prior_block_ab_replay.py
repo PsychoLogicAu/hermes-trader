@@ -45,22 +45,31 @@ from hermes_trader.agents.decision_voice import verdict_from_answers  # noqa: E4
 
 PLOG = os.path.join(REPO, "trader-logs", "prompt-log")
 LEDGER = os.path.join(REPO, "trader-logs", "trades.jsonl")
-PROFILE = os.path.join(REPO, "config-models", "pplx-decider-27b.json")
+PROFILE = None  # resolved in main(): --profile or the LIVE llm.primary_engine seat
 DEFAULT_OUT = os.path.join(REPO, "trader-logs", "prior_block_ab_rows.jsonl")
 
 
-def resolve_base_url() -> str:
-    prof = json.load(open(PROFILE))
-    base = prof["base_url"]  # e.g. http://pplx-serve:8082 (compose-internal)
+def resolve_profile(profile_arg: str | None) -> str:
+    if profile_arg:
+        return os.path.join(REPO, "config-models", f"{profile_arg}.json")
+    seat = json.load(open(os.path.join(REPO, ".agent-config.json")))[
+        "llm"]["primary_engine"]["model_profile"]
+    return os.path.join(REPO, "config-models", f"{seat}.json")
+
+
+def resolve_base_url(profile_path: str) -> str:
+    prof = json.load(open(profile_path))
+    base = prof["base_url"]  # e.g. http://d3-27b-serve:8090 (compose-internal)
     host = base.split("//", 1)[1].split(":")[0]
-    if host == "pplx-serve":
-        try:  # bridge IP works from the host; re-resolve (changes on restart)
+    if not all(c.isdigit() for c in host.split(".")):
+        try:  # compose-internal hostname -> bridge IP (works from the host;
+            # re-resolve every run — IPs change on restart)
             ip = subprocess.run(
                 ["docker", "inspect", "-f",
                  "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-                 "pplx-serve"],
+                 host],
                 capture_output=True, text=True, timeout=10).stdout.strip()
-            if ip:
+            if ip and not ip.startswith("invalid"):
                 port = base.split(":")[-1]
                 return f"http://{ip}:{port}"
         except Exception:
@@ -68,7 +77,7 @@ def resolve_base_url() -> str:
     return base.rstrip("/")
 
 
-def load_rows(since_ms: int, coins: set[str] | None, limit: int):
+def load_rows(since_ms: int, coins: set[str] | None, limit: int, model: str):
     files = [os.path.join(PLOG, "calls.jsonl")] + sorted(
         glob.glob(os.path.join(PLOG, "calls-*.jsonl.zst")))
     out, seen = [], set()
@@ -82,6 +91,8 @@ def load_rows(since_ms: int, coins: set[str] | None, limit: int):
             except Exception:
                 continue
             if r.get("role") != "primary" or not r.get("prior_block_text"):
+                continue
+            if model and r.get("model") != model:
                 continue
             if r.get("ts", 0) < since_ms:
                 continue
@@ -130,9 +141,19 @@ def main() -> int:
     ap.add_argument("--coins", default="")
     ap.add_argument("--selfcheck", action="store_true",
                     help="arm A only (replay determinism check, no B calls)")
+    ap.add_argument("--executed-only", action="store_true",
+                    help="replay only rows whose perception_id has a ledger OPEN")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="random sample of N rows AFTER filtering (seeded)")
+    ap.add_argument("--profile", default=None,
+                    help="config-models seat (default: LIVE llm.primary_engine.model_profile)")
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--skip-existing", action="store_true", default=True)
     args = ap.parse_args()
+
+    profile_path = resolve_profile(args.profile)
+    prof = json.load(open(profile_path))
+    model = prof["model"]
 
     since_ms = 0
     if args.since:
@@ -140,7 +161,7 @@ def main() -> int:
                        .replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
     coins = {c.strip() for c in args.coins.split(",") if c.strip()} or None
 
-    rows = load_rows(since_ms, coins, args.limit)
+    rows = load_rows(since_ms, coins, args.limit, model)
     done = set()
     if args.skip_existing and os.path.exists(args.out):
         for line in open(args.out):
@@ -149,13 +170,26 @@ def main() -> int:
             except Exception:
                 pass
     rows = [r for r in rows if r["perception_id"] not in done]
+    if args.executed_only:
+        exec_pids = set()
+        for line in open(LEDGER):
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if o.get("event") == "OPEN":
+                exec_pids.add(o.get("perception_id") or o.get("analysis_id"))
+        rows = [r for r in rows if r["perception_id"] in exec_pids]
+    if args.sample and len(rows) > args.sample:
+        import random
+        random.Random(42).shuffle(rows)
+        rows = rows[:args.sample]
+        rows.sort(key=lambda r: r["ts"])
     if not rows:
         print("no eligible rows (need prior_block_text — deploy PR #101 first?)")
         return 0
 
-    base = resolve_base_url()
-    prof = json.load(open(PROFILE))
-    model = prof["model"]
+    base = resolve_base_url(profile_path)
     closes = load_close_index()
     print(f"{len(rows)} rows | target {base} model={model} | out {args.out}")
 
