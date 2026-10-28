@@ -1646,6 +1646,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_cmv.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Mild-down-tape LONG veto (B.53, t_5384f2ce): same would-block accrual
+    # pattern, same necessity: cohort/state-admitted longs early-return from
+    # the runner gate before its twin check, so the classic marker is their
+    # ONLY shadow surface. At mode=live the pipeline blocks and this never
+    # fires (the block_reasons line carries the same reason string).
+    _mtlv = gate_output["results"].get("mild_tape_long") or {}
+    if _mtlv.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][MILD-TAPE-LONG][SHADOW] WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_mtlv.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     # Quiet broad-tape gate (2026-09-10, WATCHLIST §B.17): a quiet
     # broad tape — trail24h vol/|drift| pair below the sweep thresholds —
     # says the tape is inactive; on the 09-05/06/07 bleed the whole book
@@ -3333,6 +3347,37 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         else:
             logger.warning(f"[gate][CROWDED-MOVER] VETO {_cm_detail}")
             return "runner_gate_blocked (crowded daily mover veto)"
+
+    # Mild-down-tape LONG veto (B.53, t_5384f2ce): twin of
+    # risk_gates.mild_tape_long_veto_gate, one shared config block
+    # `mild_tape_long_veto_gate` (mode off/shadow/live, tape keys
+    # btc24_min_pct/btc24_max_pct). Same placement law as the mover veto:
+    # MUST precede the structured_daily_mover bypass and the sub-floor
+    # state-admission early-returns below, or it is a no-op for exactly the
+    # longs it exists to stop. Tape read via _late_chase_tape_read (the
+    # same cached 300s BTC read; gap = inert, never fires).
+    _mtl_cfg = config.get("mild_tape_long_veto_gate") or {}
+    _mtl_mode = str(_mtl_cfg.get("mode", "off")).strip().lower()
+    _mtl_mn, _mtl_mx = _mtl_cfg.get("btc24_min_pct"), _mtl_cfg.get("btc24_max_pct")
+    if _mtl_mode in ("shadow", "live") and _mtl_mn is not None and _mtl_mx is not None:
+        try:
+            _mtl_mn, _mtl_mx = float(_mtl_mn), float(_mtl_mx)
+            _mtl_tt = _late_chase_tape_read()
+            _mtl_drift = _mtl_tt.get("drift") if isinstance(_mtl_tt, dict) else None
+        except (TypeError, ValueError):
+            _mtl_drift = None  # malformed keys -> inert (fail-open)
+        if _mtl_drift is not None and _mtl_mn <= float(_mtl_drift) < _mtl_mx:
+            _mtl_detail = (f"{coin} LONG on BTC trail-24h drift "
+                           f"{float(_mtl_drift):+.2f}% in [{_mtl_mn:+.1f}, "
+                           f"{_mtl_mx:+.1f})% at conf {conf:.2f}, score "
+                           f"{score:.0f} (mild-down tape, flat-long class)")
+            if _mtl_mode == "shadow":
+                logger.warning(
+                    f"[gate][MILD-TAPE-LONG][SHADOW] WOULD VETO {_mtl_detail} — "
+                    f"NOT vetoing (shadow mode; kill-switch lever)")
+            else:
+                logger.warning(f"[gate][MILD-TAPE-LONG] VETO {_mtl_detail}")
+                return "runner_gate_blocked (mild-down tape long veto)"
 
     structured_daily_mover = (
         daily_mover
