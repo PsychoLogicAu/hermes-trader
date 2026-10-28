@@ -1590,6 +1590,68 @@ def crowded_mover_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult
     return {"pass": False, "reason": reason}
 
 
+def mild_tape_long_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Mild-down-tape LONG veto (B.53, board t_5384f2ce).
+
+    Blocks a LONG while BTC trail-24h drift sits in the mild-down band
+    [btc24_min_pct, btc24_max_pct) — the regime where the same tape the
+    state-admission SHORT band lives in ([-3,0) / [-2,0) after the
+    2026-10-28 floor trim) shows longs going flat-negative: mirror-priced
+    long classes on that tape in the 2026-10-20..25 shadow window were
+    ceiling-skip -37.92 (n=42, 14 max_loss) and sub-floor rescue -26.10
+    (n=43, 16 max_loss); longs were negative in EVERY non-crash band, so
+    the band edges are provisional and accrual is the point (promotion
+    bar on the board task: n>=50 in-band would-blocks, blocked set
+    negative at BN1+BN2, >=3 distinct regime episodes).
+
+    The regime is the MIRROR of the short tape-keys band, so the two tile:
+    mild-down tape admits clause shorts and wants longs out of the slots.
+    Categorical on side+tape — no conf exemption: in that window the
+    seat's conf rose with the extension that lost money (same failure the
+    crowded_mover_gate docstring records).
+
+    mode (config `mild_tape_long_veto_gate.mode`): "off" (default, inert)
+    / "shadow" (pass + would-block marker for accrual) / "live" (block).
+    Tape source is the SAME cached 5m BTC read the quiet_tape gate and the
+    late-chase bypass consume (300s TTL); no tape read = inert (a gap must
+    never fire a protective veto). Tape keys unset/malformed = inert.
+    Runs in the classic pipeline so cohort/state-admitted longs face it;
+    the runner gate carries its twin check (executor) because the mover
+    bypass and conf-floor early-returns live there — either site alone
+    re-admits what the other blocks.
+    """
+    mode = str(gate_cfg.get("mode", "off")).strip().lower()
+    if mode not in ("shadow", "live"):
+        return {"pass": True, "reason": "mild_tape_long: disabled"}
+    if ctx.trade_side != "long":
+        return {"pass": True, "reason": "mild_tape_long: not long"}
+    _mn, _mx = gate_cfg.get("btc24_min_pct"), gate_cfg.get("btc24_max_pct")
+    if _mn is None or _mx is None:
+        return {"pass": True, "reason": "mild_tape_long: tape keys unset (inert)"}
+    try:
+        _mn, _mx = float(_mn), float(_mx)
+    except (TypeError, ValueError):
+        return {"pass": True, "reason": "mild_tape_long: malformed tape keys (inert)"}
+    try:
+        from hermes_trader.agents.market_regime import btc_tape_activity
+        _tt = btc_tape_activity()
+    except Exception:
+        _tt = None
+    drift = _tt.get("drift") if isinstance(_tt, dict) else None
+    if drift is None:
+        return {"pass": True, "reason": "mild_tape_long: no BTC drift read (inert)"}
+    if not (_mn <= float(drift) < _mx):
+        return {"pass": True,
+                "reason": (f"mild_tape_long: drift {float(drift):+.2f}% outside "
+                           f"[{_mn:+.1f}, {_mx:+.1f})%")}
+    reason = (f"mild_tape_long: LONG on BTC trail-24h drift {float(drift):+.2f}% in "
+              f"[{_mn:+.1f}, {_mx:+.1f})% (conf {ctx.confidence:.2f}, "
+              f"score {ctx.composite_score:.0f})")
+    if mode == "shadow":
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -2242,6 +2304,13 @@ def eval_all_gates(
     # bypass-fed entries face it there.
     results["crowded_mover"] = crowded_mover_gate(
         ctx, effective_config.get("crowded_mover_gate") or {})
+    # Mild-down-tape LONG veto (B.53, t_5384f2ce): LONG while BTC trail-24h
+    # drift in the mild band (mirror of the short tape-keys band). mode
+    # off/shadow/live; classic-pipeline twin of the runner gate's check —
+    # cohort/state-admitted longs early-return there, so this marker is
+    # their only accrual surface at shadow.
+    results["mild_tape_long"] = mild_tape_long_veto_gate(
+        ctx, effective_config.get("mild_tape_long_veto_gate") or {})
     # Duelist veto: the A/B duelist's OPPOSITE-SIDE call on the primary's
     # directional entry (re-keyed 2026-09-03 to explicit VETO; the explicit-
     # VETO trigger retired 2026-10-19 with the chat-era VETO verdict —

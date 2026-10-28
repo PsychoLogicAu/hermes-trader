@@ -145,6 +145,11 @@ def main() -> int:
                     help="replay only rows whose perception_id has a ledger OPEN")
     ap.add_argument("--sample", type=int, default=0,
                     help="random sample of N rows AFTER filtering (seeded)")
+    ap.add_argument("--skip-arm-a", action="store_true",
+                    help="arm B only (arm A determinism already established; halves "
+                         "load on the live seat) — for entry-add screening")
+    ap.add_argument("--sleep", type=float, default=0.0,
+                    help="seconds between rows (seat-share throttle on live endpoint)")
     ap.add_argument("--profile", default=None,
                     help="config-models seat (default: LIVE llm.primary_engine.model_profile)")
     ap.add_argument("--out", default=DEFAULT_OUT)
@@ -193,7 +198,7 @@ def main() -> int:
     closes = load_close_index()
     print(f"{len(rows)} rows | target {base} model={model} | out {args.out}")
 
-    n = a_match = b_match_a = 0
+    n = a_match = b_match_a = conf_moved = 0
     with open(args.out, "a") as out:
         for r in rows:
             try:
@@ -205,22 +210,28 @@ def main() -> int:
             perc = {"id": pid, "mid": r.get("mid"),
                     "coin": r["coin"]}  # verdict_from_answers uses mid/coin only
 
-            ans_a = call_systemone(base, model, dict(state), questions)
-            v_a = verdict_from_answers(ans_a, r["coin"], perc) if ans_a else None
-            if v_a is None:
-                print(f"  arm A call failed {r['coin']} {pid}; continuing")
-                continue
+            if args.skip_arm_a:
+                ans_a, v_a = None, None
+            else:
+                ans_a = call_systemone(base, model, dict(state), questions)
+                v_a = verdict_from_answers(ans_a, r["coin"], perc) if ans_a else None
+                if v_a is None:
+                    print(f"  arm A call failed {r['coin']} {pid}; continuing")
+                    continue
 
             rec = {
                 "ts": r["ts"], "coin": r["coin"], "perception_id": pid,
                 "model": r.get("model"),
                 "live": r.get("parsed"),
-                "arm_a": {"verdict": v_a["verdict"], "confidence": v_a["confidence"],
-                          "answers": ans_a},
+                "arm_a": None if v_a is None else {
+                    "verdict": v_a["verdict"], "confidence": v_a["confidence"],
+                    "answers": ans_a},
             }
             live_v = (r.get("parsed") or {}).get("verdict")
+            live_c = (r.get("parsed") or {}).get("confidence")
             n += 1
-            a_match += (v_a["verdict"] == live_v)
+            if v_a is not None:
+                a_match += (v_a["verdict"] == live_v)
 
             if not args.selfcheck:
                 st_b = dict(state)
@@ -231,7 +242,13 @@ def main() -> int:
                     rec["arm_b"] = {"verdict": v_b["verdict"],
                                     "confidence": v_b["confidence"],
                                     "answers": ans_b}
-                    b_match_a += (v_b["verdict"] == v_a["verdict"])
+                    # In --skip-arm-a the live verdict/confidence stand in for
+                    # arm A (byte-exact determinism established on the
+                    # executed cohort).
+                    ref_v = v_a["verdict"] if v_a else live_v
+                    ref_c = v_a["confidence"] if v_a else (live_c or 0.0)
+                    b_match_a += (v_b["verdict"] == ref_v)
+                    conf_moved += abs(v_b["confidence"] - ref_c) >= 0.005
                 else:
                     rec["arm_b"] = None
 
@@ -241,12 +258,16 @@ def main() -> int:
                 rec["exit_reason"] = c.get("exit_reason") or c.get("exit_type")
 
             out.write(json.dumps(rec) + "\n")
+            if args.sleep:
+                time.sleep(args.sleep)
             if n % 25 == 0:
-                print(f"  n={n} a==live {a_match}/{n}  b==a {b_match_a}/{n}")
-    print(f"DONE n={n} a==live {a_match}/{n} b==a {b_match_a}/{max(n,1)}")
-    if n and a_match == n and b_match_a == n and not args.selfcheck:
-        print("WARNING: b==a on every row — injection may be INERT server-side "
-              "(template not rendering recent_history). Do not read as null effect.")
+                print(f"  n={n} a==live {a_match}/{n}  b==ref {b_match_a}/{n}  "
+                      f"conf-moved {conf_moved}/{n}")
+    print(f"DONE n={n} a==live {a_match}/{n} b==ref {b_match_a}/{max(n,1)} "
+          f"conf-moved {conf_moved}/{max(n,1)}")
+    if n and b_match_a == n and conf_moved == 0 and not args.selfcheck:
+        print("WARNING: arm B identical to reference on every row AND zero conf "
+              "movement — injection may be INERT server-side. Do not read as null effect.")
     return 0
 
 
