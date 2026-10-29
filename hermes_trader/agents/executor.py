@@ -3066,6 +3066,73 @@ def _late_chase_trigger_gate(gate: Dict[str, Any], coin: str, side: str,
     return False, note
 
 
+def _late_chase_fuel_gate(gate: Dict[str, Any], coin: str, side: str,
+                          conf: float, bar: float,
+                          analysis: Dict[str, Any],
+                          suppresses: bool) -> Tuple[bool, str]:
+    """Sustained-fuel requirement on the late-chase bypass (2026-10-29).
+
+    B.23 cohort discrimination rerun (t_54d26fee, 2026-10-29, owner ruling
+    "this class of trade should be shut off" after the SPX 10-29 knife): the
+    admit cohort (n=94, 09-18→10-29, net −$12.27) splits on ENTRY FUEL, not
+    on trigger presence — admits with `daily_mover_fired` behind them net
+    +$5.51 (n=30, 10% knife-rate) while every other admit nets −$17.78
+    (n=64, 22% knife-rate) and carries the ENTIRE October bleed (−$18.27).
+    The split survives confound controls: inside the mom24h 10-20% band
+    (same coin momentum for both groups) mover-backed nets +$3.05 (n=22,
+    3 knives) vs −$13.89 (n=30, 9 knives) without it. The 2026-10-27
+    require-trigger floor (B.49) does NOT catch this class: the three
+    breakout-only admits all PASSED it — GRASS 10-05 +0.29 (and it carried
+    band_counter_breach + timesfm_tail_trigger shadow_would_block markers),
+    INJ 10-21 −2.46 max_loss, SPX 10-29 −1.97 exchange_close (2 knives / 3).
+    A fresh blip inside an already-late trend is exactly the naked chase this
+    lane keeps admitting; a day-long mover is continuation fuel.
+
+    So: `bypass_late_chase_require_fuel: true` denies the bypass unless at
+    least one trigger in `bypass_late_chase_fuel_triggers` (default
+    ["mover"] = daily_mover_fired; accepted names volspk/breakout/burst/
+    mover/whale) is fired. Deny suppresses even a LIVE bypass (the standard
+    late-chase block reason then stands, byte-identical for parsers) and
+    logs a loud [gate][FUEL] DENIED line. Semantics mirror
+    `_late_chase_trigger_gate`: consulted ONLY at bypass candidates
+    (conf >= bar); knob off/absent ⇒ (True, "") with no behavior change
+    (byte-identical to pre-feature). Shadow accruals carry FUEL=allow|deny
+    so the cohort keeps its counterfactual record. Fail-safe: a missing
+    flag reads as not fired (positive evidence of fuel required). When both
+    this and the trigger floor are on, this gate runs after and is strictly
+    the tighter of the two on the default fuel set.
+
+    Returns (allowed, fuel_note); fuel_note is "" when the knob is off.
+    """
+    if not bool(gate.get("bypass_late_chase_require_fuel", False)):
+        return True, ""
+    fuel_names = gate.get("bypass_late_chase_fuel_triggers") or ["mover"]
+    fuel_names = {str(n).strip().lower() for n in fuel_names}
+    fired = {}
+    if bool(analysis.get("volume_spike_fired")):
+        fired["volspk"] = True
+    if bool(analysis.get("breakout_fired")):
+        fired["breakout"] = True
+    if bool(analysis.get("momentum_burst_fired")):
+        fired["burst"] = True
+    if bool(analysis.get("daily_mover_fired")):
+        fired["mover"] = True
+    if bool(analysis.get("whale_signal")):
+        fired["whale"] = True
+    hit = sorted(n for n in fired if n in fuel_names)
+    if hit:
+        return True, f" FUEL=allow({'+'.join(hit)})"
+    note = (f" FUEL=deny(fired={'+'.join(sorted(fired)) or 'none'}, "
+            f"fuel-required={'+'.join(sorted(fuel_names))})")
+    if suppresses:
+        logger.warning(
+            f"[gate][FUEL] late_chase_bypass DENIED for {coin} "
+            f"{side.upper()}: conf {conf:.2f} >= bar {bar:.2f} but no FUEL "
+            f"trigger fired (need one of: {'/'.join(sorted(fuel_names))}; "
+            f"fired={'+'.join(sorted(fired)) or 'none'}) — blocked")
+    return False, note
+
+
 # B.27 shadow accrual (2026-09-21): per-coin throttle for the volume-accumulation
 # probe so a repeatedly-blocked coin can't spend candleSnapshot weight every scan.
 _LC_VA_LAST: Dict[str, float] = {}
@@ -3494,10 +3561,20 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 gate, coin, side, conf, bar, analysis, suppresses=bypassed)
             if bypassed and not _allowed_t:
                 bypassed = False
+            # Sustained-fuel floor (2026-10-29, B.23 rerun owner ruling): the
+            # bypass releases only to admits with continuation fuel fired
+            # (default: daily_mover) — a fresh blip inside a late trend is
+            # the naked-chase class; see helper docstring for the cohort
+            # numbers. Runs after the trigger gate (strictly tighter when
+            # both are on); knob off ⇒ no-op, byte-identical.
+            _allowed_f, fuel_note = _late_chase_fuel_gate(
+                gate, coin, side, conf, bar, analysis, suppresses=bypassed)
+            if bypassed and not _allowed_f:
+                bypassed = False
             if bypassed:
                 logger.info(f"[executor] late-trend chase bypassed on {coin} "
                             f"(conf {conf:.2f} >= bar {bar:.2f}){bar_note}"
-                            f"{tape_note}{comp_note}{trig_note}")
+                            f"{tape_note}{comp_note}{trig_note}{fuel_note}")
                 # B.27 scope-knob tag (2026-09-21): this entry got in via the
                 # late-chase bypass — carried on the analysis dict so the open
                 # path can hand it to select_exit_params(entry_class=...). Only
@@ -3508,7 +3585,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
                     f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
-                    f"{bar:.2f}{bar_note}{tape_note}{comp_note}{trig_note} — NOT "
+                    f"{bar:.2f}{bar_note}{tape_note}{comp_note}{trig_note}{fuel_note} — NOT "
                     f"bypassing (shadow mode), live rule stands")
         else:
             bypassed = False
