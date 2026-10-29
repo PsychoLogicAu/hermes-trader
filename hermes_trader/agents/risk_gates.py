@@ -238,7 +238,14 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
       SHORT — BTC 24h drift in [btc24_min_pct, btc24_max_pct) (kept cell
               [-3, 0): joint n=57 BN2 alpha +6.83; drift [0, 3) negative).
               Inert until BOTH tape keys are set — an unbounded sub-floor
-              short rescue has no evidence behind it.
+              short rescue has no evidence behind it. Optional ``quality``
+              sub-block (t_860f95f8, 2026-10-29): max_expert_spread_pct /
+              max_chronos_tail_pct / max_tirex_median_pct veto the admit
+              per-leg (crash-episode cohort: quality, not slots, was the
+              binding constraint; 121-cohort book 98.3% WR, 0 max_loss).
+              Absent sub-block = byte-identical pre-filter behavior; a
+              leg whose key is set but whose read is missing SKIPs
+              (refuse-only: quality can never rescue).
 
     ``btc_drift_24h`` (%, lookback — the SAME cached 5m-candle BTC read the
     quiet_tape gate consumes) is injected by the CALLERS: the executor
@@ -326,12 +333,107 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                 return False, (f"TAPE-SKIP: BTC trail-24h drift {float(drift):+.2f}% outside "
                                f"clause window [{_mn:+.1f}, {_mx:+.1f})% "
                                f"(conf {conf:.2f})"), shadow
+            # Quality gate (t_860f95f8, 2026-10-29): on band-days the short
+            # population oversupplies the book ~7:1 and the binding
+            # constraint is candidate QUALITY, not slots. Crash-episode
+            # cohort profiling (10-23/24 band, 920 closed, gate-only BN2):
+            # expert consensus spread and the chronos upside tail separate
+            # winners 1.7-1.9x per trade; the tirex leg is a variance
+            # killer (0 max_loss in the 43-trade filtered book). Absent
+            # "quality" sub-block = byte-identical pre-filter behavior.
+            # A leg whose key IS set but whose read is missing SKIPs
+            # (fail-closed on this side only: a quality veto can only
+            # refuse, never rescue).
+            q = sub.get("quality")
+            if isinstance(q, dict):
+                _legs = (("max_expert_spread_pct", "expert_spread_pct",
+                          "expert consensus spread"),
+                         ("max_chronos_tail_pct", "chronos_tail_pct",
+                          "chronos upside tail"),
+                         ("max_tirex_median_pct", "tirex_median_pct",
+                          "tirex median forecast"))
+                _passed = []
+                for _kq, _ka, _lbl in _legs:
+                    _lim = q.get(_kq)
+                    if _lim is None:
+                        continue
+                    _val = analysis.get(_ka)
+                    if _val is None:
+                        return False, (f"QUALITY-SKIP: no {_lbl} read "
+                                       f"(inert, conf {conf:.2f})"), shadow
+                    if float(_val) > float(_lim):
+                        return False, (f"QUALITY-SKIP: {_lbl} {float(_val):+.2f} "
+                                       f"> max {float(_lim):+.2f} (conf {conf:.2f})"), shadow
+                    _passed.append(f"{_lbl.split()[0]} {float(_val):+.2f}<={float(_lim):+.2f}")
+                if _passed:
+                    return True, (f"short on kept tape: BTC 24h {float(drift):+.2f}% in "
+                                  f"[{_mn:+.1f}, {_mx:+.1f})%, conf {conf:.2f} >= "
+                                  f"clause floor {min_conf:.2f}, quality ["
+                                  f"{"; ".join(_passed)}]"), shadow
             return True, (f"short on kept tape: BTC 24h {float(drift):+.2f}% in "
                           f"[{_mn:+.1f}, {_mx:+.1f})%, conf {conf:.2f} >= "
                           f"clause floor {min_conf:.2f}"), shadow
     except (TypeError, ValueError):
         return False, "malformed clause values (inert)", shadow
     return False, "non-directional side (inert)", shadow
+
+
+def inject_state_quality(analysis: Dict[str, Any], coin: str, side: str,
+                         cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Attach the short-side quality-gate features to a clause analysis dict
+    (t_860f95f8). Cache-first peeks only — NEVER computes, never blocks,
+    never pays model cost (same contract as the tape injection). Missing
+    reads simply stay absent; the clause then SKIPs any leg whose key is
+    set (fail-closed on the refuse-only side).
+
+      expert_spread_pct  expert-select consensus width (the [expert] line's
+                         spread= field)
+      chronos_tail_pct   adverse-quantile extreme over the first
+                         window_steps path steps — IDENTICAL formula to the
+                         chronos_tail_pct trade-result field (executor
+                         attach), window from chronos_tail_trigger_gate
+      tirex_median_pct   TiRex 1.1 median forecast, 0.1-rounded like the
+                         trade-result field for cross-log comparability
+    """
+    out = dict(analysis)
+    try:
+        from hermes_trader.agents.expert_select import peek_expert_select
+        es = peek_expert_select(coin)
+        _sp = es.spread_pct if es is not None else None
+        if _sp is not None:
+            out["expert_spread_pct"] = float(_sp)
+    except Exception:
+        pass
+    try:
+        from hermes_trader.agents.chronos_signal import peek_chronos
+        cs = peek_chronos(coin)
+        if cs is not None:
+            _tcfg = None
+            try:
+                _src = cfg if isinstance(cfg, dict) else None
+                if _src is None:
+                    from hermes_trader.agents.config import get_config as _gcfg
+                    _src = _gcfg()
+                _tcfg = _src.get("chronos_tail_trigger_gate") or {}
+            except Exception:
+                _tcfg = {}
+            _k = int(_tcfg.get("window_steps", 6) or 6)
+            _tpath = getattr(cs, "q10_path_pct", None) if side == "long" else getattr(cs, "q90_path_pct", None)
+            if _tpath and len(_tpath) >= _k:
+                _tw = _tpath[:_k]
+                _tail = min(_tw) if side == "long" else max(_tw)
+                out["chronos_tail_pct"] = round(_tail * 10) / 10
+    except Exception:
+        pass
+    try:
+        from hermes_trader.agents.tirex_signal import peek_tirex
+        ts = peek_tirex(coin)
+        _tm = ts.median_pct if ts is not None else None
+        if _tm is not None:
+            out["tirex_median_pct"] = round(float(_tm) * 10) / 10
+    except Exception:
+        pass
+    return out
 
 
 def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
@@ -359,15 +461,21 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
         _tt = btc_tape_activity()
     except Exception:
         _tt = None
+    _sa = {
+        "side": getattr(ctx, "trade_side", ""),
+        "confidence": getattr(ctx, "confidence", 0) or 0,
+        "daily_move_pct": getattr(ctx, "daily_move_pct", None),
+        "daily_mover_fired": getattr(ctx, "daily_mover_fired", False),
+        "btc_drift_24h": (float(_tt["drift"])
+                          if _tt and _tt.get("drift") is not None else None),
+    }
+    if isinstance(clause.get("short"), dict) and isinstance(
+            clause["short"].get("quality"), dict):
+        # Short-side quality gate (t_860f95f8): peek-only feature reads.
+        _sa = inject_state_quality(_sa, str(getattr(ctx, "coin", "") or ""),
+                                   str(getattr(ctx, "trade_side", "") or ""), cfg)
     admit, why, shadow = state_admission(
-        {
-            "side": getattr(ctx, "trade_side", ""),
-            "confidence": getattr(ctx, "confidence", 0) or 0,
-            "daily_move_pct": getattr(ctx, "daily_move_pct", None),
-            "daily_mover_fired": getattr(ctx, "daily_mover_fired", False),
-            "btc_drift_24h": (float(_tt["drift"])
-                              if _tt and _tt.get("drift") is not None else None),
-        },
+        _sa,
         clause,
         bool((cfg.get("runner_entry_gate") or {}).get("allow_shorts", False)),
     )
