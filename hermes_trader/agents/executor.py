@@ -36,7 +36,7 @@ from hermes_trader.agents.dsl_exit import (
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.ledger import record_open, record_close
-from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission
+from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
     cancel_open_orders_for_coin,
@@ -3347,6 +3347,12 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                     _tt = _late_chase_tape_read()
                     if _tt and _tt.get("drift") is not None:
                         _ca["btc_drift_24h"] = float(_tt["drift"])
+                if isinstance(_clause, dict) and isinstance(
+                        _clause.get("short"), dict) and isinstance(
+                        _clause["short"].get("quality"), dict):
+                    # Short-side quality gate (t_860f95f8): peek-only reads
+                    # (expert spread / chronos upside tail / tirex median).
+                    _ca = inject_state_quality(_ca, str(coin or ""), str(side))
                 _admit, _why, _shadow = state_admission(
                     _ca, _clause, bool(gate.get("allow_shorts", False)))
                 if _admit:
