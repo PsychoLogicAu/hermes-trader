@@ -1,53 +1,55 @@
 """Expert-selection shadow signal (MoiraiAgent integration, Task 1.1).
 
 Runs a POOL of candidate forecasters (see ``expert_pool``), cross-validates
-each on the tail of history, and has an LLM pick the winner (or pool them
-into a "mixture") — Salesforce's MoiraiAgent expert-selection agent
-(``gift_eval/agent.py``, Apache-2.0), ported to our regime. The final
-forecast is the pooled "mixture" distribution RE-CENTERED so its median
-matches the selected model's median (their ``get_best_pred`` math): a winner
-≠ mixture shifts the whole mixture, it does not replace it.
+each on the tail of history, and pools them into the upstream "mixture"
+distribution — the forecast math of Salesforce's MoiraiAgent expert-selection
+agent (``gift_eval/agent.py``, Apache-2.0), ported to our regime.
+
+SELECTION IS THE MIXTURE — the LLM winner-pick was RETIRED 2026-10-29
+(t_61d27555). The 2026-10-07 week survey (n=683 diverse anchors, in-container
+replay) measured the live selector NEGATIVE on its own cohort: recentered
+selector median-MAE 1.220pp vs 1.146pp for the plain mixture on identical
+contexts — picking a winner made the forecast worse, and the 1h-CV proxy it
+read anti-correlated with realized accuracy (it ranked TiRex worst; TiRex was
+best). The leg was pinned off by config on 2026-10-08
+(``diversity_threshold: 999.0``) and its code deleted here. The per-model
+``candidate_medians`` / q10 / q90 accrual is kept deliberately: it is what
+makes the recenter-ORACLE ("what a perfect pick would have scored" — ~0.27pp
+better than the mixture in that survey) measurable offline without any LLM.
+If the CV proxy is ever fixed, re-enable = git revert the deletion commit +
+re-add the ``expert_select.llm`` config block.
 
 SHADOW ONLY. Nothing here gates, sizes, or enters the LLM verdict prompt.
 The async worker logs one line per real compute; the sync attach reads the
 per-coin cache only (never blocks the exec loop — the same contract as
 chronos/timesfm attach).
 
-Decision procedure (mirrors MoiraiAgentTimeSeriesForecast.__call__):
+Decision procedure:
   1. Run every pool candidate on the live context → per-model 9-quantile
      forecasts (absolute price).
   2. Run the SAME pool on the context shifted back by `horizon` bars
      (cross-validation replay over the last `horizon` bars) → per-model MAE
-     vs the actual tail → cv_ranking.
-  3. Diversity gate: per-step std of the z-normalized candidate medians
-     (downsampled to ≤40 steps); below `diversity_threshold` (0.2) → skip the
-     LLM, selection = "mixture".
-  4. Otherwise build THEIR exact text prompt (z-normalized history ≤400
-     steps, each model's normalized candidate medians, the CV replay medians,
-     and the CV MAE ranking string) → one short chat completion → parse the
-     winner via ``\\boxed{...}``. A parse failure / timeout / endpoint error
-     degrades to "mixture" (their code ASSERTS on bad output; we must not).
-  5. Final = mixture quantile pool re-centered to the selected model's
-     median → expert_median_pct / expert_spread_pct / q10/q90 paths on the
-     same scale as the existing signals.
+     vs the actual tail → cv_ranking. Kept as accrual/diagnostic: it is the
+     scoreboard the retired selector read (and why it mis-picked).
+  3. Diversity diagnostic: per-step std of the z-normalized candidate medians
+     (downsampled to ≤40 steps) → the ``diverse=`` field on the log line ONLY.
+     It gates nothing since the retirement.
+  4. Final = the pooled mixture, unshifted → expert_median_pct /
+     expert_spread_pct / q10/q90 paths, same scale as the other signals.
+     ``_mixture_and_recenter`` still supports their re-center step for the
+     offline oracle math; production always passes ``selected="mixture"``.
 
-Selector LLM (D2): default = the running Qwen primary via the existing
-LLM_BASE_URL/LLM_API_KEY env + llm.primary.model from config; hot-swappable
-to a self-hosted moirai-agent fine-tune by setting explicit base_url/model in
-config (no code change). Thinking off via per-request chat_template_kwargs.
-
-LICENSE NOTES: selection code Apache-2.0 (Salesforce uni2ts @8062ef5); the
-optional moirai-agent selector weights are CC-BY-NC-4.0; TiRex weights are
-NXAI Community License; moirai-2.0-R-small weights are CC-BY-NC-4.0. Same
-posture as TimesFM-3: shadow-only, ships behind expert_select.enabled: false.
+LICENSE NOTES: selection math Apache-2.0 (Salesforce uni2ts @8062ef5); TiRex
+weights are NXAI Community License; moirai-2.0-R-small weights are
+CC-BY-NC-4.0. Same posture as TimesFM-3: shadow-only, ships behind
+``expert_select.enabled: false``. The retired moirai-agent selector weights
+were CC-BY-NC-4.0; its GGUF is deleted from the lemonade model store
+(mradermacher/moirai-agent-GGUF re-downloads it if the revert path is taken).
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -76,8 +78,6 @@ def _cfg() -> Dict[str, Any]:
         return {}
 
 
-def _llm_cfg() -> Dict[str, Any]:
-    return _cfg().get("llm", {}) or {}
 
 
 def _pool() -> List[str]:
@@ -145,8 +145,11 @@ class ExpertSelectSignal:
     side: str
     context_last: float
     horizon: int
-    # Selection outcome
-    selected_model: Optional[str] = None   # chronos/timesfm/tirex/moirai2/mixture
+    # Selection outcome. Post-retirement (2026-10-29) `selected_model` is
+    # always "mixture"; the per-model names stay in the contract because the
+    # historical accrual carries them and a revert of the deletion re-enables
+    # picking. `diverse` is now a pure candidate-disagreement diagnostic.
+    selected_model: Optional[str] = None   # always "mixture" post-retirement
     diverse: Optional[bool] = None
     cv_ranking: Optional[List[Tuple[str, float]]] = None  # [(model, mae)] best-first
     # Final (re-centered mixture) forecast, % vs context_last
@@ -294,7 +297,9 @@ def _run_cv(coin: str, closes: List[float], horizon: int) -> Dict[str, Any]:
 def _is_diverse(live: Dict[str, Any], closes: List[float],
                 threshold: float, max_future_length: int = 40) -> bool:
     """Per-step std of the z-normalized candidate medians (downsampled to
-    ≤max_future_length steps). Below threshold → not diverse → mixture."""
+    ≤max_future_length steps). DIAGNOSTIC ONLY since the selector LLM was
+    retired (2026-10-29): selection is always the mixture, so this value just
+    records whether the candidates disagreed (``diverse=`` on the log line)."""
     if threshold <= 0.0:
         return True
     mean, std = _norm_factor(closes)
@@ -304,9 +309,8 @@ def _is_diverse(live: Dict[str, Any], closes: List[float],
         if sig and sig.median:
             preds.append(_normalize(list(sig.median), mean, std))
     if len(preds) < 2:
-        # Nothing to select between with a single (or zero) candidate — the
-        # selection is the mixture (the lone candidate's own distribution,
-        # unshifted) and the LLM call would be meaningless.
+        # Nothing to compare with a single (or zero) candidate — the signal is
+        # that lone candidate's own distribution, so report not-diverse.
         return False
     arr = np.array(preds, dtype=float)
     downspl_step = max(1, arr.shape[1] // max_future_length)
@@ -329,7 +333,13 @@ def _mixture_and_recenter(live: Dict[str, Any], selected: str,
     (wrong) reading of "per-quantile pooling"; the concatenated stack is what
     their code does and what we match. Then shift the whole distribution so
     its median matches the selected model's median (their ``get_best_pred``).
-    Returns {level: [h]} in absolute price."""
+    Returns {level: [h]} in absolute price.
+
+    Production passes ``selected="mixture"`` (unshifted pool) since the selector
+    LLM was retired 2026-10-29; the re-center branch is kept because the offline
+    survey harness recomputes recenter-ORACLE variants through it and a revert of
+    the deletion restores the selector.
+    """
     models = [m for m in _pool() if live.get(m) and live[m].quantiles]
     if not models:
         raise ValueError("no candidate produced quantiles")
@@ -363,166 +373,16 @@ def _mixture_and_recenter(live: Dict[str, Any], selected: str,
     return mixture
 
 
-# ── Prompt construction (their TimeSeriesProcessor.__call__, faithful) ────────
-_INSTRUCTION = (
-    "You are given a sequence of history values and several future predictions by candidate models. "
-    "Analyze the future predictions by the candidates and their cross-validation errors on the last part of the history values. "
-    "Select the optimal future predictions. Enclose the name of the best model by \\boxed{ and }. "
-)
 
 
-def _fmt_ts(ms: int) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ms / 1000.0))
 
 
-def _build_prompt(closes: List[float], ts: List[int], live: Dict[str, Any],
-                  cv: Dict[str, Any], horizon: int,
-                  max_future_length: int = 40,
-                  max_history_future_ratio: int = 10) -> str:
-    """Build the selection user-prompt in their exact format (three JSON blocks
-    + instruction). All values z-normalized to 3 decimals; history truncated to
-    ratio*future steps; candidate paths downsampled to ≤max_future_length."""
-    mean, std = _norm_factor(closes)
-    norm_hist = _normalize(closes, mean, std)
-    models = [m for m in _pool() if live.get(m) and live[m].median]
-
-    # Downsample step: they use max(1, pred_length // max_future_length). Our
-    # horizon (12) < max_future_length (40) → step 1 (no downsampling).
-    downspl_step = max(1, horizon // max_future_length)
-
-    # Candidate medians, normalized, downsampled (forward).
-    cand_strs: Dict[str, str] = {}
-    for m in models:
-        norm = _normalize(list(live[m].median), mean, std)[:horizon]
-        ds = norm[0::downspl_step]
-        cand_strs[m] = ",".join(f"{v:.3f}" for v in ds)
-
-    # History: downsampled (backward) then truncated to max_ctx_length.
-    max_ctx = int(max_history_future_ratio * max_future_length)
-    hist_ds = norm_hist[-downspl_step::-downspl_step][::-1]
-    hist_ts_ds = ts[-downspl_step::-downspl_step][::-1]
-    ctx_len = min(len(hist_ds), max_ctx)
-    hist_ds = hist_ds[-ctx_len:]
-    hist_ts_ds = hist_ts_ds[-ctx_len:]
-    hist_str = ",".join(f"{v:.3f}" for v in hist_ds)
-
-    # Future timestamps (the horizon ahead of the last bar).
-    last_ms = ts[-1]
-    future_ts = [last_ms + (i + 1) * 300_000 for i in range(horizon)]
-    future_ts_ds = future_ts[0::downspl_step]
-
-    # CV section: normalized CV replay medians (downsampled backward) + GT tail.
-    cv_preds_strs: Dict[str, str] = {}
-    cv_gt_str = ""
-    if cv:
-        tail = cv.get("tail", [])
-        cv_gt = _normalize(list(tail), mean, std)
-        cv_gt_str = ",".join(f"{v:.3f}" for v in cv_gt)
-        for m, pred in (cv.get("preds") or {}).items():
-            norm = _normalize(list(pred), mean, std)[:horizon]
-            ds = norm[-downspl_step::-downspl_step][::-1]
-            cv_preds_strs[m] = ",".join(f"{v:.3f}" for v in ds)
-        ranking = [m for m, _ in cv.get("ranking", [])]
-        cv_ranking_str = " < ".join(ranking)
-    else:
-        cv_ranking_str = ""
-
-    history_info = {
-        "history_window": [_fmt_ts(hist_ts_ds[0]), _fmt_ts(hist_ts_ds[-1])] if hist_ts_ds else ["?", "?"],
-        "history_values": hist_str,
-    }
-    pred_info = {
-        "future_window": [_fmt_ts(future_ts_ds[0]), _fmt_ts(future_ts_ds[-1])] if future_ts_ds else ["?", "?"],
-        "model_names": models,
-        "candidate_preds": cand_strs,
-    }
-    cv_info = {
-        "crossval_window": [_fmt_ts(ts[-horizon]), _fmt_ts(ts[-1])] if len(ts) >= horizon else ["?", "?"],
-        "crossval_ground_truth": cv_gt_str,
-        "crossval_preds": cv_preds_strs,
-        "crossval_error_ranking": cv_ranking_str,
-    }
-    query = (
-        f"{json.dumps(history_info, indent=2)}\n\n\n"
-        f"{json.dumps(pred_info, indent=2)}\n\n\n"
-        f"{json.dumps(cv_info, indent=2)}\n\n\n"
-        f"{_INSTRUCTION}"
-    )
-    return query
 
 
-# ── LLM selection call (their parse_answer, but fallback instead of assert) ───
-_BOXED_RE = re.compile(r"\\boxed\{(.+)\}", re.DOTALL)
 
 
-def _resolve_llm_params() -> Tuple[str, str, str]:
-    """Return (base_url, api_key, model). Explicit config wins; otherwise the
-    running primary (LLM_* env + llm.primary.model)."""
-    lc = _llm_cfg()
-    base_url = lc.get("base_url") or os.environ.get(lc.get("base_url_env", "LLM_BASE_URL"), "")
-    api_key = os.environ.get(lc.get("api_key_env", "LLM_API_KEY"), "")
-    model = lc.get("model") or ""
-    if not model:
-        if lc.get("use_primary_model", True):
-            try:
-                from hermes_trader.agents.duel_store import effective_primary_model
-                model = effective_primary_model()
-            except Exception:
-                model = ""
-        if not model:
-            model = os.environ.get("LLM_MODEL", "")
-    return base_url, api_key, model
 
 
-def _select_with_llm(prompt: str, model_names: List[str]) -> Tuple[str, str]:
-    """One chat completion → parse the boxed winner. Returns (selection, note).
-    ANY failure (no endpoint, timeout, HTTP error, empty box, unknown name)
-    degrades to ("mixture", note) — never raises (their code asserts; we must
-    not block the exec loop)."""
-    base_url, api_key, model = _resolve_llm_params()
-    if not base_url or not api_key:
-        return "mixture", "llm endpoint not configured"
-    lc = _llm_cfg()
-    timeout_s = float(lc.get("timeout_seconds", 20) or 20)
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": False,
-        "max_tokens": int(lc.get("max_tokens", 256)),
-        "temperature": float(lc.get("temperature", 0.7)),
-        "top_p": float(lc.get("top_p", 0.8)),
-    }
-    if lc.get("top_k"):
-        body["top_k"] = int(lc["top_k"])
-    if lc.get("repetition_penalty"):
-        body["repetition_penalty"] = float(lc["repetition_penalty"])
-    # Thinking off (mirror research.py's per-request chat_template_kwargs).
-    if lc.get("enable_thinking") is False:
-        body["chat_template_kwargs"] = {"enable_thinking": False}
-    try:
-        import httpx
-        with httpx.Client(timeout=httpx.Timeout(timeout_s)) as client:
-            resp = client.post(
-                base_url.rstrip("/") + "/chat/completions",
-                json=body,
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-        if resp.status_code != 200:
-            return "mixture", f"llm http {resp.status_code}"
-        data = resp.json()
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        match = _BOXED_RE.search(content or "")
-        if not match:
-            return "mixture", "llm no boxed answer"
-        ans = match.group(1).strip("\n").strip()
-        if ans not in model_names:
-            return "mixture", f"llm unknown model {ans!r}"
-        return ans, "ok"
-    except Exception as e:  # noqa: BLE001 — selection must never raise
-        return "mixture", f"llm error: {type(e).__name__}: {e}"
 
 
 # ── Core compute ──────────────────────────────────────────────────────────────
@@ -551,12 +411,13 @@ def _compute(coin: str, side: str) -> ExpertSelectSignal:
         )
 
     cv = _run_cv(coin, closes, horizon)
+    # Selection is ALWAYS the pooled mixture — the selector LLM leg was deleted
+    # 2026-10-29 (t_61d27555; the week survey measured recentered live-selector
+    # median-MAE 1.220 vs 1.146 for the plain mixture on identical contexts, so
+    # picking a winner was net-negative). `diverse` stays as a pure diagnostic
+    # on the log line (did the candidates disagree?) — it gates nothing.
     diverse = _is_diverse(live, ctx, _diversity_threshold())
-    if not diverse:
-        selected, note = "mixture", "not diverse"
-    else:
-        prompt = _build_prompt(ctx, [int(c.t) for c in candles[-len(ctx):]], live, cv, horizon)
-        selected, note = _select_with_llm(prompt, ok_models)
+    selected = "mixture"
 
     try:
         mixture = _mixture_and_recenter(live, selected, horizon)
@@ -595,10 +456,10 @@ def _compute(coin: str, side: str) -> ExpertSelectSignal:
         candidate_q90_pct={m: pct(list(s.quantiles["0.9"][:horizon]))
                            for m, s in live.items()
                            if s.quantiles and s.quantiles.get("0.9")},
-        # A non-"ok" note (LLM parse-fail / endpoint error) is the diagnostic
-        # that the selection degraded to mixture — record it. Only a clean
-        # pick ("ok") or a pre-LLM "not diverse" skip is error-free.
-        error=None if note in ("ok", "not diverse") else note,
+        # No selection failure is possible any more (the LLM leg is deleted);
+        # the field itself stays — `_format_log` renders `note=` from it and the
+        # attach/error paths downstream depend on the shape.
+        error=None,
     )
 
 
