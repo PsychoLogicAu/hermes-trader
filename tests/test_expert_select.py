@@ -2,13 +2,16 @@
 network, host-runnable.
 
 Mirrors tests/test_timesfm_signal.py: patch at the SOURCE modules (expert_pool
-for the candidate math, httpx.Client for the LLM call, config for the gate)
-so no torch checkpoint, no HL fetch, and no real lemonade endpoint is
-involved. Also pins the executor wiring (attach def + call sites on every
-Trade result path, PASS-branch fields) with AST + route_verdict checks.
+for the candidate math, config for the gate) so no torch checkpoint, no HL
+fetch and no real endpoint is involved. The selector LLM leg was deleted
+2026-10-29 (t_61d27555), so there is no httpx stub any more — the
+retirement-guard test asserts the leg stays deleted. Also pins the
+executor wiring (attach def + call sites on every Trade result path,
+PASS-branch fields) with AST + route_verdict checks.
 """
 
 import ast
+import pathlib
 import time
 from types import SimpleNamespace
 
@@ -42,8 +45,6 @@ def _cfg_block(**over):
         "cache_ttl_seconds": 300,
         "cv_ttl_seconds": 3600,
         "timeout_seconds": 10,
-        "llm": {"model": "fake-model", "use_primary_model": False,
-                "timeout_seconds": 5},
     }
     cfg.update(over)
     return {"expert_select": cfg}
@@ -92,35 +93,6 @@ def _fake_candles(n=78):
     from hermes_trader.models.types import Candle
     return [Candle(t=1_700_000_000_000 + i * 300_000, o=100.0, h=100.0,
                    l=100.0, c=100.0 + 0.5 * i, v=1.0) for i in range(n)]
-
-
-class _FakeResp:
-    def __init__(self, content, status_code=200):
-        self.content = content
-        self.status_code = status_code
-
-    def json(self):
-        return {"choices": [{"message": {"content": self.content}}]}
-
-
-class _FakeClient:
-    """httpx.Client stand-in; `post` returns _FAKE_RESP (set per test) or
-    raises it when it is an Exception instance (the network-error path)."""
-    _FAKE_RESP: object = _FakeResp("")
-
-    def __init__(self, *a, **k):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def post(self, url, json=None, headers=None):
-        if isinstance(self._FAKE_RESP, Exception):
-            raise self._FAKE_RESP
-        return self._FAKE_RESP
 
 
 @pytest.fixture(autouse=True)
@@ -187,7 +159,7 @@ def test_norm_factor_all_nan_and_clipped_std():
     assert mean == 5.0 and std == 1e-5
 
 
-# ── diversity gate (their check_preds_diversity) ────────────────────────────
+# ── diversity diagnostic (their check_preds_diversity) ────────────────────────────
 def _live_from_steps(steps, closes, horizon=H):
     return {m: _mk_candidate(m, closes, horizon, step=s)
             for m, s in steps.items()}
@@ -207,10 +179,10 @@ def test_diversity_different_candidates_diverse(monkeypatch):
     assert es._is_diverse(live, closes, 0.2) is True
 
 
-def test_diversity_single_candidate_skips_llm(monkeypatch):
-    """With <2 live candidates there is nothing to select between →
-    not-diverse → mixture, and the LLM call is skipped (a selection over one
-    candidate would be meaningless)."""
+def test_diversity_single_candidate_not_diverse(monkeypatch):
+    """With <2 live candidates there is nothing to compare -> not-diverse.
+    The field is diagnostic-only since the selector LLM was retired, so this
+    pins the log-field semantics, not an LLM skip."""
     monkeypatch.setattr(es, "_pool", lambda: ["chronos"])
     closes = [100.0 + i for i in range(50)]
     live = _live_from_steps({"chronos": 0.3}, closes)
@@ -299,10 +271,6 @@ def test_cached_signal_carries_raw_candidate_medians(monkeypatch):
     median-MAE join needs them without recomputing the pool."""
     _patch_cfg(monkeypatch, _cfg_block())
     _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    # The fake candidates are diverse → an LLM call would hit the network;
-    # stub it (the point of this test is the cached raw paths, not selection).
-    monkeypatch.setattr(es, "_select_with_llm",
-                        lambda prompt, names: ("mixture", "ok"))
     sig = es._compute("X", "long")
     assert sig.error is None
     assert set(sig.candidate_medians) == {"chronos", "timesfm"}
@@ -318,8 +286,6 @@ def test_cached_signal_carries_per_model_tails_pct(monkeypatch):
     size-up tilt lives in the per-model tail, diluted by the mixture)."""
     _patch_cfg(monkeypatch, _cfg_block())
     _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    monkeypatch.setattr(es, "_select_with_llm",
-                        lambda prompt, names: ("mixture", "ok"))
     sig = es._compute("X", "long")
     assert sig.error is None
     assert set(sig.candidate_q90_pct) == {"chronos", "timesfm"}
@@ -372,7 +338,7 @@ def test_cv_all_failing_returns_empty(monkeypatch):
     assert es._collect_cv(closes, H) == {}
 
 
-# ── full _compute (fake pool + fake LLM) ────────────────────────────────────
+# ── full _compute (fake pool; selection always mixture) ────────────────────────────────────
 def _patch_compute_inputs(monkeypatch, steps, candles=None, errors=None):
     monkeypatch.setattr(ep, "fetch_closes",
                         lambda coin, max_bars=520, interval="5m": candles
@@ -383,111 +349,43 @@ def _patch_compute_inputs(monkeypatch, steps, candles=None, errors=None):
                         _fake_forecast(steps, errors=errors))
 
 
-def test_compute_end_to_end_diverse_llm_selects(monkeypatch):
-    """Diverse candidates → prompt built → LLM picks timesfm → the re-centered
-    mixture's median lands exactly on timesfm's median, and the CV ranking
-    (chronos had the better CV MAE) is still recorded alongside."""
+def test_compute_end_to_end_mixture_is_the_selection(monkeypatch):
+    """Selection is ALWAYS the unshifted pooled mixture, even when the
+    candidates are diverse (selector LLM deleted 2026-10-29, t_61d27555). The
+    CV ranking is still recorded, and the final median is the pooled midpoint
+    — NOT re-centered onto the former "winner" (timesfm's own 0.9/bar median).
+    """
     _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setenv("LLM_BASE_URL", "http://fake:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "k")
     # chronos tracks the 0.5/bar rise (0.3) better than timesfm (0.9) on the
-    # CV replay, but the LLM (faked) still picks timesfm — selection ≠ CV.
+    # CV replay — irrelevant now: there is no picker, the mixture is the answer.
     _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    import httpx
-    monkeypatch.setattr(httpx, "Client", _FakeClient)
-    _FakeClient._FAKE_RESP = _FakeResp("The best model is \\boxed{timesfm}.")
 
     sig = es._compute("X", "long")
     assert sig.error is None
-    assert sig.selected_model == "timesfm"
+    assert sig.selected_model == "mixture"
     assert sig.diverse is True
     assert sig.cv_ranking and sig.cv_ranking[0][0] == "chronos"
-    # re-centered: final median == timesfm's own median (0.9/bar × 12 bars)
     last = 100.0 + 0.5 * 77  # 138.5 — last close of the 78-bar context
-    expected = (0.9 * H / last) * 100
-    assert sig.median_pct == pytest.approx(expected, rel=1e-9)
+    # Pooled fan of the two candidates: at the last step their medians are
+    # last+3.6 (chronos) and last+10.8 (timesfm); the two 10-row fans are
+    # disjoint, so the pooled q0.5 is the midpoint, last + 7.2.
+    assert sig.median_pct == pytest.approx((7.2 / last) * 100, rel=1e-9)
+    # re-centering onto timesfm would have given 10.8/last — must NOT happen
+    assert sig.median_pct < (10.0 / last) * 100
     assert sig.spread_pct is not None and sig.spread_pct > 0
     assert len(sig.q10_path_pct) == H and len(sig.q90_path_pct) == H
     assert all(a < b for a, b in zip(sig.q10_path_pct, sig.q90_path_pct))
 
 
-def test_compute_not_diverse_skips_llm(monkeypatch):
-    """Identical candidates → diversity below threshold → mixture, and the
-    LLM call must not happen (saves the lemonade call; the kill-signal rate)."""
+def test_compute_identical_candidates_mixture(monkeypatch):
+    """Identical candidates -> diverse=False diagnostic, selection mixture.
+    (No LLM call to skip any more — the leg is deleted.)"""
     _patch_cfg(monkeypatch, _cfg_block())
     _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.3})
-    import httpx
-
-    def _no_llm(*a, **k):
-        raise AssertionError("LLM must not be called below diversity")
-
-    monkeypatch.setattr(httpx, "Client", _no_llm)
-
     sig = es._compute("X", "long")
     assert sig.error is None
     assert sig.selected_model == "mixture"
     assert sig.diverse is False
-
-
-def test_compute_llm_parse_fail_degrades_to_mixture(monkeypatch):
-    """Their code ASSERTS on an unboxed answer; we must degrade to the
-    mixture with the error noted, never raise into the exec loop."""
-    _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setenv("LLM_BASE_URL", "http://fake:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "k")
-    _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    import httpx
-    monkeypatch.setattr(httpx, "Client", _FakeClient)
-    _FakeClient._FAKE_RESP = _FakeResp("I'm not sure which is best.")
-
-    sig = es._compute("X", "long")
-    assert sig.error and "no boxed" in sig.error
-    assert sig.selected_model == "mixture"
-    assert sig.median_pct is not None  # mixture still computed
-
-
-def test_compute_llm_unknown_model_degrades_to_mixture(monkeypatch):
-    _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setenv("LLM_BASE_URL", "http://fake:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "k")
-    _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    import httpx
-    monkeypatch.setattr(httpx, "Client", _FakeClient)
-    _FakeClient._FAKE_RESP = _FakeResp("\\boxed{gpt5}")
-
-    sig = es._compute("X", "long")
-    assert sig.error and "unknown model" in sig.error
-    assert sig.selected_model == "mixture"
-
-
-def test_compute_llm_endpoint_error_degrades_to_mixture(monkeypatch):
-    """HTTP 500 → mixture (single endpoint; no fallback chain)."""
-    _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setenv("LLM_BASE_URL", "http://fake:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "k")
-    _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    import httpx
-    monkeypatch.setattr(httpx, "Client", _FakeClient)
-    _FakeClient._FAKE_RESP = _FakeResp("server error", status_code=500)
-
-    sig = es._compute("X", "long")
-    assert sig.error and "http 500" in sig.error
-    assert sig.selected_model == "mixture"
-
-
-def test_compute_llm_network_exception_degrades_to_mixture(monkeypatch):
-    _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setenv("LLM_BASE_URL", "http://fake:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "k")
-    _patch_compute_inputs(monkeypatch, {"chronos": 0.3, "timesfm": 0.9})
-    import httpx
-    monkeypatch.setattr(httpx, "Client", _FakeClient)
-    _FakeClient._FAKE_RESP = ConnectionError("lemonade saturated")
-
-    sig = es._compute("X", "long")
-    assert sig.error and "ConnectionError" in sig.error
-    assert sig.selected_model == "mixture"
-    assert sig.median_pct is not None
 
 
 def test_compute_pool_degrades_to_remaining_candidates(monkeypatch):
@@ -496,13 +394,6 @@ def test_compute_pool_degrades_to_remaining_candidates(monkeypatch):
     _patch_cfg(monkeypatch, _cfg_block())
     _patch_compute_inputs(monkeypatch, {"chronos": 0.3},
                           errors={"timesfm": "tirex down"})
-    import httpx
-
-    def _no_llm(*a, **k):
-        raise AssertionError("1 live candidate → no LLM call")
-
-    monkeypatch.setattr(httpx, "Client", _no_llm)
-
     sig = es._compute("X", "long")
     assert sig.error is None
     assert sig.selected_model == "mixture"
@@ -527,81 +418,6 @@ def test_compute_insufficient_candles_error(monkeypatch):
                         lambda cl: [float(c["c"]) for c in cl])
     sig = es._compute("X", "long")
     assert sig.error and "insufficient candles" in sig.error
-
-
-# ── prompt construction ─────────────────────────────────────────────────────
-def test_prompt_carries_their_three_blocks_and_instruction(monkeypatch):
-    """The selection prompt must stay in their exact format: three JSON
-    blocks (history_info / pred_info / cv_info), z-normalized to 3 decimals,
-    the CV MAE ranking string, and the verbatim \\boxed instruction."""
-    monkeypatch.setattr(es, "_pool", lambda: ["chronos", "timesfm"])
-    closes = [100.0 + 0.5 * i for i in range(50)]
-    ts_list = [1_700_000_000_000 + i * 300_000 for i in range(50)]
-    live = _live_from_steps({"chronos": 0.3, "timesfm": 0.9}, closes)
-    cv = {"preds": {m: [100.0 + 0.5 * i for i in range(12)]
-                    for m in ("chronos", "timesfm")},
-          "maes": {"chronos": 1.0, "timesfm": 2.0},
-          "ranking": [("chronos", 1.0), ("timesfm", 2.0)],
-          "tail": [140.0 + 0.5 * i for i in range(12)]}
-    p = es._build_prompt(closes, ts_list, live, cv, H)
-    for key in ("history_window", "history_values", "future_window",
-                "model_names", "candidate_preds", "crossval_window",
-                "crossval_ground_truth", "crossval_preds",
-                "crossval_error_ranking"):
-        assert f'"{key}"' in p, f"missing {key} block key"
-    assert "chronos < timesfm" in p  # ranking string
-    assert "\\boxed{" in p  # the parse target
-    # z-normalized to 3 decimals
-    import re as _re
-    vals = _re.findall(r"-?\d+\.\d{3}", p)
-    assert len(vals) > 50
-
-
-def test_prompt_without_cv_still_builds(monkeypatch):
-    """A failed CV replay (cv={}) degrades the cv_info section, not the
-    whole prompt."""
-    monkeypatch.setattr(es, "_pool", lambda: ["chronos", "timesfm"])
-    closes = [100.0 + i for i in range(50)]
-    ts_list = [1_700_000_000_000 + i * 300_000 for i in range(50)]
-    live = _live_from_steps({"chronos": 0.3, "timesfm": 0.9}, closes)
-    p = es._build_prompt(closes, ts_list, live, {}, H)
-    assert '"crossval_error_ranking": ""' in p
-    assert "\\boxed{" in p
-
-
-# ── LLM param resolution (D2: primary by default, explicit wins) ────────────
-def test_resolve_llm_explicit_config_wins(monkeypatch):
-    _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.setenv("LLM_BASE_URL", "http://primary:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "primary-key")
-    monkeypatch.setenv("LLM_MODEL", "primary-model")
-    base, key, model = es._resolve_llm_params()
-    assert base == "http://primary:13305/api/v1"
-    assert key == "primary-key"
-    assert model == "fake-model"  # explicit llm.model beats the primary
-
-
-def test_resolve_llm_use_primary_model(monkeypatch):
-    """use_primary_model (default) with no explicit model resolves the
-    primary model — the selector tracks whatever the primary is."""
-    cfg = _cfg_block()
-    cfg["expert_select"]["llm"] = {}  # no explicit model
-    _patch_cfg(monkeypatch, cfg)
-    monkeypatch.setenv("LLM_BASE_URL", "http://primary:13305/api/v1")
-    monkeypatch.setenv("LLM_API_KEY", "primary-key")
-    monkeypatch.setenv("LLM_MODEL", "qwen-primary")
-    base, key, model = es._resolve_llm_params()
-    assert model == "qwen-primary"
-    assert base == "http://primary:13305/api/v1"
-
-
-def test_select_llm_no_endpoint_degrades(monkeypatch):
-    """No base_url/api_key → mixture, never a connection attempt."""
-    _patch_cfg(monkeypatch, _cfg_block())
-    monkeypatch.delenv("LLM_BASE_URL", raising=False)
-    monkeypatch.delenv("LLM_API_KEY", raising=False)
-    sel, note = es._select_with_llm("prompt", ["chronos"])
-    assert sel == "mixture" and "endpoint" in note
 
 
 # ── fetch / timeout / caching (mirrors the chronos/timesfm tests) ───────────
@@ -730,15 +546,9 @@ def test_pool_config_filters_unknown_names(monkeypatch):
 
 def test_pool_single_entry_mixture_only(monkeypatch):
     """A 1-entry pool config → the diversity gate can't fire (needs ≥2
-    candidates) → mixture-only path, no LLM call, signal still live."""
+    candidates) and the signal still lands on the pooled mixture."""
     _patch_cfg(monkeypatch, _cfg_block(pool=["chronos"]))
     _patch_compute_inputs(monkeypatch, {"chronos": 0.3})
-    import httpx
-
-    def _no_llm(*a, **k):
-        raise AssertionError("single-candidate pool → no LLM call")
-
-    monkeypatch.setattr(httpx, "Client", _no_llm)
     sig = es._compute("X", "long")
     assert sig.error is None
     assert sig.selected_model == "mixture"
@@ -897,3 +707,19 @@ def test_route_verdict_pass_renders_enabled_expert(monkeypatch):
     assert routed["expert_aligned_if_long"] is True
     assert routed["expert_aligned_if_short"] is False
     assert routed["expert_selected_model"] == "mixture"
+
+
+# ── selector LLM retirement guard (t_61d27555, deleted 2026-10-29) ─────────
+def test_selector_llm_leg_stays_deleted():
+    """The MoiraiAgent selector LLM was retired on measured evidence (live
+    selector median-MAE 1.220pp vs plain mixture 1.146pp on identical
+    contexts, n=683 diverse anchors). This pins the DELETION: the module must
+    not import an HTTP client, build their prompt, parse \\boxed, or read an
+    `llm` config sub-block again. Bringing it back must be a deliberate git
+    revert, never a config flip that silently revives a call path."""
+    src = pathlib.Path(es.__file__).read_text()
+    for needle in ("httpx", "chat/completions", "_select_with_llm",
+                   "_resolve_llm_params", "_build_prompt", "_BOXED_RE",
+                   "_llm_cfg", "\\boxed{"):
+        assert needle not in src, f"selector LLM leg is back: {needle!r}"
+    assert '_cfg().get("llm"' not in src, "the llm config sub-block is read again"
