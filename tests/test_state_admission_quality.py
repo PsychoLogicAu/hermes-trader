@@ -127,35 +127,50 @@ def test_inject_maps_and_rounds(monkeypatch):
     import hermes_trader.agents.tirex_signal as ts_mod
     monkeypatch.setattr(es_mod, "peek_expert_select",
                         lambda coin: _Sig(spread_pct=0.83))
-    monkeypatch.setattr(cs_mod, "peek_chronos",
-                        lambda coin: _Sig(q90_path_pct=[0.1, 0.2, 0.44, 9.9, 9.9, 9.9]))
-    monkeypatch.setattr(ts_mod, "peek_tirex",
-                        lambda coin: _Sig(median_pct=-0.04))
+    monkeypatch.setattr(cs_mod, "get_chronos_signal_sync",
+                        lambda coin, side: _Sig(q90_path_pct=[0.1, 0.2, 0.44, 9.9, 9.9, 9.9], error=None))
+    monkeypatch.setattr(ts_mod, "get_tirex_signal_sync",
+                        lambda coin, side: _Sig(median_pct=-0.04, error=None))
     out = inject_state_quality({}, "ARB", "short",
                                cfg={"chronos_tail_trigger_gate": {"window_steps": 6}})
     assert out["expert_spread_pct"] == 0.83
-    # window cut: 9.9s are outside the 6-step window... they ARE inside (len 6)
-    assert out["chronos_tail_pct"] == 9.9  # max of first 6
+    assert out["chronos_tail_pct"] == 9.9  # max of the 6-step window
     assert out["tirex_median_pct"] == 0.0  # 0.1-rounded like the trade-result field
 
 
-def test_inject_window_and_missing_reads(monkeypatch):
+def test_inject_window_error_and_missing_reads(monkeypatch):
     import hermes_trader.agents.expert_select as es_mod
     import hermes_trader.agents.chronos_signal as cs_mod
     import hermes_trader.agents.tirex_signal as ts_mod
     monkeypatch.setattr(es_mod, "peek_expert_select", lambda coin: None)
-    monkeypatch.setattr(cs_mod, "peek_chronos",
-                        lambda coin: _Sig(q90_path_pct=[0.1, 0.2]))  # shorter than window
-    monkeypatch.setattr(ts_mod, "peek_tirex", lambda coin: _Sig(median_pct=None))
+    monkeypatch.setattr(cs_mod, "get_chronos_signal_sync",
+                        lambda coin, side: _Sig(q90_path_pct=[0.1, 0.2]))  # shorter than window
+    monkeypatch.setattr(ts_mod, "get_tirex_signal_sync",
+                        lambda coin, side: _Sig(median_pct=None, error=None))
     out = inject_state_quality({}, "ARB", "short",
                                cfg={"chronos_tail_trigger_gate": {"window_steps": 6}})
-    assert out == {}  # all peeks miss -> fields absent -> clause SKIPs set legs
+    assert out == {}  # all reads absent -> clause SKIPs set legs
+
+
+def test_inject_errored_signal_is_absent(monkeypatch):
+    import hermes_trader.agents.chronos_signal as cs_mod
+    import hermes_trader.agents.tirex_signal as ts_mod
+    monkeypatch.setattr(cs_mod, "get_chronos_signal_sync",
+                        lambda coin, side: _Sig(q90_path_pct=[0.1] * 6, error="candle fetch failed"))
+    monkeypatch.setattr(ts_mod, "get_tirex_signal_sync",
+                        lambda coin, side: _Sig(median_pct=1.0, error="model down"))
+    out = inject_state_quality({}, "ARB", "short", cfg={})
+    assert out == {}  # errored signals never feed the gate a number
 
 
 def test_inject_peek_crash_is_swallowed(monkeypatch):
     import hermes_trader.agents.expert_select as es_mod
-    def boom(coin):
-        raise RuntimeError("cache exploded")
+    import hermes_trader.agents.chronos_signal as cs_mod
+    import hermes_trader.agents.tirex_signal as ts_mod
+    def boom(*a, **k):
+        raise RuntimeError("model exploded")
     monkeypatch.setattr(es_mod, "peek_expert_select", boom)
+    monkeypatch.setattr(cs_mod, "get_chronos_signal_sync", boom)
+    monkeypatch.setattr(ts_mod, "get_tirex_signal_sync", boom)
     out = inject_state_quality({"a": 1}, "ARB", "short", cfg={})
     assert out["a"] == 1  # never raises on the trade path

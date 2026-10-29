@@ -381,17 +381,25 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
 def inject_state_quality(analysis: Dict[str, Any], coin: str, side: str,
                          cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Attach the short-side quality-gate features to a clause analysis dict
-    (t_860f95f8). Cache-first peeks only — NEVER computes, never blocks,
-    never pays model cost (same contract as the tape injection). Missing
-    reads simply stay absent; the clause then SKIPs any leg whose key is
-    set (fail-closed on the refuse-only side).
+    (t_860f95f8). Uses the SAME cache-first sync wrappers the trade-result
+    attach path uses (get_chronos_signal_sync / get_tirex_signal_sync at
+    executor _attach_*): the attach runs AFTER the conf gate for every
+    evaluated coin, so a peek-only read at gate time cold-misses the very
+    values the cohort audit measured (live proof 2026-10-29: first three
+    post-flip candidates all SKIPped 'no chronos upside tail read'). The
+    sync wrapper is cache-first, so for the clause cohort the compute is
+    NOT extra cost — the same scan attaches (and pays for) the identical
+    signal seconds later; whichever call lands first computes, the other
+    cache-hits. Missing/failed reads stay absent; the clause then SKIPs
+    any leg whose key is set (fail-closed on the refuse-only side).
 
       expert_spread_pct  expert-select consensus width (the [expert] line's
-                         spread= field)
+                         spread= field) — peek only (pure; the expert pool
+                         has its own worker cadence and is config-gated)
       chronos_tail_pct   adverse-quantile extreme over the first
                          window_steps path steps — IDENTICAL formula to the
-                         chronos_tail_pct trade-result field (executor
-                         attach), window from chronos_tail_trigger_gate
+                         chronos_tail_pct trade-result field, window from
+                         chronos_tail_trigger_gate
       tirex_median_pct   TiRex 1.1 median forecast, 0.1-rounded like the
                          trade-result field for cross-log comparability
     """
@@ -405,9 +413,9 @@ def inject_state_quality(analysis: Dict[str, Any], coin: str, side: str,
     except Exception:
         pass
     try:
-        from hermes_trader.agents.chronos_signal import peek_chronos
-        cs = peek_chronos(coin)
-        if cs is not None:
+        from hermes_trader.agents.chronos_signal import get_chronos_signal_sync
+        cs = get_chronos_signal_sync(coin, side)
+        if cs is not None and getattr(cs, "error", None) is None:
             _tcfg = None
             try:
                 _src = cfg if isinstance(cfg, dict) else None
@@ -426,9 +434,9 @@ def inject_state_quality(analysis: Dict[str, Any], coin: str, side: str,
     except Exception:
         pass
     try:
-        from hermes_trader.agents.tirex_signal import peek_tirex
-        ts = peek_tirex(coin)
-        _tm = ts.median_pct if ts is not None else None
+        from hermes_trader.agents.tirex_signal import get_tirex_signal_sync
+        ts = get_tirex_signal_sync(coin, side)
+        _tm = ts.median_pct if (ts is not None and getattr(ts, "error", None) is None) else None
         if _tm is not None:
             out["tirex_median_pct"] = round(float(_tm) * 10) / 10
     except Exception:
@@ -471,7 +479,8 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
     }
     if isinstance(clause.get("short"), dict) and isinstance(
             clause["short"].get("quality"), dict):
-        # Short-side quality gate (t_860f95f8): peek-only feature reads.
+        # Short-side quality gate (t_860f95f8): cache-first sync reads
+        # (same wrappers the post-gate attach uses — not extra compute).
         _sa = inject_state_quality(_sa, str(getattr(ctx, "coin", "") or ""),
                                    str(getattr(ctx, "trade_side", "") or ""), cfg)
     admit, why, shadow = state_admission(

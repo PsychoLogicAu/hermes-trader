@@ -3350,8 +3350,9 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 if isinstance(_clause, dict) and isinstance(
                         _clause.get("short"), dict) and isinstance(
                         _clause["short"].get("quality"), dict):
-                    # Short-side quality gate (t_860f95f8): peek-only reads
-                    # (expert spread / chronos upside tail / tirex median).
+                    # Short-side quality gate (t_860f95f8): cache-first sync
+                    # reads (same wrappers the post-gate attach uses, so the
+                    # compute is not extra cost — see inject_state_quality).
                     _ca = inject_state_quality(_ca, str(coin or ""), str(side))
                 _admit, _why, _shadow = state_admission(
                     _ca, _clause, bool(gate.get("allow_shorts", False)))
