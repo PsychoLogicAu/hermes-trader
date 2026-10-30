@@ -1009,6 +1009,44 @@ class TestLedgerLaneTag:
         monkeypatch.setattr(ledger, "LEDGER_FILE", str(tmp_path / "nope.jsonl"))
         assert ledger.count_open_with_lane("aligned_short_live") == 0
 
+    def _write(self, tmp_path, monkeypatch, rows):
+        from hermes_trader import ledger
+        path = tmp_path / "trades.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                        encoding="utf-8")
+        monkeypatch.setattr(ledger, "LEDGER_FILE", str(path))
+        return ledger
+
+    def test_same_price_reentry_is_visible(self, tmp_path, monkeypatch):
+        # Go-live review 2026-10-31 regression: the old SET-based pairing let
+        # one historical CLOSE poison every later OPEN at an identical
+        # (coin, side, entry_px) — a same-price re-entry read 0 occupancy and
+        # the lane could exceed max_lane_slots (over-admit direction).
+        ledger = self._write(tmp_path, monkeypatch, [
+            {"event": "OPEN", "coin": "BTC", "side": "short", "entry_px": 100.0,
+             "config_snapshot": {"lane": "aligned_short_live"}},
+            {"event": "CLOSE", "coin": "BTC", "side": "short", "entry_px": 100.0},
+            {"event": "OPEN", "coin": "BTC", "side": "short", "entry_px": 100.0,
+             "config_snapshot": {"lane": "aligned_short_live"}},
+        ])
+        assert ledger.count_open_with_lane("aligned_short_live") == 1
+
+    def test_multiset_pairing_two_opens_one_close(self, tmp_path, monkeypatch):
+        ledger = self._write(tmp_path, monkeypatch, [
+            {"event": "OPEN", "coin": "BTC", "side": "short", "entry_px": 100.0,
+             "config_snapshot": {"lane": "aligned_short_live"}},
+            {"event": "OPEN", "coin": "BTC", "side": "short", "entry_px": 100.0,
+             "config_snapshot": {"lane": "aligned_short_live"}},
+            {"event": "CLOSE", "coin": "BTC", "side": "short", "entry_px": 100.0},
+        ])
+        assert ledger.count_open_with_lane("aligned_short_live") == 1
+        # and the full cycle nets to zero, never negative
+        with open(ledger.LEDGER_FILE, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(
+                {"event": "CLOSE", "coin": "BTC", "side": "short",
+                 "entry_px": 100.0}) + "\n")
+        assert ledger.count_open_with_lane("aligned_short_live") == 0
+
     def test_open_snapshot_unchanged_without_lane(self, monkeypatch):
         from hermes_trader.agents.executor import build_open_config_snapshot
         base = build_open_config_snapshot("down", "dsl", 1.5, 2.0)

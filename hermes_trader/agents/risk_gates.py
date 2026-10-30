@@ -3085,6 +3085,12 @@ def build_aligned_short_lane_analysis(spec: Dict[str, Any]) -> Dict[str, Any]:
     floors because `cohort_tag` + `primary_model` resolve to the
     `cohort_admissions` key the owner set — which is exactly why the key is the
     hot-rollback switch (remove it and conf 0.0 blocks at both layers).
+    Sizing note (go-live review 2026-10-31): the live sizing path is ATR
+    equal-risk (risk_pct x equity / stop distance) — independent of the 0.0
+    confidence. The legacy equity-fraction branch DOES tier by confidence
+    (`conviction_tiers`, and conf 0.0 would land on the SMALLEST tier, 0.7x),
+    so if `conviction_sizing` is ever flipped on alongside ATR sizing off, lane
+    entries size at the lowest tier — conservative, never inflated.
     """
     ts = int(spec.get("ts") or time.time() * 1000)
     coin = str(spec.get("coin") or "")

@@ -1434,7 +1434,9 @@ while True:
                 logger.warning(f"[aligned-short-lane] shadow emit pass failed: {_ale}")
         # ALIGNED-SHORT lane LIVE admission (board t_2e23804b) — the promotion
         # experiment, owner call 2026-10-30: aligned_short / aligned_dn4h,
-        # deep bucket, mom6h_net deep, BTC 24h drift < 0, inside its OWN
+        # deep bucket, mom6h_net <= mom_max_pct, ARMED tape
+        # ((drift<=btc24_max_pct AND vol>=vol_min_pct) OR net6h<=net6h_max_pct)
+        # with the btc24_min_pct depth ceiling, inside its OWN
         # max_lane_slots (5) on top of the shared max_concurrent pool. Inert
         # unless aligned_short_lane.live.enabled is true, and the entry itself
         # only clears the conf floors while
@@ -1468,11 +1470,21 @@ while True:
                     last_entry_ts_by_coin=memory.latest_trade_ts_by_coin(200),
                 )
                 for _spec in _specs:
-                    _res = maybe_execute(build_aligned_short_lane_analysis(_spec))
-                    logger.warning(
-                        f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
-                        f"maybe_execute -> executed={_res.get('executed')} "
-                        f"reason={_res.get('reason') or '-'}")
+                    # Per-spec isolation (go-live review 2026-10-31): one bad
+                    # order must not starve the rest of this cycle's admits.
+                    # Failure direction stays safe — a throw loses that entry,
+                    # it never force-enters one.
+                    try:
+                        _res = maybe_execute(build_aligned_short_lane_analysis(_spec))
+                        logger.warning(
+                            f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
+                            f"maybe_execute -> executed={_res.get('executed')} "
+                            f"reason={_res.get('reason') or '-'}")
+                    except Exception as _lex:
+                        logger.warning(
+                            f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
+                            f"maybe_execute RAISED {_lex} — entry dropped, "
+                            f"remaining specs continue")
             except Exception as _lle:
                 logger.warning(f"[aligned-short-lane] live admit pass failed: {_lle}")
         _last_progress_ts = time.time()  # watchdog: a full cycle completed
