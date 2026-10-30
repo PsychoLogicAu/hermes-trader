@@ -219,7 +219,7 @@ def _as_shadow(v: Any) -> bool:
     return not (v is False or str(v).strip().lower() == "false")
 
 
-def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any]) -> str:
+def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any], band_max: Any = None) -> str:
     """Render the short-clause tape-state stamp (t_860f95f8, 2026-10-30).
 
     LOG-ONLY: this can never change a verdict — it labels WHICH tape-phase
@@ -243,8 +243,44 @@ def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any]) -> str:
     armed / ``<age>hx`` past clock / ``n`` no crossing; missing history ->
     ``no-history`` (fail-open).
     """
-    if not btc_history or len(btc_history) < 30:
+    arms = tape_state_arms(btc_history, tape_cfg, band_max=band_max)
+    if arms is None:
         return "no-history"
+    if arms == "malformed":
+        return "malformed-history"
+    parts = []
+    for name in ("deep", "shallow"):
+        a = arms[name]
+        if a["age"] is None:
+            parts.append(f"{name}=n")
+        else:
+            flag = "+" if a["active"] else ("d" if a["disarmed"] else "x")
+            parts.append(f"{name}={a['age']:.1f}h{flag}<={a['clock']:g}")
+    return " ".join(parts)
+
+
+def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
+                    band_max: Any = None) -> Any:
+    """Compute the crossing-clock arms behind the tape-state stamp, as data.
+
+    Returns {"deep": {"age": h|None, "clock": h, "active": bool,
+             "disarmed": bool}, "shallow": {...}}, or None when history is
+    missing/short (``no-history``), or the string ``"malformed"`` on
+    unparseable history. The stamp renders missing history fail-OPEN because
+    it is log-only, but an ARM GATE (``tape_state.require_arm``) must treat
+    both non-dict results as NOT armed: an arm may only open entry on
+    positive crossing evidence.
+
+    DISARM RULE (owner ruling 2026-10-30): any venture of trail-24h drift
+    OUT of the band above the top (``band_max`` — or the ``disarm_above_pct``
+    tape_state knob to override) disarms every crossing older than it; a
+    re-arm requires a fresh venture below the floor (i.e. a NEWER crossing).
+    Without this, a clock could stay "armed" while drift slid back into the
+    band FROM ABOVE — the LHS slide the whole arm exists to refuse. Stamp
+    marker for a crossed-but-disarmed leg: ``d``.
+    """
+    if not btc_history or len(btc_history) < 30:
+        return None
     try:
         import bisect
         hist = sorted((int(t), float(c)) for t, c in btc_history if float(c) > 0)
@@ -255,9 +291,17 @@ def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any]) -> str:
             if j >= 0 and hist[j][1] > 0:
                 series.append((t, (c - hist[j][1]) / hist[j][1] * 100.0))
         if not series:
-            return "no-history"
+            return None
         now_ms = series[-1][0]
-        parts = []
+        top = tape_cfg.get("disarm_above_pct", band_max)
+        disarm_t = None
+        if top is not None:
+            top = float(top)
+            for i in range(len(series) - 1, 0, -1):
+                if series[i][1] >= top > series[i - 1][1]:
+                    disarm_t = series[i][0]
+                    break
+        out: Dict[str, Any] = {}
         for name, pk, ck, dft in (("deep", "deep_arm_pct", "deep_arm_clock_h", (-3.0, 48.0)),
                                   ("shallow", "shallow_arm_pct", "shallow_arm_clock_h", (-2.0, 12.0))):
             depth = float(tape_cfg.get(pk, dft[0]))
@@ -267,14 +311,15 @@ def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any]) -> str:
                 if series[i][1] > depth >= series[i - 1][1]:
                     cross_t = series[i][0]
                     break
-            if cross_t is None:
-                parts.append(f"{name}=n")
-            else:
-                age = (now_ms - cross_t) / 3_600_000
-                parts.append(f"{name}={age:.1f}h{'+' if age <= clock else 'x'}<={clock:g}")
-        return " ".join(parts)
+            age = None if cross_t is None else (now_ms - cross_t) / 3_600_000
+            disarmed = (cross_t is not None and disarm_t is not None
+                        and cross_t <= disarm_t)
+            out[name] = {"age": age, "clock": clock, "disarmed": disarmed,
+                         "active": (age is not None and age <= clock
+                                    and not disarmed)}
+        return out
     except (TypeError, ValueError):
-        return "malformed-history"
+        return "malformed"
 
 
 def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
@@ -416,9 +461,29 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
             # ``btc_history_1h`` ONLY when the block exists (no fetch cost
             # otherwise); fail-open to 'no-history' on a candle gap.
             _st = ""
-            if isinstance(sub.get("tape_state"), dict):
+            _tapecfg = sub.get("tape_state") if isinstance(sub.get("tape_state"), dict) else None
+            if _tapecfg is not None:
                 _st = " tape [" + tape_state_stamp(
-                    analysis.get("btc_history_1h"), sub["tape_state"]) + "]"
+                    analysis.get("btc_history_1h"), _tapecfg, band_max=_mx) + "]"
+            # Arm GATE (t_860f95f8, 2026-10-30, owner ruling): the short band
+            # is a CRASH-AFTERMATH harvest — entry is only legal after the
+            # trail-24h drift has gone THROUGH the band floor and recovered
+            # back (an active deep/shallow crossing clock). Band membership
+            # alone is not sufficient: it admits the slide-into-band (LHS),
+            # which is exactly the never-armed population measured at
+            # -198.94 / 68 max_loss (10-29, n=250) vs +4.98/7 armed (10-30).
+            # require_arm absent/false = byte-identical stamp-only behavior.
+            # FAIL-CLOSED by design: an arm may only OPEN entry on positive
+            # crossing evidence, so no-history/malformed = ARM-SKIP (the
+            # stamp stays fail-open because it is log-only; a gate is not).
+            if _tapecfg is not None and bool(_tapecfg.get("require_arm", False)):
+                _arms = tape_state_arms(analysis.get("btc_history_1h"), _tapecfg, band_max=_mx)
+                if not isinstance(_arms, dict) or not (_arms["deep"]["active"] or _arms["shallow"]["active"]):
+                    return False, ("ARM-SKIP: crash arm not active (drift has not "
+                                   f"gone through the band floor and recovered back; "
+                                   f"deep clock {_tapecfg.get('deep_arm_clock_h', 48):g}h, "
+                                   f"shallow clock {_tapecfg.get('shallow_arm_clock_h', 12):g}h)"
+                                   + _st), shadow
             # Quality gate (t_860f95f8, 2026-10-29): on band-days the short
             # population oversupplies the book ~7:1 and the binding
             # constraint is candidate QUALITY, not slots. Crash-episode
