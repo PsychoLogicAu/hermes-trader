@@ -90,6 +90,14 @@ services:
       - /home/oknight/.cache/huggingface:/hf:ro
     networks:
       - llama-net
+    # PROFILE-GATED ON PURPOSE (incident 2026-10-30 09:16Z): a plain
+    # `docker compose up -d` (which scripts/build.sh does on every deploy)
+    # would start this arm too, and these arms cannot share the 16 GB card
+    # with the live seat — the seat then OOM crash-loops and every research
+    # cycle is ai_down. Start it deliberately, never by deploy:
+    #   docker compose up -d --profile seat-alt <this-service>
+    profiles:
+      - seat-alt
     restart: unless-stopped
     deploy:
       resources:
@@ -120,6 +128,14 @@ services:
       - /home/oknight/models/decision2-gguf:/models:ro
     networks:
       - llama-net
+    # PROFILE-GATED ON PURPOSE (incident 2026-10-30 09:16Z): a plain
+    # `docker compose up -d` (which scripts/build.sh does on every deploy)
+    # would start this arm too, and these arms cannot share the 16 GB card
+    # with the live seat — the seat then OOM crash-loops and every research
+    # cycle is ai_down. Start it deliberately, never by deploy:
+    #   docker compose up -d --profile seat-alt <this-service>
+    profiles:
+      - seat-alt
     restart: unless-stopped
     deploy:
       resources:
@@ -155,6 +171,14 @@ services:
       - /home/oknight/models:/models:ro
     networks:
       - llama-net
+    # PROFILE-GATED ON PURPOSE (incident 2026-10-30 09:16Z): a plain
+    # `docker compose up -d` (which scripts/build.sh does on every deploy)
+    # would start this arm too, and these arms cannot share the 16 GB card
+    # with the live seat — the seat then OOM crash-loops and every research
+    # cycle is ai_down. Start it deliberately, never by deploy:
+    #   docker compose up -d --profile seat-alt <this-service>
+    profiles:
+      - seat-alt
     restart: unless-stopped
     deploy:
       resources:
