@@ -420,3 +420,17 @@ def test_classic_gate_absent_clause_byte_identical(monkeypatch):
 def test_classic_gate_no_model_byte_identical(monkeypatch):
     res = _classic(_ctx(primary_model=None), dict(_CLAUSE), monkeypatch)
     assert res == {"pass": False, "reason": "confidence 0.50 < 0.65"}
+
+
+def test_negative_min_conf_clamped():
+    # Config-authoring guard (2026-10-31 review): a negative min_conf is
+    # clamped to 0.0 — it can never widen the rescue envelope below conf 0.
+    clause = {"shadow": False,
+              "short": {"btc24_min_pct": -2.0, "btc24_max_pct": 0.0,
+                        "min_conf": -0.5}}
+    admit, why, shadow = risk_gates.state_admission(
+        _short(conf=-0.1, btc=-1.0), clause, True)
+    assert admit is False
+    admit, why, shadow = risk_gates.state_admission(
+        _short(conf=0.0, btc=-1.0), clause, True)
+    assert admit is True and shadow is False

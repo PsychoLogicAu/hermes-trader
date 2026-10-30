@@ -198,6 +198,11 @@ def _pair_key(ev: Dict[str, Any]) -> tuple | None:
     return coin, side, px
 
 
+# Warn once per process: the missing-ledger read returns 0 by design
+# (bootstrap), but silence would hide a lost volume with live positions.
+_LANE_LEDGER_MISSING_WARNED = False
+
+
 def count_open_with_lane(lane_tag: str) -> int:
     """OPEN rows tagged config_snapshot.lane == lane_tag with no CLOSE yet.
 
@@ -205,15 +210,25 @@ def count_open_with_lane(lane_tag: str) -> int:
     experiment, owner call 2026-10-30). Read off the append-only ledger rather
     than the in-process DSL trackers so the count survives a container
     recreate — the same restart-safety discipline the daily-PnL and cooldown
-    reads use. House pairing: (coin, side, entry_px), file order, each CLOSE
-    consumed once. Missing file / malformed lines degrade to 0, never raise:
-    a lane that cannot prove its own occupancy must not over-admit.
+    reads use. House pairing: (coin, side, entry_px) as a MULTISET — per key,
+    live = max(0, opens - closes). Set-based pairing was the pre-fix bug
+    (go-live review 2026-10-31): one historical CLOSE at a key poisoned every
+    later OPEN at the same price, so a same-price re-entry read 0 and the lane
+    could exceed its slot budget — an over-admit fail direction. Multiset
+    pairing fixes same-subsystem re-entries; a close from a DIFFERENT
+    subsystem at an identical float entry_px could still misattribute, but
+    float-precision px makes cross-subsystem collisions vanishingly rare and
+    it is strictly rarer than the bug this replaces. Missing file degrades to
+    0 (a genuinely fresh ledger has no file; blocking there would deadlock the
+    lane's first entry) but logs a WARNING, because a missing ledger with
+    live positions is a bookkeeping incident. Unreadable -> -1: a lane that
+    cannot prove its own occupancy must not over-admit.
     """
     tag = str(lane_tag or "").strip().lower()
     if not tag:
         return 0
-    opens: list[tuple] = []
-    closed: set[tuple] = set()
+    opens: Dict[tuple, int] = {}
+    closes: Dict[tuple, int] = {}
     try:
         with open(LEDGER_FILE, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -234,12 +249,19 @@ def count_open_with_lane(lane_tag: str) -> int:
                     snap = ev.get("config_snapshot")
                     if isinstance(snap, dict) and \
                             str(snap.get("lane") or "").strip().lower() == tag:
-                        opens.append(key)
+                        opens[key] = opens.get(key, 0) + 1
                 elif event == "CLOSE":
-                    closed.add(key)
+                    closes[key] = closes.get(key, 0) + 1
     except FileNotFoundError:
+        global _LANE_LEDGER_MISSING_WARNED
+        if not _LANE_LEDGER_MISSING_WARNED:
+            _LANE_LEDGER_MISSING_WARNED = True
+            logger.warning(
+                f"[ledger] count_open_with_lane({tag}): LEDGER FILE MISSING "
+                f"({LEDGER_FILE}) — reading 0 occupancy. If any lane "
+                f"positions are live this is a bookkeeping incident.")
         return 0
     except Exception as exc:  # unreadable ledger -> assume full, not empty
         logger.warning(f"[ledger] count_open_with_lane({tag}) failed: {exc}")
         return -1
-    return sum(1 for k in opens if k not in closed)
+    return sum(max(0, n - closes.get(k, 0)) for k, n in opens.items())
