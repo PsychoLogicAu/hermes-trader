@@ -212,6 +212,13 @@ def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> boo
     return fired < need
 
 
+def _as_shadow(v: Any) -> bool:
+    """Shadow flag parse: True (log-only) UNLESS explicit false. Accepts
+    bool False or the strings 'false'/'False' (hot-reloaded JSON arrives as
+    both shapes across config eras; same leniency as the clause-level key)."""
+    return not (v is False or str(v).strip().lower() == "false")
+
+
 def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any]) -> str:
     """Render the short-clause tape-state stamp (t_860f95f8, 2026-10-30).
 
@@ -326,9 +333,14 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
     the callers — the weld is structural: another model in the seat has
     no block = byte-identical general path. Absent/malformed block,
     unset side tape keys, or no tape read = inert (fail-open to the
-    normal block). ``shadow`` defaults to True (log-only, entry still
+    normal block).    ``shadow`` defaults to True (log-only, entry still
     blocked); shadow:true is also the kill-switch — only an explicit
-    false goes live. Returns (admit, why, shadow). Pure: no I/O, no
+    false goes live. A per-side ``shadow`` key INSIDE the long/short
+    sub-block overrides the clause-level flag for that side only
+    (clause false + short shadow true = shorts still accrue; clause true
+    + short shadow false = shorts live while the long arm accrues).
+    Sub-block shadow absent = clause-level value, byte-identical prior
+    behavior. Returns (admit, why, shadow). Pure: no I/O, no
     logging.
     Side-level inert paths (no side sub-block, unset tape keys, no tape
     read, malformed values) return a LABELLED why — the call sites log
@@ -342,7 +354,7 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
     if not isinstance(clause_cfg, dict):
         return False, "", True
     _sh = clause_cfg.get("shadow", True)
-    shadow = not (_sh is False or str(_sh).strip().lower() == "false")
+    shadow = _as_shadow(_sh)
     side = str(analysis.get("side") or "").lower()
     try:
         conf = float(analysis.get("confidence", 0) or 0)
@@ -350,6 +362,10 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
             sub = clause_cfg.get("long")
             if not isinstance(sub, dict):
                 return False, "clause has no 'long' block (inert)", shadow
+            # Per-side shadow override (t_860f95f8 era): long.shadow beats
+            # clause-level shadow for THIS side only, so one arm can trade
+            # live while the other keeps accruing. Absent = clause-level.
+            shadow = _as_shadow(sub.get("shadow", _sh))
             if bool(analysis.get("daily_mover_fired")):
                 return False, "dailyMover fired (crowded-extension class)", shadow
             min_conf = float(sub.get("min_conf", 0.0) or 0.0)
@@ -374,6 +390,8 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
             sub = clause_cfg.get("short")
             if not isinstance(sub, dict):
                 return False, "clause has no 'short' block (inert)", shadow
+            # Per-side shadow override (mirror of the long side).
+            shadow = _as_shadow(sub.get("shadow", _sh))
             min_conf = float(sub.get("min_conf", 0.0) or 0.0)
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
