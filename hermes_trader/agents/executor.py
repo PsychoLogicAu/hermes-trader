@@ -2921,7 +2921,7 @@ def _late_chase_tape_read():
     Module-level indirection over market_regime.btc_tape_activity (the SAME
     cached 5m-candle read the quiet_tape gate consumes, 300s TTL) so tests
     can monkeypatch it exactly like get_chronos_signal_sync. Returns
-    {"vol": %, "drift": %} or None on a data gap.
+    {"vol": %, "drift": %, "net6h": %|None} or None on a data gap.
     """
     from hermes_trader.agents.market_regime import btc_tape_activity
     try:
