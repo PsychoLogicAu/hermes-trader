@@ -828,6 +828,60 @@ class TestLaneArmClauses:
         assert _live_admit(monkeypatch, caplog, tape_drift=-1.5, tape_vol=9.0) == []
 
 
+class TestLaneDepthCeiling:
+    """`live.btc24_min_pct` = the whole-ARM depth ceiling (t_2e23804b,
+    2026-10-30). Measured on the 9-day accrual (arm on, floor off, 5 lane
+    slots, `scratch/_lane_24h_sweep.py`): no ceiling 20 fills +$29.08 with
+    ex-3-best −$16.31 and 3 squeeze stops; ceiling −4.0 -> 18 fills +$74.00,
+    ex-3-best +$28.61, 1 stop. The two removed stops sat at drift −4.78.
+    Unset = byte-identical to pre-ceiling behaviour."""
+
+    CEIL = {"btc24_min_pct": -4.0}
+
+    def test_deep_tape_idles_the_arm_that_otherwise_fires(self, monkeypatch, caplog):
+        # The 10-30 00:56 shape: drift -4.78 (deep), net6h -4.46 -> BOTH
+        # clauses fire, so without the ceiling the lane admits.
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=-4.78,
+                               tape_vol=2.85, tape_net6h=-4.46)) == 1
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.78, tape_vol=2.85,
+                          tape_net6h=-4.46, cfg=_live_cfg(live=dict(self.CEIL)))
+        assert got == []
+        # caplog still holds the un-ceiled call's ADMIT line, so search, don't
+        # index — the ceiling line is the LAST one, not the first.
+        assert any("deeper than btc24_min_pct" in m for m in _msgs(caplog))
+
+    def test_band_bound_alone_was_the_no_op_this_fixes(self, monkeypatch, caplog):
+        # Pre-fix, btc24_min_pct narrowed only the CONFIRMED clause, so the
+        # fast clause kept the same trade: this is the regression the fix
+        # exists for — the key must reach the whole arm, not one clause.
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.78, tape_vol=1.0,
+                          tape_net6h=-4.46, cfg=_live_cfg(live=dict(self.CEIL)))
+        assert got == []      # fast-only arming is now ceiling-limited too
+
+    def test_boundary_and_shallower_tape_still_admit(self, monkeypatch, caplog):
+        # INCLUSIVE: drift == the bound is not "exceeded".
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=-4.0,
+                               tape_vol=3.1, cfg=_live_cfg(live=dict(self.CEIL)))) == 1
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=-3.55,
+                               tape_vol=2.87, tape_net6h=-4.07,
+                               cfg=_live_cfg(live=dict(self.CEIL)))) == 1
+
+    def test_ceiling_does_not_blind_the_lane_to_a_fresh_onset(self, monkeypatch, caplog):
+        # The money the ceiling must NOT cost: the 10-22 fills were armed by
+        # the 6h clause alone at drift ~0 (+$2.53 / +$4.26 / +$5.50). A 24h
+        # depth ceiling is a statement about an OLD dump, so it must leave
+        # the onset case alone.
+        got = _live_admit(monkeypatch, caplog, tape_drift=-0.5, tape_vol=1.89,
+                          tape_net6h=-2.15, cfg=_live_cfg(live=dict(self.CEIL)))
+        assert len(got) == 1 and got[0]["arm"] == "fast"
+
+    def test_unset_is_inert(self, monkeypatch, caplog):
+        # Default config (LIVE_CFG has no btc24_min_pct): the deepest tape
+        # still arms, exactly as shipped.
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=-9.0,
+                               tape_vol=9.0, tape_net6h=-9.0)) == 1
+
+
 class TestTapeNet6h:
     """`btc_tape_activity` must carry net6h — the lane's fast arm reads it,
     and it has to come from the SAME 290-bar window (no second price call) and
@@ -1023,6 +1077,26 @@ class TestTapeEval:
         assert self._ev(sc)["band_hit"] is True
         assert self._ev(sc, {"btc24_min_pct": -2.0,
                              "btc24_max_pct": 0.0})["band_hit"] is False
+
+    def test_depth_ceiling_is_a_second_reading_of_the_same_key(self):
+        # band membership and "too deep to trade at all" are DIFFERENT
+        # questions about btc24_min_pct, answered in one place (t_2e23804b).
+        cfg = dict(self.CFG, btc24_min_pct=-4.0)
+        assert self._ev({"drift": -4.78}, cfg)["depth_exceeded"] is True
+        assert self._ev({"drift": -4.0}, cfg)["depth_exceeded"] is False  # inclusive
+        assert self._ev({"drift": -2.5}, cfg)["depth_exceeded"] is False
+        # the flag is inert unless the key is configured...
+        assert self._ev({"drift": -40.0})["depth_exceeded"] is False
+        # ...and a tape the band REJECTS for being too deep is not the same as
+        # the ceiling: band_hit False, depth_exceeded True, both from one key.
+        got = self._ev({"drift": -4.78, "vol": 3.1}, cfg)
+        assert got["band_hit"] is False and got["depth_exceeded"] is True
+
+    def test_ceiling_never_trips_on_a_missing_scalar(self):
+        # a bound with no drift cannot call the tape deep (fail-open in the
+        # direction of the arm; the lane itself fails closed on missing drift)
+        assert self._ev({"drift": None, "vol": 3.0},
+                        dict(self.CFG, btc24_min_pct=-4.0))["depth_exceeded"] is False
 
 
 class TestLaneTapeStateStamp:

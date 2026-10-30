@@ -2815,9 +2815,11 @@ def aligned_short_lane_live_admit(
     # doing the work.
     # Keys use the SHARED tape vocabulary (market_regime.tape_eval, 2026-10-30)
     # so this arm and state_admission's short band (t_860f95f8) read as one
-    # scale: btc24_max_pct / vol_min_pct / net6h_max_pct, with btc24_min_pct
-    # left unset = no lower bound (the lane wants "at least this deep", not a
-    # closed band). Values stay LANE-SPECIFIC on purpose — the same tape means
+    # scale: btc24_max_pct / vol_min_pct / net6h_max_pct. btc24_min_pct is the
+    # DEPTH CEILING: unset (default) = no lower bound, deeper tape still
+    # arms; set = a tape deeper than the bound idles the whole arm (see the
+    # ceiling block below — the band reading alone is a no-op for an OR'd arm).
+    # Values stay LANE-SPECIFIC on purpose — the same tape means
     # opposite things to the two books. A malformed value disables its own
     # clause (tape_eval reads it as "not configured"), which fails closed.
     arm_cfg = {"btc24_max_pct": -2.0, "vol_min_pct": 2.0, "net6h_max_pct": -2.0}
@@ -2859,6 +2861,28 @@ def aligned_short_lane_live_admit(
     # clause — it can never arm the lane (fail closed in the restrictive
     # direction; the gate only ever REMOVES entries).
     confirmed, fast = arm_st["confirmed_dump"], arm_st["fast_arm"]
+    # DEPTH CEILING (t_2e23804b, 2026-10-30): `btc24_min_pct` set = a tape
+    # DEEPER than the bound idles the WHOLE ARM, not just the confirmed
+    # clause. Without this line the key is a no-op here — measured twice:
+    # sweeping it −6.0…−3.0 changed not one fill of the 13-fill/20-fill books
+    # because the fast clause co-fires in every real dump, and probing the
+    # four −$15.86 stops with btc24_min_pct=-4.5 gave confirmed=False,
+    # fast=True, ARMED=True. With the ceiling applied to the arm verdict the
+    # books move from +$29.08 (ex-3-best −$16.31) to +$74.00 (ex-3-best
+    # +$28.61), max_loss 3 -> 1. Value −4.0 = the MIDPOINT of the flat range
+    # (−4.78…−3.55), not an edge: the data has one deep cluster (three fills
+    # at drift −4.78, two of them stopped) and one winner at −3.55, so every
+    # value in between gives an identical book and only the midpoint is
+    # unfitted. Unset (default) = depth_exceeded always False = today's
+    # behaviour, byte-identical.
+    # Checked BEFORE the arm verdict so the log says why the lane held back.
+    if arm_st["depth_exceeded"]:
+        logger.info(
+            f"[aligned-short-lane][LIVE] idle: tape deeper than btc24_min_pct "
+            f"{_fmt(arm_cfg.get('btc24_min_pct'))} — drift {drift:+.2f}%, "
+            f"net6h {net6h_s} (a deep 24h drift means the dump is already "
+            f"old; the squeeze stops measured sat at −4.78/−4.94/−5.02)")
+        return []
     if not (confirmed or fast):
         logger.info(
             f"[aligned-short-lane][LIVE] idle: tape is not a dump — "

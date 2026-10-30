@@ -530,7 +530,12 @@ def tape_eval(scalars: Optional[Dict[str, Any]],
       btc24_min_pct   lower bound on trail-24h drift, INCLUSIVE  (>=)
       btc24_max_pct   upper bound on trail-24h drift, EXCLUSIVE  (<)
                       -> the half-open band [min, max) the state_admission
-                         clause already uses; unset bound = no bound
+                         clause already uses; unset bound = no bound.
+                         This same key ALSO answers a second, WHOLE-ARM
+                         question — see ``depth_exceeded`` below. Two
+                         readings of one number: band MEMBERSHIP (does this
+                         tape sit in my band) vs tape DEPTH (is it deeper
+                         than I will ever trade in).
       vol_min_pct     dailyized tape vol must be >= this (vol expansion);
                       unset = the confirmed clause is not configured
       net6h_max_pct   6h net must be <= this (dump ONSET), INCLUSIVE;
@@ -540,7 +545,18 @@ def tape_eval(scalars: Optional[Dict[str, Any]],
     satisfied, so no clause arms on a gap. Unset keys mean the clause is not
     in play at all (False), never "unbounded". Returns
       {"drift","vol","net6h","band_hit","confirmed_dump","fast_arm",
-       "missing":[scalar keys with no read]}.
+       "depth_exceeded","missing":[scalar keys with no read]}.
+
+    ``depth_exceeded`` = the tape is DEEPER than ``btc24_min_pct`` (drift <
+    min, INCLUSIVE pass: drift == min is not exceeded). It exists because a
+    band bound is not a ceiling: a consumer with two OR'd arm clauses keeps
+    firing through the other clause, so a ceiling expressed only as band
+    membership is a NO-OP (measured on the aligned-short lane, 2026-10-30:
+    sweeping btc24_min_pct −6.0…−3.0 changed nothing while the fast clause
+    stayed live, because both clauses co-fire in a real dump). Consumers that
+    want the ceiling read this flag and idle the whole arm; consumers that
+    want a band read band_hit and ignore the flag. Unset bound = always False,
+    so the flag is inert for anyone not configuring the key.
     """
     sc = scalars if isinstance(scalars, dict) else {}
     cf = cfg if isinstance(cfg, dict) else {}
@@ -575,6 +591,13 @@ def tape_eval(scalars: Optional[Dict[str, Any]],
     confirmed = (band_hit and vol_min is not None
                  and vol is not None and vol >= vol_min)
     fast = net6h_max is not None and net6h is not None and net6h <= net6h_max
+    # Whole-arm reading of btc24_min_pct (see docstring): "is the tape deeper
+    # than I will trade at all". Deliberately NOT folded into band_hit — a
+    # band consumer must keep its half-open membership test, while an
+    # arm consumer needs this to override EVERY OR'd clause (folding it into
+    # the band alone leaves the other clauses firing, which measured as a
+    # no-op). Missing drift can never trip a ceiling it cannot see.
+    depth_exceeded = mn is not None and drift is not None and drift < mn
 
     return {
         "drift": drift,
@@ -583,6 +606,7 @@ def tape_eval(scalars: Optional[Dict[str, Any]],
         "band_hit": band_hit,
         "confirmed_dump": confirmed,
         "fast_arm": fast,
+        "depth_exceeded": depth_exceeded,
         "missing": [k for k, v in (("drift", drift), ("vol", vol),
                                    ("net6h", net6h)) if v is None],
     }
