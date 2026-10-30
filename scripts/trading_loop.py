@@ -1432,6 +1432,49 @@ while True:
                 )
             except Exception as _ale:
                 logger.warning(f"[aligned-short-lane] shadow emit pass failed: {_ale}")
+        # ALIGNED-SHORT lane LIVE admission (board t_2e23804b) — the promotion
+        # experiment, owner call 2026-10-30: aligned_short / aligned_dn4h,
+        # deep bucket, mom6h_net deep, BTC 24h drift < 0, inside its OWN
+        # max_lane_slots (5) on top of the shared max_concurrent pool. Inert
+        # unless aligned_short_lane.live.enabled is true, and the entry itself
+        # only clears the conf floors while
+        # runner_entry_gate.cohort_admissions["mechanical/aligned_short_live"]
+        # exists — so KILL SWITCH = drop that key or set live.enabled false;
+        # either way it hot-reloads in ~60s, no recreate. Every other live gate
+        # (incl. min_short_volume_usd) plus sizing, brackets and the DSL exit
+        # applies unchanged; each entry lands in the ledger with
+        # config_snapshot.lane so the lane's book is separable from seat trades.
+        # Failure-isolated like the emit pass.
+        _as_lane_live_cfg = _cfg_cd.get("aligned_short_lane") or {}
+        _as_live = _as_lane_live_cfg.get("live")
+        if _as_lane_cands and isinstance(_as_live, dict) and \
+                bool(_as_live.get("enabled", False)):
+            try:
+                from hermes_trader.agents.risk_gates import (
+                    aligned_short_lane_live_admit,
+                    build_aligned_short_lane_analysis,
+                )
+                from hermes_trader.ledger import count_open_with_lane
+                _lane_tag = str(_as_live.get("cohort_tag",
+                                             "aligned_short_live")).strip().lower()
+                _open_lane = memory.open_position_coins()
+                _specs = aligned_short_lane_live_admit(
+                    _as_lane_cands,
+                    _as_lane_live_cfg,
+                    open_coins=_open_lane,
+                    slots_used=len(_open_lane),
+                    max_slots=int(_cfg_cd.get("max_concurrent", 8) or 8),
+                    lane_open=count_open_with_lane(_lane_tag),
+                    last_entry_ts_by_coin=memory.latest_trade_ts_by_coin(200),
+                )
+                for _spec in _specs:
+                    _res = maybe_execute(build_aligned_short_lane_analysis(_spec))
+                    logger.warning(
+                        f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
+                        f"maybe_execute -> executed={_res.get('executed')} "
+                        f"reason={_res.get('reason') or '-'}")
+            except Exception as _lle:
+                logger.warning(f"[aligned-short-lane] live admit pass failed: {_lle}")
         _last_progress_ts = time.time()  # watchdog: a full cycle completed
         logger.info(f"Sleeping {scan_interval}s until next scan...")
         time.sleep(scan_interval)
