@@ -607,16 +607,23 @@ def _attach_llm_context_to_result(result: Dict[str, Any], analysis: Dict[str, An
 
 
 def build_open_config_snapshot(regime: str, exit_policy_label: str,
-                               sl_atr_mult: float, tp_atr_mult: float) -> Dict[str, Any]:
+                               sl_atr_mult: float, tp_atr_mult: float,
+                               lane: str | None = None) -> Dict[str, Any]:
     """Build the OPEN-row config snapshot for the append-only ledger.
 
     Cooldown windows are read FRESH from .agent-config.json (not a cached
     module-level copy) because the file hot-reloads every cycle, and the
     snapshot's whole job is to let a future incident be reconstructed
     without guessing what was in effect at entry time.
+
+    `lane` is written ONLY when set (absent key = byte-identical snapshot for
+    every seat-driven entry). It is how a mechanical lane entry — e.g. the
+    aligned-short experiment on board t_2e23804b — is identifiable in the
+    ledger years later, and it is what ledger.count_open_with_lane() reads to
+    prove a lane's live slot occupancy after a container recreate.
     """
     _live = read_agent_config()
-    return {
+    snap = {
         "regime": regime,
         "exit_policy_label": exit_policy_label,
         "sl_atr_mult": sl_atr_mult,
@@ -624,6 +631,9 @@ def build_open_config_snapshot(regime: str, exit_policy_label: str,
         "cooldown_min": _live.get("cooldown_min"),
         "loss_cooldown_min": _live.get("loss_cooldown_min"),
     }
+    if lane:
+        snap["lane"] = str(lane)
+    return snap
 
 
 @_serialized
@@ -2082,7 +2092,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             analysis_id=analysis.get("id"),
             perception_id=analysis.get("perception_id"),
             config_snapshot=build_open_config_snapshot(
-                _regime, _ex_label, _sl_mult, TP_ATR_MULT),
+                _regime, _ex_label, _sl_mult, TP_ATR_MULT,
+                lane=str(analysis.get("_lane_tag") or "") or None),
         )
     except Exception as _le:
         logger.debug(f"[executor] ledger record_open failed (non-fatal): {_le}")
@@ -2910,7 +2921,7 @@ def _late_chase_tape_read():
     Module-level indirection over market_regime.btc_tape_activity (the SAME
     cached 5m-candle read the quiet_tape gate consumes, 300s TTL) so tests
     can monkeypatch it exactly like get_chronos_signal_sync. Returns
-    {"vol": %, "drift": %} or None on a data gap.
+    {"vol": %, "drift": %, "net6h": %|None} or None on a data gap.
     """
     from hermes_trader.agents.market_regime import btc_tape_activity
     try:

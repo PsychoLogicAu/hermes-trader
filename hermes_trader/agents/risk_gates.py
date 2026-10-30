@@ -2704,3 +2704,298 @@ def aligned_short_lane_emit(
         _as_lane_last_emit[coin] = now_ms
         emitted += 1
     return emitted
+
+
+# ---------------------------------------------------------------------------
+# ALIGNED-SHORT lane LIVE admission — the promotion experiment (board
+# t_2e23804b, owner call 2026-10-30: "the market is dumping, can we enable
+# aligned_short / aligned_dn4h for a bit?" scoped to 5 lane slots).
+#
+# This is the ONLY place the lane reaches the entry path. It selects from the
+# same probe records the SHADOW emit consumes and applies the cell the 8.2-day
+# accrual actually proved — lane=aligned_short, variant aligned_dn4h, bucket
+# deep, mom6h_net deep enough, BTC 24h drift < 0 — inside a DEDICATED
+# max_lane_slots budget. Everything after this point is the normal entry path:
+# the analysis it returns carries cohort_tag + primary_model so the conf floors
+# admit it through `runner_entry_gate.cohort_admissions` (the SAME map both
+# gate layers read — drop that key or flip live.enabled and both re-block:
+# that is the hot rollback), while sizing, the short-liquidity floor (owner
+# call: NO lane-specific override), cooldowns, daily kill, brackets and the
+# DSL exit all apply unchanged.
+#
+# Measured basis (scratch/_lane_slot_cap.py over the 608-line accrual): the
+# rule at 5 slots = 43 fills, 77% WR, +$58.44 net; restricted to names that
+# clear today's live $20M short-liquidity floor = 11 fills, +$12.37. The
+# smaller number is what this path can actually book — say so, don't quote 58.
+#
+# ARM REDESIGN (2026-10-30, owner: "we missed the immediate opportunity —
+# properly set up the rules to catch the next one"). The flip was paused
+# before any deploy; what went in instead is an objective tape gate so the
+# lane is armed by the dump, not by an operator noticing it. Measured on the
+# same accrual (scratch/_lane_arm_rules.py, tape rebuilt from BTC 5m and
+# self-checked against the drift printed on every WOULD ADMIT line, p50 error
+# 0.04 pct-points):
+#   drift<0 alone (the first draft)  armed 56% of hours -> +$43.89, n=40
+#   drift<=-2 AND vol>=2             armed  6% of hours -> +$100.48, n=17
+#   BTC 6h net <= -2 (onset)         armed  3% of hours -> +$131.90, n=20
+#   (drift<=-2&vol>=2) OR 6h<=-2  <- ARMED n=21, +$134.43, ex-3-best +$78.83
+#     and the book it filters OUT is −$22.59 — a net loser, so the gate is
+#     removing the wrong trades, not just fewer trades.
+# Onset matters more than depth: on the 10-22 dump the 24h-drift clauses armed
+# 4-13h late (or never), the 6h trigger armed at hour 0. That is why the fast
+# clause is an OR, not an AND.
+#
+# Fail-closed by construction: absent/disabled `live` block = zero work and no
+# log noise; a BTC-tape data gap = no admit (this gate only ever REMOVES
+# entries the rest of the stack would take); a missing vol or net6h scalar
+# disables only its own clause; an unprovable lane occupancy
+# (count_open_with_lane < 0) = no admit.
+# ---------------------------------------------------------------------------
+
+LANE_LIVE_MODEL = "mechanical"
+
+
+def aligned_short_lane_live_admit(
+    candidates: List[Dict[str, Any]],
+    lane_cfg: Dict[str, Any],
+    *,
+    open_coins: set,
+    slots_used: int,
+    max_slots: int,
+    lane_open: int,
+    last_entry_ts_by_coin: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """Select this cycle's live lane entries. Returns admission specs.
+
+    Ordering mirrors the accrual's booking order (composite descending) so the
+    live cohort is the same subset the slot-capped replay priced.
+    """
+    live = (lane_cfg or {}).get("live")
+    if not isinstance(live, dict) or not bool(live.get("enabled", False)):
+        return []
+    if not candidates:
+        return []
+
+    try:
+        lane_slots = int(live.get("max_lane_slots", 5))
+    except (TypeError, ValueError):
+        lane_slots = 5
+    if lane_slots <= 0:
+        return []
+    try:
+        mom_max = float(live.get("mom_max_pct", -6.0))
+    except (TypeError, ValueError):
+        mom_max = -6.0
+    require_bucket = str(live.get("require_bucket", "deep")).strip().lower()
+    # ARM = which TAPE STATE the lane is allowed to fire in. The 8.2-day
+    # accrual measured these as the winner (scratch/_lane_arm_rules.py):
+    # "confirmed dump" (24h drift deep AND dailyized vol expanded) OR the
+    # "fast arm" (BTC 6h net already deep) — armed only 7% of hours yet kept
+    # +$134 of the book at 5 slots while the part it filtered out was −$23
+    # (a net LOSER). Drift alone (the earlier knob, drift<0) sits armed 56%
+    # of hours and books +$44: the vol floor and the 6h onset trigger are
+    # doing the work.
+    # Keys use the SHARED tape vocabulary (market_regime.tape_eval, 2026-10-30)
+    # so this arm and state_admission's short band (t_860f95f8) read as one
+    # scale: btc24_max_pct / vol_min_pct / net6h_max_pct, with btc24_min_pct
+    # left unset = no lower bound (the lane wants "at least this deep", not a
+    # closed band). Values stay LANE-SPECIFIC on purpose — the same tape means
+    # opposite things to the two books. A malformed value disables its own
+    # clause (tape_eval reads it as "not configured"), which fails closed.
+    arm_cfg = {"btc24_max_pct": -2.0, "vol_min_pct": 2.0, "net6h_max_pct": -2.0}
+    for _k in ("btc24_min_pct", "btc24_max_pct", "vol_min_pct",
+               "net6h_max_pct"):
+        if live.get(_k) is not None:
+            arm_cfg[_k] = live[_k]
+    try:
+        cooldown_ms = float(lane_cfg.get("reentry_cooldown_min", 180.0)) * 60_000
+    except (TypeError, ValueError):
+        cooldown_ms = 180 * 60_000
+
+    tape = None
+    from hermes_trader.agents.market_regime import tape_eval
+    try:
+        from hermes_trader.agents.market_regime import btc_tape_activity
+        tape = btc_tape_activity()
+    except Exception:
+        tape = None
+    arm_st = tape_eval(tape, arm_cfg)
+    drift = arm_st["drift"]
+    if drift is None:
+        logger.warning("[aligned-short-lane][LIVE] no BTC tape drift — "
+                       "admitting nothing this cycle (fail closed)")
+        return []
+    _vol_raw, _n6_raw = arm_st["vol"], arm_st["net6h"]
+
+    def _fmt(x):
+        try:
+            return f"{float(x):+.2f}%"
+        except (TypeError, ValueError):
+            return "n/a"
+
+    vol_s, net6h_s = _fmt(_vol_raw), _fmt(_n6_raw)
+    # Confirmed-dump clause (deep 24h drift WITH vol expansion) OR the fast
+    # clause (6h onset trigger) — both answered by the SHARED tape_eval, so
+    # the lane arm and the state_admission short band use one boundary
+    # convention and one vocabulary. A missing scalar disables only its own
+    # clause — it can never arm the lane (fail closed in the restrictive
+    # direction; the gate only ever REMOVES entries).
+    confirmed, fast = arm_st["confirmed_dump"], arm_st["fast_arm"]
+    if not (confirmed or fast):
+        logger.info(
+            f"[aligned-short-lane][LIVE] idle: tape is not a dump — "
+            f"drift {drift:+.2f}% vs btc24_max_pct "
+            f"{_fmt(arm_cfg.get('btc24_max_pct'))}, vol {vol_s} vs vol_min_pct "
+            f"{_fmt(arm_cfg.get('vol_min_pct'))}, net6h {net6h_s} vs "
+            f"net6h_max_pct {_fmt(arm_cfg.get('net6h_max_pct'))}")
+        return []
+    arm = ("confirmed+fast" if (confirmed and fast)
+           else "confirmed" if confirmed else "fast")
+
+    # Tape-state stamp (t_860f95f8 vocabulary) — LOG-ONLY phase label, so the
+    # lane's own accrual cross-reads with the state_admission short clause's
+    # why-lines instead of being reconstructed from candles afterwards.
+    # Costs a candle read ONLY when `live.tape_state` is configured (same cost
+    # rule as the clause); a candle gap labels no-history and never changes a
+    # verdict.
+    stamp = None
+    if isinstance(live.get("tape_state"), dict):
+        try:
+            from hermes_trader.agents.market_regime import btc_tape_history
+            stamp = tape_state_stamp(btc_tape_history(), live["tape_state"])
+        except Exception:
+            stamp = "no-history"
+    _stamp_txt = f" tape_state={stamp}" if stamp else ""
+
+    if lane_open < 0:
+        logger.warning("[aligned-short-lane][LIVE] lane occupancy unreadable — "
+                       "admitting nothing this cycle (fail closed)")
+        return []
+
+    def _comp(c: Dict[str, Any]) -> float:
+        try:
+            return float(c.get("comp") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    now_ms = int(time.time() * 1000)
+    tag = str(live.get("cohort_tag", "aligned_short_live")).strip().lower()
+    picked: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    for cand in sorted(candidates, key=lambda c: (-_comp(c), str(c.get("coin")))):
+        coin = str(cand.get("coin") or "")
+        if not coin or coin in seen:
+            continue
+        # The cell, spelled out — anything the probe tagged differently is not
+        # this experiment, no matter what the config says.
+        if str(cand.get("lane") or "") != "aligned_short" or \
+                str(cand.get("side") or "").lower() != "short" or \
+                "aligned_dn4h" not in (cand.get("variant") or []):
+            continue
+        if str(cand.get("ema4h_bucket") or "").lower() != require_bucket:
+            logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: bucket "
+                         f"{cand.get('ema4h_bucket')} != {require_bucket}")
+            continue
+        _mom_raw = cand.get("mom6h_net")
+        if _mom_raw is None:
+            logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: no mom6h_net")
+            continue
+        try:
+            mom = float(_mom_raw)
+        except (TypeError, ValueError):
+            logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: no mom6h_net")
+            continue
+        if mom > mom_max:
+            logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: mom6h_net "
+                         f"{mom:+.1f}% > {mom_max:+.1f}%")
+            continue
+        if coin in (open_coins or set()):
+            logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: position open")
+            continue
+        if lane_open + len(picked) >= lane_slots:
+            logger.info(f"[aligned-short-lane][LIVE] {coin} skip: lane slots "
+                        f"{lane_open + len(picked)}/{lane_slots} full")
+            continue
+        if slots_used + len(picked) >= max_slots:
+            logger.info(f"[aligned-short-lane][LIVE] {coin} skip: pool slots "
+                        f"{slots_used + len(picked)}/{max_slots} full")
+            continue
+        _last = int((last_entry_ts_by_coin or {}).get(coin, 0) or 0)
+        if _last and now_ms - _last < cooldown_ms:
+            logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: re-entry "
+                         f"cooldown {int((now_ms - _last) / 60000)}min")
+            continue
+        seen.add(coin)
+        picked.append({
+            "coin": coin,
+            "side": "short",
+            "mid": cand.get("mid"),
+            "comp": cand.get("comp"),
+            "mom6h_net": mom,
+            "ema4h_bucket": cand.get("ema4h_bucket"),
+            "ema4h_dist_pct": cand.get("ema4h_dist_pct"),
+            "ema4h_pair": cand.get("ema4h_pair"),
+            "lane": "aligned_short",
+            "variant": list(cand.get("variant") or []),
+            "btc_tape_drift": drift,
+            "btc_tape_vol": _vol_raw,
+            "btc_net6h": _n6_raw,
+            "arm": arm,
+            **({"tape_state": stamp} if stamp else {}),
+            "cohort_tag": tag,
+            "ts": now_ms,
+        })
+        logger.warning(
+            f"[aligned-short-lane][LIVE] ADMIT {coin} SHORT "
+            f"ts={now_ms} mid={cand.get('mid')} comp={cand.get('comp')} "
+            f"mom6h_net={mom:+.1f}% ema4h={cand.get('ema4h_pair')} "
+            f"btc_tape_drift={drift:+.2f}% btc_tape_vol={vol_s} "
+            f"btc_net6h={net6h_s} arm={arm}{_stamp_txt} "
+            f"ema4h_dist={float(cand.get('ema4h_dist_pct', 0) or 0):+.3f}% "
+            f"ema4h_dist_bucket={cand.get('ema4h_bucket') or 'n/a'} "
+            f"lane={cand.get('lane')} variant={','.join(cand.get('variant') or []) or '-'} "
+            f"lane_slots={lane_open + len(picked)}/{lane_slots} "
+            f"pool_slots={slots_used + len(picked)}/{max_slots} "
+            f"cohort={LANE_LIVE_MODEL}/{tag} — entering via maybe_execute "
+            "(all live gates incl. short liquidity apply)")
+    return picked
+
+
+def build_aligned_short_lane_analysis(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """The synthetic analysis a lane entry carries into maybe_execute.
+
+    Deliberately minimal and honest: there is NO seat call behind it, so
+    confidence is 0.0 and `reasoning` says so. The lane still clears both conf
+    floors because `cohort_tag` + `primary_model` resolve to the
+    `cohort_admissions` key the owner set — which is exactly why the key is the
+    hot-rollback switch (remove it and conf 0.0 blocks at both layers).
+    """
+    ts = int(spec.get("ts") or time.time() * 1000)
+    coin = str(spec.get("coin") or "")
+    tag = str(spec.get("cohort_tag") or "aligned_short_live")
+    return {
+        "id": f"lane-{tag}-{coin}-{ts}",
+        "coin": coin,
+        "verdict": "SHORT",
+        "side": "short",
+        "confidence": 0.0,
+        "composite_score": spec.get("comp"),
+        "mid": spec.get("mid"),
+        "primary_model": LANE_LIVE_MODEL,
+        "cohort_tag": tag,
+        "_lane_tag": tag,
+        "perception_id": f"{coin}-lane-{ts}",
+        "created_at": ts,
+        "reasoning": (
+            f"[aligned-short-lane] mechanical rule, NO seat call: "
+            f"arm={spec.get('arm')}, "
+            f"mom6h_net={float(spec.get('mom6h_net', 0) or 0):+.1f}%, "
+            f"ema4h bucket={spec.get('ema4h_bucket')}, "
+            f"btc drift={float(spec.get('btc_tape_drift', 0) or 0):+.2f}% "
+            f"vol={float(spec.get('btc_tape_vol', 0) or 0):+.2f}% "
+            f"net6h={float(spec.get('btc_net6h', 0) or 0):+.2f}%"
+            + (f" tape_state={spec['tape_state']}"
+               if spec.get("tape_state") else "")
+        ),
+    }

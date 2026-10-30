@@ -248,7 +248,8 @@ def regime_snapshot() -> Dict[str, Dict[str, object]]:
 # vol 2.5% / drift 2.0%. WATCHLIST §B.17.
 _TAPE_TTL_S = 300  # 5min — same cadence as REGIME_TTL_S
 _TAPE_MIN_BARS = 200  # fail-safe: < ~16h of 5m history → no opinion
-_tape_cache: Tuple[Optional[Dict[str, float]], float] = (None, 0.0)
+_TAPE_NET6H_BARS = 72  # 6h of 5m bars — the lane fast-arm window (t_2e23804b)
+_tape_cache: Tuple[Optional[Dict[str, Any]], float] = (None, 0.0)
 
 
 # Alt-basket broad-tape defaults (2026-09-11, WATCHLIST §B.17 alt variant).
@@ -468,10 +469,17 @@ def _detect_cached(proxy: str) -> Optional[str]:
 
 
 def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
-    """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %}.
+    """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %, "net6h": %|None}.
 
     vol    = pstdev of 5m log-returns × sqrt(288) × 100 (dailyized %),
-    drift  = (last close / first close − 1) × 100 (% over the ~24h window).
+    drift  = (last close / first close − 1) × 100 (% over the ~24h window),
+    net6h  = (last close / close 72 bars back − 1) × 100 — the SHORT-window
+             momentum view of the SAME 290 bars (no extra price call). Added
+             2026-10-30 for the aligned-short lane's fast arm (board
+             t_2e23804b): the 24h drift is a lagging confirmation that can sit
+             9h behind a fresh dump, the 6h net is the onset trigger. None if
+             the window is too short; every pre-existing consumer reads only
+             vol/drift, so an extra key is inert for them.
 
     Both are lookback-only (no lookahead beyond the still-forming last
     5m bar's close, which is the live price). Returns None on a data gap
@@ -497,8 +505,87 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
     vol = statistics.pstdev(rets) * math.sqrt(288) * 100
     drift = (closes[-1] / closes[0] - 1) * 100
-    _tape_cache = ({"vol": vol, "drift": drift}, now)
+    net6h = ((closes[-1] / closes[-_TAPE_NET6H_BARS - 1] - 1) * 100
+             if len(closes) > _TAPE_NET6H_BARS else None)
+    _tape_cache = ({"vol": vol, "drift": drift, "net6h": net6h}, now)
     return _tape_cache[0]
+
+
+def tape_eval(scalars: Optional[Dict[str, Any]],
+              cfg: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Which tape STATE clause fires, evaluated the same way everywhere.
+
+    Pure — no I/O, no config singleton. Takes the scalars from
+    ``btc_tape_activity()`` ({"vol","drift","net6h"}) plus a config sub-block
+    and answers the clause questions, so every tape-armed consumer (the
+    aligned-short lane arm, board t_2e23804b, and later the state_admission
+    band, board t_860f95f8) speaks ONE vocabulary and ONE boundary convention
+    while keeping its OWN thresholds, its OWN clause mix and its OWN fail
+    policy. Sharing the evaluator is safe; sharing the ARM is not — the lane
+    fires in the deep-drift dump that the state_admission short clause exists
+    to refuse, so the thresholds must stay apart (measured: that clause's
+    cohort below -2% is -84.25/WR 25%, the lane cohort there is +100.48).
+
+    Key vocabulary (shared names, per-consumer values):
+      btc24_min_pct   lower bound on trail-24h drift, INCLUSIVE  (>=)
+      btc24_max_pct   upper bound on trail-24h drift, EXCLUSIVE  (<)
+                      -> the half-open band [min, max) the state_admission
+                         clause already uses; unset bound = no bound
+      vol_min_pct     dailyized tape vol must be >= this (vol expansion);
+                      unset = the confirmed clause is not configured
+      net6h_max_pct   6h net must be <= this (dump ONSET), INCLUSIVE;
+                      unset = the fast clause is not configured
+
+    Missing data only ever REMOVES: a bound with no scalar can never be
+    satisfied, so no clause arms on a gap. Unset keys mean the clause is not
+    in play at all (False), never "unbounded". Returns
+      {"drift","vol","net6h","band_hit","confirmed_dump","fast_arm",
+       "missing":[scalar keys with no read]}.
+    """
+    sc = scalars if isinstance(scalars, dict) else {}
+    cf = cfg if isinstance(cfg, dict) else {}
+
+    def _num(src: Dict[str, Any], key: str) -> Optional[float]:
+        raw = src.get(key)
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    drift = _num(sc, "drift")
+    vol = _num(sc, "vol")
+    net6h = _num(sc, "net6h")
+    mn = _num(cf, "btc24_min_pct")
+    mx = _num(cf, "btc24_max_pct")
+    vol_min = _num(cf, "vol_min_pct")
+    net6h_max = _num(cf, "net6h_max_pct")
+
+    # No band configured at all -> band_hit is False, not "unbounded yes":
+    # a consumer that never sets btc24_*_pct must not silently match.
+    band_hit = False
+    if drift is not None and (mn is not None or mx is not None):
+        band_hit = True
+        if mn is not None:
+            band_hit = drift >= mn
+        if band_hit and mx is not None:
+            band_hit = drift < mx
+
+    confirmed = (band_hit and vol_min is not None
+                 and vol is not None and vol >= vol_min)
+    fast = net6h_max is not None and net6h is not None and net6h <= net6h_max
+
+    return {
+        "drift": drift,
+        "vol": vol,
+        "net6h": net6h,
+        "band_hit": band_hit,
+        "confirmed_dump": confirmed,
+        "fast_arm": fast,
+        "missing": [k for k, v in (("drift", drift), ("vol", vol),
+                                   ("net6h", net6h)) if v is None],
+    }
 
 
 # BTC 1h close series for the state_admission tape-state stamp (t_860f95f8,

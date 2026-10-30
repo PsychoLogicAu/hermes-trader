@@ -21,14 +21,23 @@ Two halves:
      lane_priority orders the cycle walk (short_first default | long_first
      | composite) — tested explicitly, incl. the slot-contention case.
      Shadow-only: the function logs, it cannot admit.
+  3. risk_gates.aligned_short_lane_live_admit + build_aligned_short_lane_analysis
+     — the LIVE promotion experiment (owner call 2026-10-30, 5 lane slots):
+     the named cell only, dedicated lane slots ON TOP of the shared pool,
+     fail-closed on tape gap / unreadable occupancy, and the
+     runner_entry_gate.cohort_admissions key that is the kill switch for the
+     conf-0.0 mechanical entry at BOTH conf floors. Plus the ledger side:
+     config_snapshot.lane on the OPEN row and count_open_with_lane().
 
 All candle fetches and the BTC tape read are monkeypatched — no network.
 """
 from __future__ import annotations
 
+import json
 import math
 import sys
 import time
+from typing import Optional
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -629,3 +638,436 @@ class TestProbeToEmitIntegration:
         assert m.group(15) == "early_long" and m.group(16) == "momhi_1dF"
         assert "<" in m.group(19)              # 1dF: fast below slow
         assert "btc_tape_drift=" in line and "lane_priority=short_first#1" in line
+
+
+# ---------------------------------------------------------------------------
+# LIVE admission (owner call 2026-10-30, board t_2e23804b follow-on):
+# aligned_short_lane_live_admit + build_aligned_short_lane_analysis + the
+# cohort_admissions conf-floor weld + the ledger occupancy read + the lane
+# tag on the OPEN snapshot. This is the code that books real money, so the
+# filters, both slot caps, every fail-closed path and the kill-switch key are
+# pinned here.
+# ---------------------------------------------------------------------------
+
+LIVE_CFG = {
+    "enabled": True,
+    "reentry_cooldown_min": 180,
+    "live": {"enabled": True, "max_lane_slots": 5, "mom_max_pct": -6.0,
+             "require_bucket": "deep", "btc24_max_pct": -2.0,
+             "vol_min_pct": 2.0, "net6h_max_pct": -2.0,
+             "cohort_tag": "aligned_short_live"},
+}
+
+COHORT_KEY = "mechanical/aligned_short_live"
+
+
+def _live_cfg(**over):
+    cfg = {"enabled": True, "reentry_cooldown_min": 180,
+           "live": dict(LIVE_CFG["live"])}
+    cfg["live"].update(over.pop("live", {}))
+    cfg.update(over)
+    return cfg
+
+
+def _live_admit(monkeypatch, caplog, cands=None, cfg=None, open_coins=frozenset(),
+                slots_used=0, max_slots=10, lane_open=0, last_ts=None,
+                tape_drift: float = -4.2, tape_vol: Optional[float] = 3.1,
+                tape_net6h: Optional[float] = None,
+                tape_gap=False, tape_missing=False):
+    from hermes_trader.agents import market_regime
+
+    def _tape(force=False):
+        if tape_gap:
+            raise RuntimeError("tape feed down")
+        if tape_missing:
+            return {"vol": tape_vol, "drift": None}
+        out = {"vol": tape_vol, "drift": tape_drift}
+        if tape_net6h is not None:
+            out["net6h"] = tape_net6h   # absent = the fast clause cannot fire
+        return out
+
+    monkeypatch.setattr(market_regime, "btc_tape_activity", _tape)
+    caplog.set_level("INFO", logger="hermes_trader.agents.risk_gates")
+    return risk_gates.aligned_short_lane_live_admit(
+        cands if cands is not None else list(CAND),
+        cfg if cfg is not None else _live_cfg(),
+        open_coins=set(open_coins), slots_used=slots_used, max_slots=max_slots,
+        lane_open=lane_open, last_entry_ts_by_coin=last_ts or {})
+
+
+def _msgs(caplog, needle="aligned-short-lane"):
+    return [r.getMessage() for r in caplog.records if needle in r.getMessage()]
+
+
+def _cand(coin, comp=34.0, mom=-8.0, bucket="deep", lane="aligned_short",
+          variant=("aligned_dn4h",), side="short"):
+    return {"coin": coin, "ts": 1792600000000, "mid": 1.0, "comp": comp,
+            "side": side, "lane": lane, "variant": list(variant),
+            "mom6h_net": mom, "ema4h_fast": 0.9, "ema4h_slow": 1.0,
+            "ema4h_pair": "8/21", "ema4h_dist_pct": -5.0,
+            "ema4h_bucket": bucket}
+
+
+class TestLiveAdmit:
+    def test_inert_without_live_block(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, cfg={"enabled": True}) == []
+        assert _msgs(caplog) == []          # absent key = zero work, zero noise
+
+    def test_inert_when_live_disabled(self, monkeypatch, caplog):
+        cfg = _live_cfg()
+        cfg["live"]["enabled"] = False
+        assert _live_admit(monkeypatch, caplog, cfg=cfg) == []
+        assert _msgs(caplog) == []
+
+    def test_admits_the_cell(self, monkeypatch, caplog):
+        specs = _live_admit(monkeypatch, caplog)   # CAND: deep, -6.3%, dn4h
+        assert len(specs) == 1
+        s = specs[0]
+        assert s["coin"] == "APT" and s["side"] == "short"
+        assert s["cohort_tag"] == "aligned_short_live"
+        assert s["lane"] == "aligned_short" and s["mom6h_net"] == -6.3
+        line = _msgs(caplog)[0]
+        assert "[aligned-short-lane][LIVE] ADMIT APT SHORT" in line
+        assert "lane_slots=1/5" in line and "cohort=mechanical/aligned_short_live" in line
+        assert "arm=confirmed" in line and "btc_tape_vol=+3.10%" in line
+
+    def test_only_the_named_cell(self, monkeypatch, caplog):
+        for bad in (_cand("A", lane="early_long"),
+                    _cand("B", variant=("momhi_1dF",)),
+                    _cand("C", side="long"),
+                    _cand("D", bucket="nearx")):
+            assert _live_admit(monkeypatch, caplog, cands=[bad]) == [], bad
+
+    def test_momentum_depth_is_the_gate(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, cands=[_cand("A", mom=-4.0)]) == []
+        assert len(_live_admit(monkeypatch, caplog, cands=[_cand("A", mom=-4.0)],
+                               cfg=_live_cfg(live={"mom_max_pct": -3.0}))) == 1
+
+    def test_idle_unless_the_tape_is_dumping(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, tape_drift=+0.5) == []
+        assert _live_admit(monkeypatch, caplog, tape_drift=0.0) == []  # >= cap
+        assert "idle" in _msgs(caplog)[0]
+
+    def test_tape_gap_fails_closed(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, tape_gap=True) == []
+        assert _live_admit(monkeypatch, caplog, tape_missing=True) == []
+        assert any("fail closed" in m for m in _msgs(caplog))
+
+    def test_unprovable_occupancy_fails_closed(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, lane_open=-1) == []
+        assert any("fail closed" in m for m in _msgs(caplog))
+
+    def test_lane_slot_cap_binds_first(self, monkeypatch, caplog):
+        cands = [_cand(c, comp=float(i)) for i, c in enumerate("ABCDEF")]
+        got = _live_admit(monkeypatch, caplog, cands=cands, lane_open=4)
+        assert [s["coin"] for s in got] == ["F"]          # comp-desc (F=5.0)
+        assert _live_admit(monkeypatch, caplog, cands=cands, lane_open=5) == []
+
+    def test_shared_pool_cap_also_binds(self, monkeypatch, caplog):
+        cands = [_cand(c, comp=float(i)) for i, c in enumerate("ABC")]
+        got = _live_admit(monkeypatch, caplog, cands=cands,
+                          slots_used=9, max_slots=10, lane_open=0)
+        assert [s["coin"] for s in got] == ["C"]
+
+    def test_open_position_and_cooldown_skip(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, open_coins=frozenset({"APT"})) == []
+        now = int(time.time() * 1000)
+        assert _live_admit(monkeypatch, caplog, last_ts={"APT": now - 60_000}) == []
+        # Outside the 180min lane cooldown -> admitted again.
+        assert len(_live_admit(monkeypatch, caplog,
+                               last_ts={"APT": now - 200 * 60_000})) == 1
+
+    def test_missing_moment_field_skips(self, monkeypatch, caplog):
+        c = _cand("A")
+        c.pop("mom6h_net")
+        assert _live_admit(monkeypatch, caplog, cands=[c]) == []
+
+
+class TestLaneArmClauses:
+    """The tape gate that replaced 'operator notices the dump' (owner call
+    2026-10-30). Confirmed clause = drift<=-2 AND vol>=2; fast clause =
+    BTC 6h net <= -2. Measured: armed 7% of hours, +$134 at 5 slots, and the
+    book it filters out is a net LOSER (-$23)."""
+
+    def test_confirmed_clause_needs_vol_expansion(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, tape_drift=-4.2,
+                           tape_vol=1.0) == []          # deep drift, flat vol
+        assert "tape is not a dump" in _msgs(caplog)[0]
+
+    def test_fast_arms_on_the_6h_onset_alone(self, monkeypatch, caplog):
+        # The 10-22 shape: 24h drift still shallow, the dump just started.
+        got = _live_admit(monkeypatch, caplog, tape_drift=-0.5, tape_vol=0.5,
+                          tape_net6h=-2.5)
+        assert len(got) == 1 and got[0]["arm"] == "fast"
+        assert "arm=fast" in _msgs(caplog)[0]
+
+    def test_both_clauses_labelled(self, monkeypatch, caplog):
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                          tape_net6h=-6.0)
+        assert got[0]["arm"] == "confirmed+fast"
+        assert "arm=confirmed+fast" in _msgs(caplog)[0]
+
+    def test_missing_scalar_disables_only_its_own_clause(self, monkeypatch, caplog):
+        # vol n/a -> confirmed cannot fire, fast still can.
+        assert len(_live_admit(monkeypatch, caplog, tape_vol=None,
+                               tape_net6h=-3.0)) == 1
+        # net6h n/a -> fast cannot fire; confirmed still can.
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=-4.2,
+                               tape_vol=3.1)) == 1
+        # both n/a -> nothing arms.
+        assert _live_admit(monkeypatch, caplog, tape_vol=None) == []
+
+    def test_arm_thresholds_are_config_knobs(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                           cfg=_live_cfg(live={"vol_min_pct": 5.0})) == []
+        # fast arm switched off -> the 6h onset alone no longer admits
+        assert _live_admit(monkeypatch, caplog, tape_drift=-0.5, tape_vol=0.5,
+                           tape_net6h=-2.5,
+                           cfg=_live_cfg(live={"net6h_max_pct": -99.0})) == []
+        # drift cap tightened -> deep-but-shallow-vol tape stays idle
+        assert _live_admit(monkeypatch, caplog, tape_drift=-1.5, tape_vol=9.0) == []
+
+
+class TestTapeNet6h:
+    """`btc_tape_activity` must carry net6h — the lane's fast arm reads it,
+    and it has to come from the SAME 290-bar window (no second price call) and
+    describe ONLY the last 72 bars, or the fast arm is just the drift gate
+    wearing a different hat."""
+
+    def _tape(self, monkeypatch, closes):
+        from hermes_trader.agents import market_regime as mr
+        candles = [Candle(t=i * 300_000, o=c, h=c, l=c, c=c, v=1.0)
+                   for i, c in enumerate(closes)]
+        monkeypatch.setattr(mr, "fetch_hl_candles",
+                            lambda coin, interval="5m", count=290: candles)
+        monkeypatch.setattr(mr, "_tape_cache", (None, 0.0))
+        res = mr.btc_tape_activity(force=True)
+        assert res is not None
+        return res
+
+    def test_net6h_measures_the_last_72_bars_only(self, monkeypatch):
+        closes = [100.0] * 290
+        for i in range(290 - 72, 290):     # -3% step inside the 6h window
+            closes[i] = 97.0
+        tape = self._tape(monkeypatch, closes)
+        # reference bar = closes[-73] (72 steps back = exactly 6h) is pre-step
+        assert tape["net6h"] == pytest.approx(-3.0)
+        assert tape["drift"] == pytest.approx(-3.0)
+
+    def test_old_move_moves_drift_not_net6h(self, monkeypatch):
+        closes = [100.0] * 290
+        for i in range(100, 290):          # -5% step ~16h back, flat since
+            closes[i] = 95.0
+        tape = self._tape(monkeypatch, closes)
+        assert tape["drift"] == pytest.approx(-5.0)
+        assert tape["net6h"] == pytest.approx(0.0)
+
+    def test_vol_and_drift_keys_unchanged(self, monkeypatch):
+        tape = self._tape(monkeypatch, [100.0 + (i % 3) for i in range(290)])
+        assert set(tape) == {"vol", "drift", "net6h"}
+        # first close 100.0, last (i=289, 289%3==1) 101.0 -> +1.0% over 24h
+        assert tape["vol"] > 0 and tape["drift"] == pytest.approx(1.0)
+        assert tape["net6h"] == pytest.approx(0.0)   # 72 bars = 24 cycles, net 0
+
+
+class TestLaneCohortWeld:
+    """The kill switch: without the cohort_admissions key, a conf-0.0 lane
+    entry blocks at BOTH conf floors; with it, it passes the floors and only
+    the other gates stand between it and the market."""
+
+    def _spec(self):
+        return {"coin": "APT", "side": "short", "mid": 8.12, "comp": 34.0,
+                "mom6h_net": -8.0, "ema4h_bucket": "deep", "ema4h_dist_pct": -5.0,
+                "lane": "aligned_short", "variant": ["aligned_dn4h"],
+                "btc_tape_drift": -4.2, "cohort_tag": "aligned_short_live",
+                "ts": 1792600000000}
+
+    def test_analysis_is_honest_about_having_no_seat(self):
+        a = risk_gates.build_aligned_short_lane_analysis(self._spec())
+        assert a["confidence"] == 0.0
+        assert a["verdict"] == "SHORT" and a["side"] == "short"
+        assert a["primary_model"] == "mechanical"
+        assert a["cohort_tag"] == a["_lane_tag"] == "aligned_short_live"
+        assert a["id"] and a["perception_id"] and a["created_at"]
+        assert "NO seat call" in a["reasoning"]
+
+    def test_runner_gate_admits_only_with_the_key(self):
+        from hermes_trader.agents.executor import _runner_entry_block_reason
+        a = risk_gates.build_aligned_short_lane_analysis(self._spec())
+        cfg = {"runner_entry_gate": {"enabled": True, "allow_shorts": True,
+                                     "cohort_admissions": {COHORT_KEY: 0.0}}}
+        assert _runner_entry_block_reason(a, cfg) == ""
+        cfg2 = {"runner_entry_gate": {"enabled": True, "allow_shorts": True,
+                                      "cohort_admissions": {}}}
+        assert "conf" in _runner_entry_block_reason(a, cfg2)
+
+    def test_runner_gate_respects_the_shorts_kill_switch(self):
+        from hermes_trader.agents.executor import _runner_entry_block_reason
+        a = risk_gates.build_aligned_short_lane_analysis(self._spec())
+        cfg = {"runner_entry_gate": {"enabled": True, "allow_shorts": False,
+                                     "cohort_admissions": {COHORT_KEY: 0.0}}}
+        assert _runner_entry_block_reason(a, cfg) != ""
+
+    def test_classic_conf_gate_admits_only_with_the_key(self):
+        ctx = risk_gates.GateContext(
+            confidence=0.0, current_positions=[], trade_notional_usd=300.0,
+            daily_pnl=0.0, market_volume_24h_usd=50_000_000.0, coin="APT",
+            trade_side="short", has_binary_news_risk=False, equity=38000.0,
+            total_open_notional=0.0, cohort_tag="aligned_short_live",
+            primary_model="mechanical")
+        blocked = {"pass": False, "reason": "confidence 0.00 < 0.65"}
+        cfg = {"runner_entry_gate": {"cohort_admissions": {COHORT_KEY: 0.0}}}
+        assert risk_gates._cohort_conf_admission(ctx, cfg, blocked, 0.65)["pass"]
+        out = risk_gates._cohort_conf_admission(
+            ctx, {"runner_entry_gate": {"cohort_admissions": {}}}, blocked, 0.65)
+        assert out == blocked
+
+
+class TestLedgerLaneTag:
+    def _rows(self, tmp_path, monkeypatch):
+        from hermes_trader import ledger
+        path = tmp_path / "trades.jsonl"
+        rows = [
+            {"event": "OPEN", "coin": "APT", "side": "short", "entry_px": 8.12,
+             "config_snapshot": {"lane": "aligned_short_live"}},
+            {"event": "OPEN", "coin": "BTC", "side": "short", "entry_px": 100.0,
+             "config_snapshot": {"regime": "down"}},
+            {"event": "OPEN", "coin": "SOL", "side": "short", "entry_px": 99.0,
+             "config_snapshot": {"lane": "aligned_short_live"}},
+            "not json at all",
+            {"event": "OPEN", "coin": None, "side": "short", "entry_px": 1.0},
+            {"event": "CLOSE", "coin": "SOL", "side": "short", "entry_px": 99.0},
+        ]
+        path.write_text("\n".join(
+            r if isinstance(r, str) else json.dumps(r) for r in rows) + "\n",
+            encoding="utf-8")
+        monkeypatch.setattr(ledger, "LEDGER_FILE", str(path))
+        return ledger
+
+    def test_counts_only_tagged_unclosed(self, tmp_path, monkeypatch):
+        ledger = self._rows(tmp_path, monkeypatch)
+        assert ledger.count_open_with_lane("aligned_short_live") == 1
+        assert ledger.count_open_with_lane("other_lane") == 0
+        assert ledger.count_open_with_lane("") == 0
+
+    def test_missing_ledger_is_zero_not_crash(self, tmp_path, monkeypatch):
+        from hermes_trader import ledger
+        monkeypatch.setattr(ledger, "LEDGER_FILE", str(tmp_path / "nope.jsonl"))
+        assert ledger.count_open_with_lane("aligned_short_live") == 0
+
+    def test_open_snapshot_unchanged_without_lane(self, monkeypatch):
+        from hermes_trader.agents.executor import build_open_config_snapshot
+        base = build_open_config_snapshot("down", "dsl", 1.5, 2.0)
+        assert "lane" not in base
+        tagged = build_open_config_snapshot("down", "dsl", 1.5, 2.0,
+                                            lane="aligned_short_live")
+        assert tagged["lane"] == "aligned_short_live"
+        assert {k: v for k, v in tagged.items() if k != "lane"} == base
+
+
+class TestTapeEval:
+    """The SHARED tape evaluator (refactor 2026-10-30, owner idea tying the
+    lane arm to state_admission's short band, t_860f95f8). ONE boundary
+    convention for every tape-armed consumer: drift band
+    [btc24_min_pct, btc24_max_pct) — lower INCLUSIVE, upper EXCLUSIVE, the
+    shape state_admission already used — vol_min_pct inclusive, net6h_max_pct
+    inclusive. Missing data only ever REMOVES: a clause can never arm on a
+    gap, and an UNSET key means the clause is OFF, not unbounded."""
+
+    CFG = {"btc24_max_pct": -2.0, "vol_min_pct": 2.0, "net6h_max_pct": -2.0}
+
+    def _ev(self, sc, cfg=None):
+        from hermes_trader.agents.market_regime import tape_eval
+        return tape_eval(sc, self.CFG if cfg is None else cfg)
+
+    def test_band_is_half_open(self):
+        assert self._ev({"drift": -2.0})["band_hit"] is False    # max EXCLUSIVE
+        assert self._ev({"drift": -2.01})["band_hit"] is True
+        cfg = dict(self.CFG, btc24_min_pct=-3.0)
+        assert self._ev({"drift": -3.0}, cfg)["band_hit"] is True   # min INCLUSIVE
+        assert self._ev({"drift": -3.01}, cfg)["band_hit"] is False
+
+    def test_unset_band_is_off_not_unbounded(self):
+        got = self._ev({"drift": -40.0, "vol": 9.0}, {"vol_min_pct": 2.0})
+        assert got["band_hit"] is False and got["confirmed_dump"] is False
+
+    def test_missing_scalar_never_arms(self):
+        assert self._ev({"drift": None, "vol": 9.0})["confirmed_dump"] is False
+        assert self._ev({"drift": -4.0, "vol": None})["confirmed_dump"] is False
+        assert self._ev({"drift": -4.0})["fast_arm"] is False
+        assert sorted(self._ev({"drift": -4.0})["missing"]) == ["net6h", "vol"]
+
+    def test_clauses_are_independent(self):
+        # deep drift + flat vol -> confirmed off, but the 6h onset still arms
+        got = self._ev({"drift": -4.0, "vol": 1.0, "net6h": -2.0})
+        assert got["confirmed_dump"] is False and got["fast_arm"] is True
+        # net6h_max_pct unset -> the fast clause is not configured at all
+        assert self._ev({"drift": -4.0, "net6h": -40.0},
+                        {"btc24_max_pct": -2.0,
+                         "vol_min_pct": 2.0})["fast_arm"] is False
+
+    def test_malformed_bound_disables_its_own_clause(self):
+        # garbage reads as "not configured": cannot arm, cannot crash — the
+        # fail direction that only ever REMOVES entries
+        got = self._ev({"drift": -4.0, "vol": 3.0, "net6h": -9.0},
+                       {"btc24_max_pct": "nonsense", "vol_min_pct": 2.0,
+                        "net6h_max_pct": None})
+        assert got["band_hit"] is False and got["confirmed_dump"] is False
+        assert got["fast_arm"] is False
+
+    def test_same_scalars_opposite_readings(self):
+        # THE reason the thresholds stay per-consumer: the lane wants the deep
+        # dump, the state_admission short band wants MILD drift and refuses
+        # exactly this tape.
+        sc = {"drift": -4.2, "vol": 3.1}
+        assert self._ev(sc)["band_hit"] is True
+        assert self._ev(sc, {"btc24_min_pct": -2.0,
+                             "btc24_max_pct": 0.0})["band_hit"] is False
+
+
+class TestLaneTapeStateStamp:
+    """`live.tape_state` opts the lane into the t_860f95f8 phase label so lane
+    and clause lines cross-read. LOG-ONLY (a candle gap never changes a
+    verdict) and OFF by default (no candle read when the block is unset — the
+    clause's own cost rule)."""
+
+    def _hist(self):
+        base = 1_700_000_000_000
+        closes = ([100.0] * 30 + [97.0, 95.0, 92.0, 90.0, 88.0]
+                  + [89.0, 92.0, 95.0, 97.0, 99.0] * 3)
+        return [(base + i * 3_600_000, c) for i, c in enumerate(closes)]
+
+    def test_off_by_default_costs_no_candle_read(self, monkeypatch, caplog):
+        from hermes_trader.agents import market_regime
+
+        def _boom(count=216, force=False):
+            raise AssertionError("history fetched with tape_state unset")
+
+        monkeypatch.setattr(market_regime, "btc_tape_history", _boom)
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1)
+        assert len(got) == 1 and "tape_state" not in got[0]
+        assert "tape_state=" not in _msgs(caplog)[0]
+
+    def test_stamp_renders_on_spec_and_admit_line(self, monkeypatch, caplog):
+        from hermes_trader.agents import market_regime
+        monkeypatch.setattr(market_regime, "btc_tape_history",
+                            lambda count=216, force=False: self._hist())
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                          cfg=_live_cfg(live={"tape_state": {}}))
+        stamp = got[0]["tape_state"]
+        assert stamp.startswith("deep=") and "shallow=" in stamp
+        assert stamp not in ("no-history", "malformed-history")
+        assert f"tape_state={stamp}" in _msgs(caplog)[0]
+        reason = risk_gates.build_aligned_short_lane_analysis(got[0])["reasoning"]
+        assert f"tape_state={stamp}" in reason
+
+    def test_history_gap_labels_and_still_admits(self, monkeypatch, caplog):
+        from hermes_trader.agents import market_regime
+
+        def _down(count=216, force=False):
+            raise RuntimeError("candle feed down")
+
+        monkeypatch.setattr(market_regime, "btc_tape_history", _down)
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                          cfg=_live_cfg(live={"tape_state": {}}))
+        assert len(got) == 1 and got[0]["tape_state"] == "no-history"

@@ -176,3 +176,70 @@ def record_close(
         "exit_type": exit_type,
         "perception_id": perception_id,
     })
+
+
+def _pair_key(ev: Dict[str, Any]) -> tuple | None:
+    """(coin, side, entry_px) identity used to pair an OPEN with its CLOSE.
+
+    Returns None for a row too malformed to pair — callers skip those rather
+    than guessing, so a corrupt line can never close (or resurrect) a position.
+    """
+    try:
+        coin = str(ev.get("coin") or "")
+        side = str(ev.get("side") or "").strip().lower()
+        px_raw = ev.get("entry_px")
+        if px_raw is None:
+            return None
+        px = round(float(px_raw), 10)
+    except (TypeError, ValueError):
+        return None
+    if not coin or not side:
+        return None
+    return coin, side, px
+
+
+def count_open_with_lane(lane_tag: str) -> int:
+    """OPEN rows tagged config_snapshot.lane == lane_tag with no CLOSE yet.
+
+    This is the aligned-short lane's LIVE slot occupancy (board t_2e23804b
+    experiment, owner call 2026-10-30). Read off the append-only ledger rather
+    than the in-process DSL trackers so the count survives a container
+    recreate — the same restart-safety discipline the daily-PnL and cooldown
+    reads use. House pairing: (coin, side, entry_px), file order, each CLOSE
+    consumed once. Missing file / malformed lines degrade to 0, never raise:
+    a lane that cannot prove its own occupancy must not over-admit.
+    """
+    tag = str(lane_tag or "").strip().lower()
+    if not tag:
+        return 0
+    opens: list[tuple] = []
+    closed: set[tuple] = set()
+    try:
+        with open(LEDGER_FILE, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                key = _pair_key(ev)
+                if key is None:
+                    continue
+                event = str(ev.get("event") or "").upper()
+                if event == "OPEN":
+                    snap = ev.get("config_snapshot")
+                    if isinstance(snap, dict) and \
+                            str(snap.get("lane") or "").strip().lower() == tag:
+                        opens.append(key)
+                elif event == "CLOSE":
+                    closed.add(key)
+    except FileNotFoundError:
+        return 0
+    except Exception as exc:  # unreadable ledger -> assume full, not empty
+        logger.warning(f"[ledger] count_open_with_lane({tag}) failed: {exc}")
+        return -1
+    return sum(1 for k in opens if k not in closed)
