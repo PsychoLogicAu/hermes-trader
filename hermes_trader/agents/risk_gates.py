@@ -2794,36 +2794,38 @@ def aligned_short_lane_live_admit(
     # +$134 of the book at 5 slots while the part it filtered out was −$23
     # (a net LOSER). Drift alone (the earlier knob, drift<0) sits armed 56%
     # of hours and books +$44: the vol floor and the 6h onset trigger are
-    # doing the work. All three are config knobs, not hard-coded.
-    try:
-        drift_cap = float(live.get("max_btc_drift_pct", -2.0))
-    except (TypeError, ValueError):
-        drift_cap = -2.0
-    try:
-        vol_floor = float(live.get("min_tape_vol_pct", 2.0))
-    except (TypeError, ValueError):
-        vol_floor = 2.0
-    try:
-        fast_arm = float(live.get("fast_arm_net6h_pct", -2.0))
-    except (TypeError, ValueError):
-        fast_arm = -2.0
+    # doing the work.
+    # Keys use the SHARED tape vocabulary (market_regime.tape_eval, 2026-10-30)
+    # so this arm and state_admission's short band (t_860f95f8) read as one
+    # scale: btc24_max_pct / vol_min_pct / net6h_max_pct, with btc24_min_pct
+    # left unset = no lower bound (the lane wants "at least this deep", not a
+    # closed band). Values stay LANE-SPECIFIC on purpose — the same tape means
+    # opposite things to the two books. A malformed value disables its own
+    # clause (tape_eval reads it as "not configured"), which fails closed.
+    arm_cfg = {"btc24_max_pct": -2.0, "vol_min_pct": 2.0, "net6h_max_pct": -2.0}
+    for _k in ("btc24_min_pct", "btc24_max_pct", "vol_min_pct",
+               "net6h_max_pct"):
+        if live.get(_k) is not None:
+            arm_cfg[_k] = live[_k]
     try:
         cooldown_ms = float(lane_cfg.get("reentry_cooldown_min", 180.0)) * 60_000
     except (TypeError, ValueError):
         cooldown_ms = 180 * 60_000
 
     tape = None
+    from hermes_trader.agents.market_regime import tape_eval
     try:
         from hermes_trader.agents.market_regime import btc_tape_activity
         tape = btc_tape_activity()
     except Exception:
         tape = None
-    if not isinstance(tape, dict) or tape.get("drift") is None:
+    arm_st = tape_eval(tape, arm_cfg)
+    drift = arm_st["drift"]
+    if drift is None:
         logger.warning("[aligned-short-lane][LIVE] no BTC tape drift — "
                        "admitting nothing this cycle (fail closed)")
         return []
-    drift = float(tape["drift"])
-    _vol_raw, _n6_raw = tape.get("vol"), tape.get("net6h")
+    _vol_raw, _n6_raw = arm_st["vol"], arm_st["net6h"]
 
     def _fmt(x):
         try:
@@ -2832,21 +2834,38 @@ def aligned_short_lane_live_admit(
             return "n/a"
 
     vol_s, net6h_s = _fmt(_vol_raw), _fmt(_n6_raw)
-    # Confirmed-dump clause: deep 24h drift WITH vol expansion. Fast clause:
-    # the 6h onset trigger. A missing vol/net6h scalar only disables its own
+    # Confirmed-dump clause (deep 24h drift WITH vol expansion) OR the fast
+    # clause (6h onset trigger) — both answered by the SHARED tape_eval, so
+    # the lane arm and the state_admission short band use one boundary
+    # convention and one vocabulary. A missing scalar disables only its own
     # clause — it can never arm the lane (fail closed in the restrictive
     # direction; the gate only ever REMOVES entries).
-    confirmed = (drift <= drift_cap
-                 and _vol_raw is not None and float(_vol_raw) >= vol_floor)
-    fast = _n6_raw is not None and float(_n6_raw) <= fast_arm
+    confirmed, fast = arm_st["confirmed_dump"], arm_st["fast_arm"]
     if not (confirmed or fast):
         logger.info(
             f"[aligned-short-lane][LIVE] idle: tape is not a dump — "
-            f"drift {drift:+.2f}% vs cap {drift_cap:+.2f}%, vol {vol_s} vs "
-            f"floor {vol_floor:+.2f}%, net6h {net6h_s} vs fast {fast_arm:+.2f}%")
+            f"drift {drift:+.2f}% vs btc24_max_pct "
+            f"{_fmt(arm_cfg.get('btc24_max_pct'))}, vol {vol_s} vs vol_min_pct "
+            f"{_fmt(arm_cfg.get('vol_min_pct'))}, net6h {net6h_s} vs "
+            f"net6h_max_pct {_fmt(arm_cfg.get('net6h_max_pct'))}")
         return []
     arm = ("confirmed+fast" if (confirmed and fast)
            else "confirmed" if confirmed else "fast")
+
+    # Tape-state stamp (t_860f95f8 vocabulary) — LOG-ONLY phase label, so the
+    # lane's own accrual cross-reads with the state_admission short clause's
+    # why-lines instead of being reconstructed from candles afterwards.
+    # Costs a candle read ONLY when `live.tape_state` is configured (same cost
+    # rule as the clause); a candle gap labels no-history and never changes a
+    # verdict.
+    stamp = None
+    if isinstance(live.get("tape_state"), dict):
+        try:
+            from hermes_trader.agents.market_regime import btc_tape_history
+            stamp = tape_state_stamp(btc_tape_history(), live["tape_state"])
+        except Exception:
+            stamp = "no-history"
+    _stamp_txt = f" tape_state={stamp}" if stamp else ""
 
     if lane_open < 0:
         logger.warning("[aligned-short-lane][LIVE] lane occupancy unreadable — "
@@ -2923,6 +2942,7 @@ def aligned_short_lane_live_admit(
             "btc_tape_vol": _vol_raw,
             "btc_net6h": _n6_raw,
             "arm": arm,
+            **({"tape_state": stamp} if stamp else {}),
             "cohort_tag": tag,
             "ts": now_ms,
         })
@@ -2931,7 +2951,7 @@ def aligned_short_lane_live_admit(
             f"ts={now_ms} mid={cand.get('mid')} comp={cand.get('comp')} "
             f"mom6h_net={mom:+.1f}% ema4h={cand.get('ema4h_pair')} "
             f"btc_tape_drift={drift:+.2f}% btc_tape_vol={vol_s} "
-            f"btc_net6h={net6h_s} arm={arm} "
+            f"btc_net6h={net6h_s} arm={arm}{_stamp_txt} "
             f"ema4h_dist={float(cand.get('ema4h_dist_pct', 0) or 0):+.3f}% "
             f"ema4h_dist_bucket={cand.get('ema4h_bucket') or 'n/a'} "
             f"lane={cand.get('lane')} variant={','.join(cand.get('variant') or []) or '-'} "
@@ -2975,5 +2995,7 @@ def build_aligned_short_lane_analysis(spec: Dict[str, Any]) -> Dict[str, Any]:
             f"btc drift={float(spec.get('btc_tape_drift', 0) or 0):+.2f}% "
             f"vol={float(spec.get('btc_tape_vol', 0) or 0):+.2f}% "
             f"net6h={float(spec.get('btc_net6h', 0) or 0):+.2f}%"
+            + (f" tape_state={spec['tape_state']}"
+               if spec.get("tape_state") else "")
         ),
     }

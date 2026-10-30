@@ -653,8 +653,8 @@ LIVE_CFG = {
     "enabled": True,
     "reentry_cooldown_min": 180,
     "live": {"enabled": True, "max_lane_slots": 5, "mom_max_pct": -6.0,
-             "require_bucket": "deep", "max_btc_drift_pct": -2.0,
-             "min_tape_vol_pct": 2.0, "fast_arm_net6h_pct": -2.0,
+             "require_bucket": "deep", "btc24_max_pct": -2.0,
+             "vol_min_pct": 2.0, "net6h_max_pct": -2.0,
              "cohort_tag": "aligned_short_live"},
 }
 
@@ -819,11 +819,11 @@ class TestLaneArmClauses:
 
     def test_arm_thresholds_are_config_knobs(self, monkeypatch, caplog):
         assert _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
-                           cfg=_live_cfg(live={"min_tape_vol_pct": 5.0})) == []
+                           cfg=_live_cfg(live={"vol_min_pct": 5.0})) == []
         # fast arm switched off -> the 6h onset alone no longer admits
         assert _live_admit(monkeypatch, caplog, tape_drift=-0.5, tape_vol=0.5,
                            tape_net6h=-2.5,
-                           cfg=_live_cfg(live={"fast_arm_net6h_pct": -99.0})) == []
+                           cfg=_live_cfg(live={"net6h_max_pct": -99.0})) == []
         # drift cap tightened -> deep-but-shallow-vol tape stays idle
         assert _live_admit(monkeypatch, caplog, tape_drift=-1.5, tape_vol=9.0) == []
 
@@ -963,3 +963,111 @@ class TestLedgerLaneTag:
                                             lane="aligned_short_live")
         assert tagged["lane"] == "aligned_short_live"
         assert {k: v for k, v in tagged.items() if k != "lane"} == base
+
+
+class TestTapeEval:
+    """The SHARED tape evaluator (refactor 2026-10-30, owner idea tying the
+    lane arm to state_admission's short band, t_860f95f8). ONE boundary
+    convention for every tape-armed consumer: drift band
+    [btc24_min_pct, btc24_max_pct) — lower INCLUSIVE, upper EXCLUSIVE, the
+    shape state_admission already used — vol_min_pct inclusive, net6h_max_pct
+    inclusive. Missing data only ever REMOVES: a clause can never arm on a
+    gap, and an UNSET key means the clause is OFF, not unbounded."""
+
+    CFG = {"btc24_max_pct": -2.0, "vol_min_pct": 2.0, "net6h_max_pct": -2.0}
+
+    def _ev(self, sc, cfg=None):
+        from hermes_trader.agents.market_regime import tape_eval
+        return tape_eval(sc, self.CFG if cfg is None else cfg)
+
+    def test_band_is_half_open(self):
+        assert self._ev({"drift": -2.0})["band_hit"] is False    # max EXCLUSIVE
+        assert self._ev({"drift": -2.01})["band_hit"] is True
+        cfg = dict(self.CFG, btc24_min_pct=-3.0)
+        assert self._ev({"drift": -3.0}, cfg)["band_hit"] is True   # min INCLUSIVE
+        assert self._ev({"drift": -3.01}, cfg)["band_hit"] is False
+
+    def test_unset_band_is_off_not_unbounded(self):
+        got = self._ev({"drift": -40.0, "vol": 9.0}, {"vol_min_pct": 2.0})
+        assert got["band_hit"] is False and got["confirmed_dump"] is False
+
+    def test_missing_scalar_never_arms(self):
+        assert self._ev({"drift": None, "vol": 9.0})["confirmed_dump"] is False
+        assert self._ev({"drift": -4.0, "vol": None})["confirmed_dump"] is False
+        assert self._ev({"drift": -4.0})["fast_arm"] is False
+        assert sorted(self._ev({"drift": -4.0})["missing"]) == ["net6h", "vol"]
+
+    def test_clauses_are_independent(self):
+        # deep drift + flat vol -> confirmed off, but the 6h onset still arms
+        got = self._ev({"drift": -4.0, "vol": 1.0, "net6h": -2.0})
+        assert got["confirmed_dump"] is False and got["fast_arm"] is True
+        # net6h_max_pct unset -> the fast clause is not configured at all
+        assert self._ev({"drift": -4.0, "net6h": -40.0},
+                        {"btc24_max_pct": -2.0,
+                         "vol_min_pct": 2.0})["fast_arm"] is False
+
+    def test_malformed_bound_disables_its_own_clause(self):
+        # garbage reads as "not configured": cannot arm, cannot crash — the
+        # fail direction that only ever REMOVES entries
+        got = self._ev({"drift": -4.0, "vol": 3.0, "net6h": -9.0},
+                       {"btc24_max_pct": "nonsense", "vol_min_pct": 2.0,
+                        "net6h_max_pct": None})
+        assert got["band_hit"] is False and got["confirmed_dump"] is False
+        assert got["fast_arm"] is False
+
+    def test_same_scalars_opposite_readings(self):
+        # THE reason the thresholds stay per-consumer: the lane wants the deep
+        # dump, the state_admission short band wants MILD drift and refuses
+        # exactly this tape.
+        sc = {"drift": -4.2, "vol": 3.1}
+        assert self._ev(sc)["band_hit"] is True
+        assert self._ev(sc, {"btc24_min_pct": -2.0,
+                             "btc24_max_pct": 0.0})["band_hit"] is False
+
+
+class TestLaneTapeStateStamp:
+    """`live.tape_state` opts the lane into the t_860f95f8 phase label so lane
+    and clause lines cross-read. LOG-ONLY (a candle gap never changes a
+    verdict) and OFF by default (no candle read when the block is unset — the
+    clause's own cost rule)."""
+
+    def _hist(self):
+        base = 1_700_000_000_000
+        closes = ([100.0] * 30 + [97.0, 95.0, 92.0, 90.0, 88.0]
+                  + [89.0, 92.0, 95.0, 97.0, 99.0] * 3)
+        return [(base + i * 3_600_000, c) for i, c in enumerate(closes)]
+
+    def test_off_by_default_costs_no_candle_read(self, monkeypatch, caplog):
+        from hermes_trader.agents import market_regime
+
+        def _boom(count=216, force=False):
+            raise AssertionError("history fetched with tape_state unset")
+
+        monkeypatch.setattr(market_regime, "btc_tape_history", _boom)
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1)
+        assert len(got) == 1 and "tape_state" not in got[0]
+        assert "tape_state=" not in _msgs(caplog)[0]
+
+    def test_stamp_renders_on_spec_and_admit_line(self, monkeypatch, caplog):
+        from hermes_trader.agents import market_regime
+        monkeypatch.setattr(market_regime, "btc_tape_history",
+                            lambda count=216, force=False: self._hist())
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                          cfg=_live_cfg(live={"tape_state": {}}))
+        stamp = got[0]["tape_state"]
+        assert stamp.startswith("deep=") and "shallow=" in stamp
+        assert stamp not in ("no-history", "malformed-history")
+        assert f"tape_state={stamp}" in _msgs(caplog)[0]
+        reason = risk_gates.build_aligned_short_lane_analysis(got[0])["reasoning"]
+        assert f"tape_state={stamp}" in reason
+
+    def test_history_gap_labels_and_still_admits(self, monkeypatch, caplog):
+        from hermes_trader.agents import market_regime
+
+        def _down(count=216, force=False):
+            raise RuntimeError("candle feed down")
+
+        monkeypatch.setattr(market_regime, "btc_tape_history", _down)
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                          cfg=_live_cfg(live={"tape_state": {}}))
+        assert len(got) == 1 and got[0]["tape_state"] == "no-history"
