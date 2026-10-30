@@ -2728,9 +2728,27 @@ def aligned_short_lane_emit(
 # clear today's live $20M short-liquidity floor = 11 fills, +$12.37. The
 # smaller number is what this path can actually book — say so, don't quote 58.
 #
+# ARM REDESIGN (2026-10-30, owner: "we missed the immediate opportunity —
+# properly set up the rules to catch the next one"). The flip was paused
+# before any deploy; what went in instead is an objective tape gate so the
+# lane is armed by the dump, not by an operator noticing it. Measured on the
+# same accrual (scratch/_lane_arm_rules.py, tape rebuilt from BTC 5m and
+# self-checked against the drift printed on every WOULD ADMIT line, p50 error
+# 0.04 pct-points):
+#   drift<0 alone (the first draft)  armed 56% of hours -> +$43.89, n=40
+#   drift<=-2 AND vol>=2             armed  6% of hours -> +$100.48, n=17
+#   BTC 6h net <= -2 (onset)         armed  3% of hours -> +$131.90, n=20
+#   (drift<=-2&vol>=2) OR 6h<=-2  <- ARMED n=21, +$134.43, ex-3-best +$78.83
+#     and the book it filters OUT is −$22.59 — a net loser, so the gate is
+#     removing the wrong trades, not just fewer trades.
+# Onset matters more than depth: on the 10-22 dump the 24h-drift clauses armed
+# 4-13h late (or never), the 6h trigger armed at hour 0. That is why the fast
+# clause is an OR, not an AND.
+#
 # Fail-closed by construction: absent/disabled `live` block = zero work and no
 # log noise; a BTC-tape data gap = no admit (this gate only ever REMOVES
-# entries the rest of the stack would take); an unprovable lane occupancy
+# entries the rest of the stack would take); a missing vol or net6h scalar
+# disables only its own clause; an unprovable lane occupancy
 # (count_open_with_lane < 0) = no admit.
 # ---------------------------------------------------------------------------
 
@@ -2769,10 +2787,26 @@ def aligned_short_lane_live_admit(
     except (TypeError, ValueError):
         mom_max = -6.0
     require_bucket = str(live.get("require_bucket", "deep")).strip().lower()
+    # ARM = which TAPE STATE the lane is allowed to fire in. The 8.2-day
+    # accrual measured these as the winner (scratch/_lane_arm_rules.py):
+    # "confirmed dump" (24h drift deep AND dailyized vol expanded) OR the
+    # "fast arm" (BTC 6h net already deep) — armed only 7% of hours yet kept
+    # +$134 of the book at 5 slots while the part it filtered out was −$23
+    # (a net LOSER). Drift alone (the earlier knob, drift<0) sits armed 56%
+    # of hours and books +$44: the vol floor and the 6h onset trigger are
+    # doing the work. All three are config knobs, not hard-coded.
     try:
-        drift_cap = float(live.get("max_btc_drift_pct", 0.0))
+        drift_cap = float(live.get("max_btc_drift_pct", -2.0))
     except (TypeError, ValueError):
-        drift_cap = 0.0
+        drift_cap = -2.0
+    try:
+        vol_floor = float(live.get("min_tape_vol_pct", 2.0))
+    except (TypeError, ValueError):
+        vol_floor = 2.0
+    try:
+        fast_arm = float(live.get("fast_arm_net6h_pct", -2.0))
+    except (TypeError, ValueError):
+        fast_arm = -2.0
     try:
         cooldown_ms = float(lane_cfg.get("reentry_cooldown_min", 180.0)) * 60_000
     except (TypeError, ValueError):
@@ -2789,10 +2823,30 @@ def aligned_short_lane_live_admit(
                        "admitting nothing this cycle (fail closed)")
         return []
     drift = float(tape["drift"])
-    if drift >= drift_cap:
-        logger.info(f"[aligned-short-lane][LIVE] idle: btc_tape_drift {drift:+.2f}% "
-                    f">= {drift_cap:+.2f}% cap (lane is a dump-tape lane)")
+    _vol_raw, _n6_raw = tape.get("vol"), tape.get("net6h")
+
+    def _fmt(x):
+        try:
+            return f"{float(x):+.2f}%"
+        except (TypeError, ValueError):
+            return "n/a"
+
+    vol_s, net6h_s = _fmt(_vol_raw), _fmt(_n6_raw)
+    # Confirmed-dump clause: deep 24h drift WITH vol expansion. Fast clause:
+    # the 6h onset trigger. A missing vol/net6h scalar only disables its own
+    # clause — it can never arm the lane (fail closed in the restrictive
+    # direction; the gate only ever REMOVES entries).
+    confirmed = (drift <= drift_cap
+                 and _vol_raw is not None and float(_vol_raw) >= vol_floor)
+    fast = _n6_raw is not None and float(_n6_raw) <= fast_arm
+    if not (confirmed or fast):
+        logger.info(
+            f"[aligned-short-lane][LIVE] idle: tape is not a dump — "
+            f"drift {drift:+.2f}% vs cap {drift_cap:+.2f}%, vol {vol_s} vs "
+            f"floor {vol_floor:+.2f}%, net6h {net6h_s} vs fast {fast_arm:+.2f}%")
         return []
+    arm = ("confirmed+fast" if (confirmed and fast)
+           else "confirmed" if confirmed else "fast")
 
     if lane_open < 0:
         logger.warning("[aligned-short-lane][LIVE] lane occupancy unreadable — "
@@ -2866,6 +2920,9 @@ def aligned_short_lane_live_admit(
             "lane": "aligned_short",
             "variant": list(cand.get("variant") or []),
             "btc_tape_drift": drift,
+            "btc_tape_vol": _vol_raw,
+            "btc_net6h": _n6_raw,
+            "arm": arm,
             "cohort_tag": tag,
             "ts": now_ms,
         })
@@ -2873,7 +2930,8 @@ def aligned_short_lane_live_admit(
             f"[aligned-short-lane][LIVE] ADMIT {coin} SHORT "
             f"ts={now_ms} mid={cand.get('mid')} comp={cand.get('comp')} "
             f"mom6h_net={mom:+.1f}% ema4h={cand.get('ema4h_pair')} "
-            f"btc_tape_drift={drift:+.2f}% "
+            f"btc_tape_drift={drift:+.2f}% btc_tape_vol={vol_s} "
+            f"btc_net6h={net6h_s} arm={arm} "
             f"ema4h_dist={float(cand.get('ema4h_dist_pct', 0) or 0):+.3f}% "
             f"ema4h_dist_bucket={cand.get('ema4h_bucket') or 'n/a'} "
             f"lane={cand.get('lane')} variant={','.join(cand.get('variant') or []) or '-'} "
@@ -2911,8 +2969,11 @@ def build_aligned_short_lane_analysis(spec: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": ts,
         "reasoning": (
             f"[aligned-short-lane] mechanical rule, NO seat call: "
+            f"arm={spec.get('arm')}, "
             f"mom6h_net={float(spec.get('mom6h_net', 0) or 0):+.1f}%, "
             f"ema4h bucket={spec.get('ema4h_bucket')}, "
-            f"btc_tape_drift={float(spec.get('btc_tape_drift', 0) or 0):+.2f}%"
+            f"btc drift={float(spec.get('btc_tape_drift', 0) or 0):+.2f}% "
+            f"vol={float(spec.get('btc_tape_vol', 0) or 0):+.2f}% "
+            f"net6h={float(spec.get('btc_net6h', 0) or 0):+.2f}%"
         ),
     }

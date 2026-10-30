@@ -37,6 +37,7 @@ import json
 import math
 import sys
 import time
+from typing import Optional
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -652,7 +653,8 @@ LIVE_CFG = {
     "enabled": True,
     "reentry_cooldown_min": 180,
     "live": {"enabled": True, "max_lane_slots": 5, "mom_max_pct": -6.0,
-             "require_bucket": "deep", "max_btc_drift_pct": 0.0,
+             "require_bucket": "deep", "max_btc_drift_pct": -2.0,
+             "min_tape_vol_pct": 2.0, "fast_arm_net6h_pct": -2.0,
              "cohort_tag": "aligned_short_live"},
 }
 
@@ -669,15 +671,20 @@ def _live_cfg(**over):
 
 def _live_admit(monkeypatch, caplog, cands=None, cfg=None, open_coins=frozenset(),
                 slots_used=0, max_slots=10, lane_open=0, last_ts=None,
-                tape_drift=-4.2, tape_gap=False, tape_missing=False):
+                tape_drift: float = -4.2, tape_vol: Optional[float] = 3.1,
+                tape_net6h: Optional[float] = None,
+                tape_gap=False, tape_missing=False):
     from hermes_trader.agents import market_regime
 
     def _tape(force=False):
         if tape_gap:
             raise RuntimeError("tape feed down")
         if tape_missing:
-            return {"vol": 3.1, "drift": None}
-        return {"vol": 3.1, "drift": tape_drift}
+            return {"vol": tape_vol, "drift": None}
+        out = {"vol": tape_vol, "drift": tape_drift}
+        if tape_net6h is not None:
+            out["net6h"] = tape_net6h   # absent = the fast clause cannot fire
+        return out
 
     monkeypatch.setattr(market_regime, "btc_tape_activity", _tape)
     caplog.set_level("INFO", logger="hermes_trader.agents.risk_gates")
@@ -722,6 +729,7 @@ class TestLiveAdmit:
         line = _msgs(caplog)[0]
         assert "[aligned-short-lane][LIVE] ADMIT APT SHORT" in line
         assert "lane_slots=1/5" in line and "cohort=mechanical/aligned_short_live" in line
+        assert "arm=confirmed" in line and "btc_tape_vol=+3.10%" in line
 
     def test_only_the_named_cell(self, monkeypatch, caplog):
         for bad in (_cand("A", lane="early_long"),
@@ -773,6 +781,93 @@ class TestLiveAdmit:
         c = _cand("A")
         c.pop("mom6h_net")
         assert _live_admit(monkeypatch, caplog, cands=[c]) == []
+
+
+class TestLaneArmClauses:
+    """The tape gate that replaced 'operator notices the dump' (owner call
+    2026-10-30). Confirmed clause = drift<=-2 AND vol>=2; fast clause =
+    BTC 6h net <= -2. Measured: armed 7% of hours, +$134 at 5 slots, and the
+    book it filters out is a net LOSER (-$23)."""
+
+    def test_confirmed_clause_needs_vol_expansion(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, tape_drift=-4.2,
+                           tape_vol=1.0) == []          # deep drift, flat vol
+        assert "tape is not a dump" in _msgs(caplog)[0]
+
+    def test_fast_arms_on_the_6h_onset_alone(self, monkeypatch, caplog):
+        # The 10-22 shape: 24h drift still shallow, the dump just started.
+        got = _live_admit(monkeypatch, caplog, tape_drift=-0.5, tape_vol=0.5,
+                          tape_net6h=-2.5)
+        assert len(got) == 1 and got[0]["arm"] == "fast"
+        assert "arm=fast" in _msgs(caplog)[0]
+
+    def test_both_clauses_labelled(self, monkeypatch, caplog):
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                          tape_net6h=-6.0)
+        assert got[0]["arm"] == "confirmed+fast"
+        assert "arm=confirmed+fast" in _msgs(caplog)[0]
+
+    def test_missing_scalar_disables_only_its_own_clause(self, monkeypatch, caplog):
+        # vol n/a -> confirmed cannot fire, fast still can.
+        assert len(_live_admit(monkeypatch, caplog, tape_vol=None,
+                               tape_net6h=-3.0)) == 1
+        # net6h n/a -> fast cannot fire; confirmed still can.
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=-4.2,
+                               tape_vol=3.1)) == 1
+        # both n/a -> nothing arms.
+        assert _live_admit(monkeypatch, caplog, tape_vol=None) == []
+
+    def test_arm_thresholds_are_config_knobs(self, monkeypatch, caplog):
+        assert _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
+                           cfg=_live_cfg(live={"min_tape_vol_pct": 5.0})) == []
+        # fast arm switched off -> the 6h onset alone no longer admits
+        assert _live_admit(monkeypatch, caplog, tape_drift=-0.5, tape_vol=0.5,
+                           tape_net6h=-2.5,
+                           cfg=_live_cfg(live={"fast_arm_net6h_pct": -99.0})) == []
+        # drift cap tightened -> deep-but-shallow-vol tape stays idle
+        assert _live_admit(monkeypatch, caplog, tape_drift=-1.5, tape_vol=9.0) == []
+
+
+class TestTapeNet6h:
+    """`btc_tape_activity` must carry net6h — the lane's fast arm reads it,
+    and it has to come from the SAME 290-bar window (no second price call) and
+    describe ONLY the last 72 bars, or the fast arm is just the drift gate
+    wearing a different hat."""
+
+    def _tape(self, monkeypatch, closes):
+        from hermes_trader.agents import market_regime as mr
+        candles = [Candle(t=i * 300_000, o=c, h=c, l=c, c=c, v=1.0)
+                   for i, c in enumerate(closes)]
+        monkeypatch.setattr(mr, "fetch_hl_candles",
+                            lambda coin, interval="5m", count=290: candles)
+        monkeypatch.setattr(mr, "_tape_cache", (None, 0.0))
+        res = mr.btc_tape_activity(force=True)
+        assert res is not None
+        return res
+
+    def test_net6h_measures_the_last_72_bars_only(self, monkeypatch):
+        closes = [100.0] * 290
+        for i in range(290 - 72, 290):     # -3% step inside the 6h window
+            closes[i] = 97.0
+        tape = self._tape(monkeypatch, closes)
+        # reference bar = closes[-73] (72 steps back = exactly 6h) is pre-step
+        assert tape["net6h"] == pytest.approx(-3.0)
+        assert tape["drift"] == pytest.approx(-3.0)
+
+    def test_old_move_moves_drift_not_net6h(self, monkeypatch):
+        closes = [100.0] * 290
+        for i in range(100, 290):          # -5% step ~16h back, flat since
+            closes[i] = 95.0
+        tape = self._tape(monkeypatch, closes)
+        assert tape["drift"] == pytest.approx(-5.0)
+        assert tape["net6h"] == pytest.approx(0.0)
+
+    def test_vol_and_drift_keys_unchanged(self, monkeypatch):
+        tape = self._tape(monkeypatch, [100.0 + (i % 3) for i in range(290)])
+        assert set(tape) == {"vol", "drift", "net6h"}
+        # first close 100.0, last (i=289, 289%3==1) 101.0 -> +1.0% over 24h
+        assert tape["vol"] > 0 and tape["drift"] == pytest.approx(1.0)
+        assert tape["net6h"] == pytest.approx(0.0)   # 72 bars = 24 cycles, net 0
 
 
 class TestLaneCohortWeld:

@@ -248,7 +248,8 @@ def regime_snapshot() -> Dict[str, Dict[str, object]]:
 # vol 2.5% / drift 2.0%. WATCHLIST §B.17.
 _TAPE_TTL_S = 300  # 5min — same cadence as REGIME_TTL_S
 _TAPE_MIN_BARS = 200  # fail-safe: < ~16h of 5m history → no opinion
-_tape_cache: Tuple[Optional[Dict[str, float]], float] = (None, 0.0)
+_TAPE_NET6H_BARS = 72  # 6h of 5m bars — the lane fast-arm window (t_2e23804b)
+_tape_cache: Tuple[Optional[Dict[str, Any]], float] = (None, 0.0)
 
 
 # Alt-basket broad-tape defaults (2026-09-11, WATCHLIST §B.17 alt variant).
@@ -468,10 +469,17 @@ def _detect_cached(proxy: str) -> Optional[str]:
 
 
 def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
-    """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %}.
+    """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %, "net6h": %|None}.
 
     vol    = pstdev of 5m log-returns × sqrt(288) × 100 (dailyized %),
-    drift  = (last close / first close − 1) × 100 (% over the ~24h window).
+    drift  = (last close / first close − 1) × 100 (% over the ~24h window),
+    net6h  = (last close / close 72 bars back − 1) × 100 — the SHORT-window
+             momentum view of the SAME 290 bars (no extra price call). Added
+             2026-10-30 for the aligned-short lane's fast arm (board
+             t_2e23804b): the 24h drift is a lagging confirmation that can sit
+             9h behind a fresh dump, the 6h net is the onset trigger. None if
+             the window is too short; every pre-existing consumer reads only
+             vol/drift, so an extra key is inert for them.
 
     Both are lookback-only (no lookahead beyond the still-forming last
     5m bar's close, which is the live price). Returns None on a data gap
@@ -497,7 +505,9 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
     vol = statistics.pstdev(rets) * math.sqrt(288) * 100
     drift = (closes[-1] / closes[0] - 1) * 100
-    _tape_cache = ({"vol": vol, "drift": drift}, now)
+    net6h = ((closes[-1] / closes[-_TAPE_NET6H_BARS - 1] - 1) * 100
+             if len(closes) > _TAPE_NET6H_BARS else None)
+    _tape_cache = ({"vol": vol, "drift": drift, "net6h": net6h}, now)
     return _tape_cache[0]
 
 
