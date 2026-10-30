@@ -3310,6 +3310,45 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     # subject to the global allow_shorts kill-switch. Every OTHER gate
     # (quiet-tape, band-counter-breach, late-chase sub-gates, cooldowns,
     # slots) still applies — this exempts the runner gate only.
+    # Mild-down-tape LONG veto (B.53, t_5384f2ce): twin of
+    # risk_gates.mild_tape_long_veto_gate, one shared config block
+    # `mild_tape_long_veto_gate` (mode off/shadow/live, tape keys
+    # btc24_min_pct/btc24_max_pct). Same placement law as the mover veto,
+    # enforced (2026-10-31 review fix — it sat BELOW the conf/state-admission
+    # block, so a clause-admitted long never reached it): MUST precede EVERY
+    # early-return admission in this gate — cohort_admissions, the seat-bar
+    # ADMIT, the sub-floor state-admission clause, the structured_daily_mover
+    # bypass — or it is a no-op for exactly the longs it exists to stop.
+    # Tape read via _late_chase_tape_read (the same cached 300s BTC read;
+    # gap = inert, never fires).
+    _mtl_cfg = config.get("mild_tape_long_veto_gate") or {}
+    _mtl_mode = str(_mtl_cfg.get("mode", "off")).strip().lower()
+    _mtl_mn, _mtl_mx = _mtl_cfg.get("btc24_min_pct"), _mtl_cfg.get("btc24_max_pct")
+    # side guard on the OUTSIDE (not just at the band check): the pre-hoist
+    # short path returned before this section, so shorts must still make
+    # ZERO tape fetches and log nothing here (pinned by
+    # test_runner_short_path_never_reaches_veto).
+    if (side == "long" and _mtl_mode in ("shadow", "live")
+            and _mtl_mn is not None and _mtl_mx is not None):
+        try:
+            _mtl_mn, _mtl_mx = float(_mtl_mn), float(_mtl_mx)
+            _mtl_tt = _late_chase_tape_read()
+            _mtl_drift = _mtl_tt.get("drift") if isinstance(_mtl_tt, dict) else None
+        except (TypeError, ValueError):
+            _mtl_drift = None  # malformed keys -> inert (fail-open)
+        if _mtl_drift is not None and _mtl_mn <= float(_mtl_drift) < _mtl_mx:
+            _mtl_detail = (f"{coin} LONG on BTC trail-24h drift "
+                           f"{float(_mtl_drift):+.2f}% in [{_mtl_mn:+.1f}, "
+                           f"{_mtl_mx:+.1f})% at conf {conf:.2f}, score "
+                           f"{score:.0f} (mild-down tape, flat-long class)")
+            if _mtl_mode == "shadow":
+                logger.warning(
+                    f"[gate][MILD-TAPE-LONG][SHADOW] WOULD VETO {_mtl_detail} — "
+                    f"NOT vetoing (shadow mode; kill-switch lever)")
+            else:
+                logger.warning(f"[gate][MILD-TAPE-LONG] VETO {_mtl_detail}")
+                return "runner_gate_blocked (mild-down tape long veto)"
+
     cohort_tag = str(analysis.get("cohort_tag") or "").strip().lower()
     if cohort_tag:
         adm = gate.get("cohort_admissions") or {}
@@ -3359,6 +3398,12 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             # reaches the clause. Admit = FULL runner-gate pass (early return):
             # the clause population is trend-only by construction, so falling
             # through would re-block 100% at the structure checks below.
+            # CONTRACT (review 2026-10-31, recorded deliberately): the pass
+            # exempts the conf floor AND the in-gate shape checks (structure,
+            # late-chase sub-gates, HIP-3 composite floor); it exempts NOTHING
+            # downstream (cooldowns, slots, daily-kill, sizing all still apply
+            # — eval_all_gates runs after this gate) and NOTHING upstream of
+            # it (mild-tape and crowded-mover vetoes now precede it).
             _pm = str(analysis.get("primary_model") or "").strip()
             if _pm:
                 _clause = (read_model_profile_for_model(_pm) or {}).get("state_admission")
@@ -3453,37 +3498,6 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         else:
             logger.warning(f"[gate][CROWDED-MOVER] VETO {_cm_detail}")
             return "runner_gate_blocked (crowded daily mover veto)"
-
-    # Mild-down-tape LONG veto (B.53, t_5384f2ce): twin of
-    # risk_gates.mild_tape_long_veto_gate, one shared config block
-    # `mild_tape_long_veto_gate` (mode off/shadow/live, tape keys
-    # btc24_min_pct/btc24_max_pct). Same placement law as the mover veto:
-    # MUST precede the structured_daily_mover bypass and the sub-floor
-    # state-admission early-returns below, or it is a no-op for exactly the
-    # longs it exists to stop. Tape read via _late_chase_tape_read (the
-    # same cached 300s BTC read; gap = inert, never fires).
-    _mtl_cfg = config.get("mild_tape_long_veto_gate") or {}
-    _mtl_mode = str(_mtl_cfg.get("mode", "off")).strip().lower()
-    _mtl_mn, _mtl_mx = _mtl_cfg.get("btc24_min_pct"), _mtl_cfg.get("btc24_max_pct")
-    if _mtl_mode in ("shadow", "live") and _mtl_mn is not None and _mtl_mx is not None:
-        try:
-            _mtl_mn, _mtl_mx = float(_mtl_mn), float(_mtl_mx)
-            _mtl_tt = _late_chase_tape_read()
-            _mtl_drift = _mtl_tt.get("drift") if isinstance(_mtl_tt, dict) else None
-        except (TypeError, ValueError):
-            _mtl_drift = None  # malformed keys -> inert (fail-open)
-        if _mtl_drift is not None and _mtl_mn <= float(_mtl_drift) < _mtl_mx:
-            _mtl_detail = (f"{coin} LONG on BTC trail-24h drift "
-                           f"{float(_mtl_drift):+.2f}% in [{_mtl_mn:+.1f}, "
-                           f"{_mtl_mx:+.1f})% at conf {conf:.2f}, score "
-                           f"{score:.0f} (mild-down tape, flat-long class)")
-            if _mtl_mode == "shadow":
-                logger.warning(
-                    f"[gate][MILD-TAPE-LONG][SHADOW] WOULD VETO {_mtl_detail} — "
-                    f"NOT vetoing (shadow mode; kill-switch lever)")
-            else:
-                logger.warning(f"[gate][MILD-TAPE-LONG] VETO {_mtl_detail}")
-                return "runner_gate_blocked (mild-down tape long veto)"
 
     structured_daily_mover = (
         daily_mover

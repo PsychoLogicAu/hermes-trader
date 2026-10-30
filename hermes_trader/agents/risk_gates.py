@@ -413,7 +413,9 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
             shadow = _as_shadow(sub.get("shadow", _sh))
             if bool(analysis.get("daily_mover_fired")):
                 return False, "dailyMover fired (crowded-extension class)", shadow
-            min_conf = float(sub.get("min_conf", 0.0) or 0.0)
+            # Negative floors are nonsense: clamp (config-authoring guard,
+            # 2026-10-31 review) so a typo can never widen the rescue envelope.
+            min_conf = max(0.0, float(sub.get("min_conf", 0.0) or 0.0))
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
             _mx = sub.get("btc24_max_pct")
@@ -437,7 +439,9 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                 return False, "clause has no 'short' block (inert)", shadow
             # Per-side shadow override (mirror of the long side).
             shadow = _as_shadow(sub.get("shadow", _sh))
-            min_conf = float(sub.get("min_conf", 0.0) or 0.0)
+            # Negative floors are nonsense: clamp (config-authoring guard,
+            # 2026-10-31 review) so a typo can never widen the rescue envelope.
+            min_conf = max(0.0, float(sub.get("min_conf", 0.0) or 0.0))
             if conf < min_conf:
                 return False, f"conf {conf:.2f} < clause sanity floor {min_conf:.2f}", shadow
             _mn, _mx = sub.get("btc24_min_pct"), sub.get("btc24_max_pct")
@@ -621,13 +625,17 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
         _tt = btc_tape_activity()
     except Exception:
         _tt = None
+    try:
+        _sa_drift = (float(_tt["drift"])
+                     if _tt and _tt.get("drift") is not None else None)
+    except (TypeError, ValueError):
+        _sa_drift = None  # malformed producer -> inert (review fix 2026-10-31)
     _sa = {
         "side": getattr(ctx, "trade_side", ""),
         "confidence": getattr(ctx, "confidence", 0) or 0,
         "daily_move_pct": getattr(ctx, "daily_move_pct", None),
         "daily_mover_fired": getattr(ctx, "daily_mover_fired", False),
-        "btc_drift_24h": (float(_tt["drift"])
-                          if _tt and _tt.get("drift") is not None else None),
+        "btc_drift_24h": _sa_drift,
     }
     if isinstance(clause.get("short"), dict) and isinstance(
             clause["short"].get("quality"), dict):

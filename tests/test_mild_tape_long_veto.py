@@ -206,6 +206,44 @@ def test_runner_shadow_logs_and_admits(monkeypatch, caplog):
     assert "[gate][MILD-TAPE-LONG][SHADOW] WOULD VETO" in caplog.text
 
 
+def test_runner_veto_precedes_state_admission_clause(monkeypatch):
+    # Review-fix regression (2026-10-31): a LIVE mild-tape veto must
+    # PRECEDE the sub-floor state-admission clause. Bands deliberately
+    # overlapped (veto [-2,0) == clause long band) to force the collision:
+    # pre-fix the clause early-returned "" and the veto never saw the
+    # candidate; post-fix the veto blocks it.
+    _stub_runner_tape(monkeypatch, -1.0)
+
+    def _prof(model):
+        return {"state_admission": {
+            "shadow": False,
+            "long": {"btc24_max_pct": 0.0, "min_conf": 0.0}}}
+
+    monkeypatch.setattr(executor, "read_model_profile_for_model", _prof)
+    a = _analysis(confidence=0.30, btc_drift_24h=-1.0, primary_model="seat-x")
+    assert _runner_entry_block_reason(
+        a, _config("live")) == "runner_gate_blocked (mild-down tape long veto)"
+
+
+def test_runner_live_veto_never_touches_shorts(monkeypatch):
+    # The hoisted veto sits above the side split, so it needs its explicit
+    # long-only guard: an in-band SHORT the clause would admit (the planned
+    # shorts-only live shape) passes untouched.
+    _stub_runner_tape(monkeypatch, -1.0)
+
+    def _prof(model):
+        return {"state_admission": {
+            "shadow": False,
+            "short": {"btc24_min_pct": -2.0, "btc24_max_pct": 0.0}}}
+
+    monkeypatch.setattr(executor, "read_model_profile_for_model", _prof)
+    cfg = _config("live")
+    cfg["runner_entry_gate"]["allow_shorts"] = True
+    a = _analysis(side="short", confidence=0.30, btc_drift_24h=-1.0,
+                  primary_model="seat-x")
+    assert _runner_entry_block_reason(a, cfg) == ""
+
+
 def test_runner_off_zero_fetch_byte_identical(monkeypatch):
     calls = _stub_runner_tape(monkeypatch, -1.0)
     a = _analysis(volume_spike_fired=True, breakout_fired=True,
