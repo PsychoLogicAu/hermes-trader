@@ -2919,6 +2919,18 @@ def _late_chase_tape_read():
         return None
 
 
+def _tape_history_read():
+    """Module-level indirection over market_regime.btc_tape_history (1h BTC
+    close series for the state_admission tape-state stamp; 300s TTL cached).
+    Tests monkeypatch it like _late_chase_tape_read. None on a data gap ->
+    the stamp degrades to no-history (log-only, never a verdict)."""
+    from hermes_trader.agents.market_regime import btc_tape_history
+    try:
+        return btc_tape_history()
+    except Exception:
+        return None
+
+
 def _late_chase_tape_gate(gate: Dict[str, Any], coin: str, side: str,
                           conf: float, bar: float,
                           suppresses: bool) -> Tuple[bool, str]:
@@ -3354,6 +3366,15 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                     # reads (same wrappers the post-gate attach uses, so the
                     # compute is not extra cost — see inject_state_quality).
                     _ca = inject_state_quality(_ca, str(coin or ""), str(side))
+                if isinstance(_clause, dict) and isinstance(
+                        _clause.get("short"), dict) and isinstance(
+                        _clause["short"].get("tape_state"), dict):
+                    # Tape-state stamp (t_860f95f8): LOG-ONLY phase label;
+                    # fetch ONLY when the block exists (new 1h candle window,
+                    # flat-weight, TTL-cached — see btc_tape_history).
+                    _th = _tape_history_read()
+                    if _th:
+                        _ca["btc_history_1h"] = _th
                 _admit, _why, _shadow = state_admission(
                     _ca, _clause, bool(gate.get("allow_shorts", False)))
                 if _admit:

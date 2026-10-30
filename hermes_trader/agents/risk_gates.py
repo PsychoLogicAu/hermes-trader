@@ -212,6 +212,64 @@ def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> boo
     return fired < need
 
 
+def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any]) -> str:
+    """Render the short-clause tape-state stamp (t_860f95f8, 2026-10-30).
+
+    LOG-ONLY: this can never change a verdict — it labels WHICH tape-phase
+    a decision sits in so episode 2-3 accrual carries its own state instead
+    of being reconstructed from candles after the fact. Two crossing-clock
+    arms, both priced positive in the 10-22..29 cohort replay (avg ~+0.9
+    per trade) while every non-crossing population bled:
+
+      deep-arm     most recent up-crossing of trail-24h drift through
+                   ``deep_arm_pct`` (default -3.0), armed within
+                   ``deep_arm_clock_h`` (default 48) — true only after a
+                   real crash registered and recovery began.
+      shallow-arm  most recent up-crossing through ``shallow_arm_pct``
+                   (default -2.0) within ``shallow_arm_clock_h`` (default 12)
+                   — fresh re-cross of the band floor (catch-down
+                   follow-through window; the cell flips sign by 24h).
+
+    ``btc_history`` is ``[(bar_start_ms, close), ...]`` (1h bars, from
+    ``market_regime.btc_tape_history``, injected by the callers ONLY when
+    the config block exists). Pure: no I/O. Format per leg: ``age<age>h+``
+    armed / ``<age>hx`` past clock / ``n`` no crossing; missing history ->
+    ``no-history`` (fail-open).
+    """
+    if not btc_history or len(btc_history) < 30:
+        return "no-history"
+    try:
+        import bisect
+        hist = sorted((int(t), float(c)) for t, c in btc_history if float(c) > 0)
+        times = [t for t, _ in hist]
+        series = []
+        for t, c in hist:
+            j = bisect.bisect_right(times, t - 86_400_000) - 1
+            if j >= 0 and hist[j][1] > 0:
+                series.append((t, (c - hist[j][1]) / hist[j][1] * 100.0))
+        if not series:
+            return "no-history"
+        now_ms = series[-1][0]
+        parts = []
+        for name, pk, ck, dft in (("deep", "deep_arm_pct", "deep_arm_clock_h", (-3.0, 48.0)),
+                                  ("shallow", "shallow_arm_pct", "shallow_arm_clock_h", (-2.0, 12.0))):
+            depth = float(tape_cfg.get(pk, dft[0]))
+            clock = float(tape_cfg.get(ck, dft[1]))
+            cross_t = None
+            for i in range(len(series) - 1, 0, -1):
+                if series[i][1] > depth >= series[i - 1][1]:
+                    cross_t = series[i][0]
+                    break
+            if cross_t is None:
+                parts.append(f"{name}=n")
+            else:
+                age = (now_ms - cross_t) / 3_600_000
+                parts.append(f"{name}={age:.1f}h{'+' if age <= clock else 'x'}<={clock:g}")
+        return " ".join(parts)
+    except (TypeError, ValueError):
+        return "malformed-history"
+
+
 def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                     allow_shorts: bool):
     """Model-profile state-admission clause (kanban t_1999904f, 2026-10-17;
@@ -333,6 +391,16 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                 return False, (f"TAPE-SKIP: BTC trail-24h drift {float(drift):+.2f}% outside "
                                f"clause window [{_mn:+.1f}, {_mx:+.1f})% "
                                f"(conf {conf:.2f})"), shadow
+            # Tape-state stamp (t_860f95f8, 2026-10-30): LOG-ONLY phase label
+            # (deep-arm / shallow-arm crossing clocks, config-exposed via
+            # state_admission.short.tape_state). Never changes the verdict;
+            # absent sub-block = byte-identical why-lines. The callers inject
+            # ``btc_history_1h`` ONLY when the block exists (no fetch cost
+            # otherwise); fail-open to 'no-history' on a candle gap.
+            _st = ""
+            if isinstance(sub.get("tape_state"), dict):
+                _st = " tape [" + tape_state_stamp(
+                    analysis.get("btc_history_1h"), sub["tape_state"]) + "]"
             # Quality gate (t_860f95f8, 2026-10-29): on band-days the short
             # population oversupplies the book ~7:1 and the binding
             # constraint is candidate QUALITY, not slots. Crash-episode
@@ -360,19 +428,20 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                     _val = analysis.get(_ka)
                     if _val is None:
                         return False, (f"QUALITY-SKIP: no {_lbl} read "
-                                       f"(inert, conf {conf:.2f})"), shadow
+                                       f"(inert, conf {conf:.2f})" + _st), shadow
                     if float(_val) > float(_lim):
                         return False, (f"QUALITY-SKIP: {_lbl} {float(_val):+.2f} "
-                                       f"> max {float(_lim):+.2f} (conf {conf:.2f})"), shadow
+                                       f"> max {float(_lim):+.2f} (conf {conf:.2f})"
+                                       + _st), shadow
                     _passed.append(f"{_lbl.split()[0]} {float(_val):+.2f}<={float(_lim):+.2f}")
                 if _passed:
                     return True, (f"short on kept tape: BTC 24h {float(drift):+.2f}% in "
                                   f"[{_mn:+.1f}, {_mx:+.1f})%, conf {conf:.2f} >= "
                                   f"clause floor {min_conf:.2f}, quality ["
-                                  f"{"; ".join(_passed)}]"), shadow
+                                  f"{"; ".join(_passed)}]" + _st), shadow
             return True, (f"short on kept tape: BTC 24h {float(drift):+.2f}% in "
                           f"[{_mn:+.1f}, {_mx:+.1f})%, conf {conf:.2f} >= "
-                          f"clause floor {min_conf:.2f}"), shadow
+                          f"clause floor {min_conf:.2f}" + _st), shadow
     except (TypeError, ValueError):
         return False, "malformed clause values (inert)", shadow
     return False, "non-directional side (inert)", shadow
@@ -483,6 +552,17 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
         # (same wrappers the post-gate attach uses — not extra compute).
         _sa = inject_state_quality(_sa, str(getattr(ctx, "coin", "") or ""),
                                    str(getattr(ctx, "trade_side", "") or ""), cfg)
+    if isinstance(clause.get("short"), dict) and isinstance(
+            clause["short"].get("tape_state"), dict):
+        # Tape-state stamp (t_860f95f8): log-only; injected only when the
+        # config block exists. Fail-open to no-history on a gap.
+        try:
+            from hermes_trader.agents.market_regime import btc_tape_history
+            _th = btc_tape_history()
+            if _th:
+                _sa["btc_history_1h"] = _th
+        except Exception:
+            pass
     admit, why, shadow = state_admission(
         _sa,
         clause,

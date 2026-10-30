@@ -501,6 +501,42 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     return _tape_cache[0]
 
 
+# BTC 1h close series for the state_admission tape-state stamp (t_860f95f8,
+# 2026-10-30). The underlying fetch_hl_candles keeps a rolling window per
+# coin+interval at flat weight 20 — this rides the SAME price call cadence
+# as the 5m tape read, so it is a new candle window, not new API budget.
+_tape_hist_cache: Tuple[Optional[list], float] = (None, 0.0)
+_TAPE_HIST_TTL_S = 300
+
+
+def btc_tape_history(count: int = 216, force: bool = False) -> Optional[list]:
+    """BTC 1h bars as ``[(bar_start_ms, close), ...]`` oldest-first, or None
+    on a data gap.
+
+    Consumed by ``risk_gates.tape_state_stamp`` to build the trail-24h drift
+    series and the up-crossing clocks for the ``state_admission.short``
+    tape-state stamp. 1h granularity by design: a drift-level crossing is a
+    slow event and the clocks are 12h/48h, so +/-1h age resolution is ample.
+    Fail-open consumer: the stamp degrades to ``no-history`` on a gap —
+    tape-state is log-only and can never change a verdict. Gaps are not
+    cached (next call retries); ``force=True`` bypasses the cache.
+    """
+    global _tape_hist_cache
+    now = time.time()
+    cached, ts = _tape_hist_cache
+    if not force and cached is not None and (now - ts) < _TAPE_HIST_TTL_S:
+        return cached
+    try:
+        candles = fetch_hl_candles(CRYPTO_PROXY, interval="1h", count=count)
+    except Exception as e:
+        logger.warning(f"[regime] tape-history fetch failed for {CRYPTO_PROXY}: {e}")
+        return None
+    out = [(int(c.t), float(c.c)) for c in candles if float(c.c) > 0] if candles else None
+    if out:
+        _tape_hist_cache = (out, now)
+    return out
+
+
 # Per-coin tape cache for the quiet_tape momentum-release clause
 # (2026-10-06, WATCHLIST §B.17). Gaps are NOT cached (next call retries).
 _coin_tape_cache: Dict[str, Tuple[Optional[Dict[str, float]], float]] = {}
