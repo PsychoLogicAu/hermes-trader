@@ -108,19 +108,64 @@ def load_rows(since_ms: int, coins: set[str] | None, limit: int, model: str):
 
 
 def load_close_index():
+    """CLOSE rows keyed by the OPEN's perception_id.
+
+    Exchange-side closes (`exchange_close: SL/TP trigger filled on exchange;
+    tracker dropped as stale`) book the CLOSE row with perception_id=null —
+    the NXPC/t_38944f65 ghost-OPEN family. Those rows were invisible to a
+    pid-only join, so executed entries silently vanished from the priced
+    cohort (measured 2026-10-30: 2 of 40 executed entries in the d3 era, and
+    one of them was a bar-crossing block event worth +$1.97). Fallback: the
+    CLOSE carries `hold_minutes`, so the OPEN it belongs to is the same-coin
+    OPEN at close_ts - hold_minutes (+/- 15 min tolerance), matched at most
+    once. Unmatched null-pid closes are counted and reported, never guessed.
+    """
     closes = {}
+    unmatched = 0
     try:
+        recs = []
         for line in open(LEDGER):
             try:
                 r = json.loads(line)
             except Exception:
                 continue
-            if r.get("event") == "CLOSE":
-                pid = r.get("perception_id") or r.get("analysis_id")
-                if pid:
-                    closes.setdefault(pid, r)
+            recs.append(r)
     except FileNotFoundError:
-        pass
+        return closes
+
+    opens = []  # (ts, pid, coin) for OPEN rows lacking a pid-linked close
+    for r in recs:
+        if r.get("event") != "OPEN":
+            continue
+        pid = r.get("perception_id") or r.get("analysis_id")
+        if pid:
+            opens.append((r.get("ts") or 0, pid, r.get("coin")))
+    taken = set()
+
+    for r in recs:
+        if r.get("event") != "CLOSE":
+            continue
+        pid = r.get("perception_id") or r.get("analysis_id")
+        if pid:
+            closes.setdefault(pid, r)
+            continue
+        hold_ms = (r.get("hold_minutes") or 0) * 60_000
+        cts = r.get("ts") or 0
+        best = None
+        for ots, opid, coin in opens:
+            if opid in taken or coin != r.get("coin"):
+                continue
+            if abs((cts - ots) - hold_ms) <= 15 * 60_000:
+                if best is None or abs((cts - ots) - hold_ms) < best[0]:
+                    best = (abs((cts - ots) - hold_ms), opid)
+        if best:
+            taken.add(best[1])
+            closes.setdefault(best[1], r)
+        else:
+            unmatched += 1
+    if unmatched:
+        print(f"NOTE: {unmatched} CLOSE row(s) with null perception_id could not "
+              f"be matched to an OPEN — priced cohort may still under-count.")
     return closes
 
 
