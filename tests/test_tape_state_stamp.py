@@ -252,3 +252,49 @@ def test_no_band_max_back_compat_no_disarm():
     arms = tape_state_arms(drift_hist(_TOP_EXIT), {})  # no band context
     assert not arms["shallow"]["disarmed"]
     assert arms["shallow"]["age"] is not None
+
+
+# ---- PERSISTENCE TOLERANCE (owner ruling 2026-10-31): a band-top venture
+# only disarms once it PERSISTS for disarm_confirm_bars consecutive hourly
+# closes (default 1 = single-close rule, byte-identical). Live trigger case:
+# ASTER 2026-10-31 00:05Z ARM-SKIP — both arms killed by ONE 00:00Z close at
+# +0.13% (13bp over the ceiling), drift already back in-band by 00:05.
+
+_TRANSIENT = _FRESH + [0.13, -0.7]
+# crossings active -> ONE bar over the ceiling -> back in-band. A wick.
+
+
+def test_transient_band_top_excursion_tolerated():
+    H = drift_hist(_TRANSIENT)
+    cfg = {"disarm_confirm_bars": 2}
+    arms = tape_state_arms(H, cfg, band_max=0.0)
+    assert not arms["shallow"]["disarmed"] and not arms["deep"]["disarmed"]
+    assert arms["shallow"]["active"] and arms["deep"]["active"]
+    sub = {"btc24_min_pct": -2.0, "btc24_max_pct": 0.0, "min_conf": 0.0,
+           "tape_state": {"deep_arm_pct": -3.0, "deep_arm_clock_h": 48.0,
+                          "shallow_arm_pct": -2.0, "shallow_arm_clock_h": 12.0,
+                          "require_arm": True, "disarm_confirm_bars": 2}}
+    adm, why, _ = state_admission(_a(H), {"shadow": True, "short": sub}, True)
+    assert adm and "kept tape" in why
+    stamp = tape_state_stamp(H, cfg, band_max=0.0)
+    assert stamp.count("+") == 2 and "d<=" not in stamp
+
+
+def test_transient_disarms_under_single_close_rule():
+    # Byte-identity pin: WITHOUT the knob the transient still disarms
+    # (default conf=1 == the 2026-10-30 ruling, unchanged).
+    arms = tape_state_arms(drift_hist(_TRANSIENT), {}, band_max=0.0)
+    assert arms["shallow"]["disarmed"] and arms["deep"]["disarmed"]
+
+
+def test_sustained_excursion_still_disarms():
+    sus = _FRESH + [0.13, 0.42, -0.7]  # TWO consecutive closes >= 0: real
+    arms = tape_state_arms(drift_hist(sus), {"disarm_confirm_bars": 2},
+                           band_max=0.0)
+    assert arms["shallow"]["disarmed"] and not arms["shallow"]["active"]
+
+
+def test_malformed_confirm_bars_falls_back_to_single_close():
+    arms = tape_state_arms(drift_hist(_TRANSIENT),
+                           {"disarm_confirm_bars": "two"}, band_max=0.0)
+    assert arms["shallow"]["disarmed"]
