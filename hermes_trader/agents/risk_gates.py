@@ -288,6 +288,16 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
     two closes. An unconfirmed venture is skipped and the scan keeps
     looking for an OLDER confirmed one. The run must be fully observable
     in the window: a venture still in progress needs conf closes.
+
+    HARD KILL (owner ruling 2026-10-31, insurance): ``disarm_hard_above_pct``
+    — any SINGLE hourly close at/above this level disarms immediately,
+    no confirmation wait, whatever the persist setting. A violent reversal
+    (10-27's 24h escape peaked +2.2) is lethal on sight even if the first
+    close is a one-bar fluke. Absent = no hard kill (byte-identical).
+    Values below the disarm top are clamped up to it (a level INSIDE the
+    band would silently refuse all entries in it — nonsense config may
+    only make the gate stricter, never inverted). A malformed value makes
+    the whole arms read "malformed" -> the gate fails CLOSED.
     """
     if not btc_history or len(btc_history) < 30:
         return None
@@ -304,15 +314,25 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
             return None
         now_ms = series[-1][0]
         top = tape_cfg.get("disarm_above_pct", band_max)
-        disarm_t = None
         if top is not None:
             top = float(top)
+        hard = tape_cfg.get("disarm_hard_above_pct")
+        if hard is not None:
+            hard = float(hard)  # malformed -> outer except -> "malformed"
+            if top is not None and hard < top:
+                hard = top      # clamp: an inside-band level is nonsense
+        disarm_t = None
+        if top is not None or hard is not None:
             try:
                 conf = max(1, int(tape_cfg.get("disarm_confirm_bars", 1)))
             except (TypeError, ValueError):
                 conf = 1  # malformed knob -> single-close rule (no tolerance)
             for i in range(len(series) - 1, 0, -1):
-                if series[i][1] >= top > series[i - 1][1]:
+                d = series[i][1]
+                if hard is not None and d >= hard:
+                    disarm_t = series[i][0]  # HARD KILL: single close
+                    break
+                if top is not None and d >= top > series[i - 1][1]:
                     j = i
                     while j < len(series) and series[j][1] >= top:
                         j += 1

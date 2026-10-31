@@ -298,3 +298,50 @@ def test_malformed_confirm_bars_falls_back_to_single_close():
     arms = tape_state_arms(drift_hist(_TRANSIENT),
                            {"disarm_confirm_bars": "two"}, band_max=0.0)
     assert arms["shallow"]["disarmed"]
+
+
+# ---- HARD KILL (owner ruling 2026-10-31, insurance): any single hourly
+# close at/above disarm_hard_above_pct disarms immediately regardless of
+# persistence. Backtest-noop on 10-21..31 but bounds the tail (10-27's 24h
+# escape peaked +2.2 — lethal on first sight). Absent knob = inert.
+
+def test_hard_kill_disarms_single_fluke_bar_no_confirmation_wait():
+    violent = _FRESH + [0.55, -0.7]  # ONE close at +0.55, above hard
+    arms = tape_state_arms(drift_hist(violent),
+                           {"disarm_confirm_bars": 5,
+                            "disarm_hard_above_pct": 0.5}, band_max=0.0)
+    assert arms["shallow"]["disarmed"] and not arms["shallow"]["active"]
+    assert arms["deep"]["disarmed"]
+
+
+def test_hard_kill_absent_knob_is_inert():
+    violent = _FRESH + [0.55, -0.7]
+    arms = tape_state_arms(drift_hist(violent), {"disarm_confirm_bars": 2},
+                           band_max=0.0)  # persistence only: 1-bar wick ok
+    assert not arms["shallow"]["disarmed"] and arms["shallow"]["active"]
+
+
+def test_hard_kill_spares_wicks_below_level():
+    arms = tape_state_arms(drift_hist(_TRANSIENT),
+                           {"disarm_confirm_bars": 2,
+                            "disarm_hard_above_pct": 0.5}, band_max=0.0)
+    assert not arms["shallow"]["disarmed"] and arms["shallow"]["active"]
+
+
+def test_hard_kill_below_top_clamped_up_to_top():
+    inside = _FRESH + [-0.5, -0.7]  # closes IN band, above nonsense hard -1.0
+    arms = tape_state_arms(drift_hist(inside),
+                           {"disarm_confirm_bars": 2,
+                            "disarm_hard_above_pct": -1.0}, band_max=0.0)
+    assert not arms["shallow"]["disarmed"] and arms["shallow"]["active"]
+
+
+def test_hard_kill_malformed_fails_closed():
+    H = drift_hist(_TRANSIENT)
+    assert tape_state_arms(H, {"disarm_hard_above_pct": "half"},
+                           band_max=0.0) == "malformed"
+    sub = {"btc24_min_pct": -2.0, "btc24_max_pct": 0.0, "min_conf": 0.0,
+           "tape_state": {"require_arm": True,
+                          "disarm_hard_above_pct": "half"}}
+    adm, why, _ = state_admission(_a(H), {"shadow": True, "short": sub}, True)
+    assert not adm and "ARM-SKIP" in why  # gate fails CLOSED on bad history
