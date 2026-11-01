@@ -198,6 +198,9 @@ def main() -> int:
     ap.add_argument("--profile", default=None,
                     help="config-models seat (default: LIVE llm.primary_engine.model_profile)")
     ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--pids-file", default="",
+                    help="optional file of perception_ids (one per line) to restrict the cohort "
+                         "(e.g. the t_30232d16 flip-pair LONG scans); reported coverage is printed")
     ap.add_argument("--skip-existing", action="store_true", default=True)
     args = ap.parse_args()
 
@@ -212,6 +215,12 @@ def main() -> int:
     coins = {c.strip() for c in args.coins.split(",") if c.strip()} or None
 
     rows = load_rows(since_ms, coins, args.limit, model)
+    if args.pids_file:
+        want = {l.strip() for l in open(args.pids_file) if l.strip()}
+        have = {r["perception_id"] for r in rows}
+        rows = [r for r in rows if r["perception_id"] in want]
+        print(f"pids-file: wanted {len(want)} | eligible after filters {len(rows)} | "
+              f"missing (no prior_block_text/model/ts mismatch): {sorted(want - have)}")
     done = set()
     if args.skip_existing and os.path.exists(args.out):
         for line in open(args.out):
