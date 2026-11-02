@@ -77,7 +77,13 @@ def resolve_base_url(profile_path: str) -> str:
     return base.rstrip("/")
 
 
-def load_rows(since_ms: int, coins: set[str] | None, limit: int, model: str):
+def load_rows(since_ms: int, coins: set[str] | None, limit: int, model: str,
+              conf_min: float | None = None, conf_max: float | None = None):
+    """Archive rows for the era. conf_min/conf_max filter on the ARCHIVED
+    (live) confidence — added 2026-11-02 to stratify the confidence-collapse
+    window: the interesting population for the block is the near-bar band
+    (a conf nudge changes admission), which a flat sample under-represents
+    ~10:1 (1,210 of 10,606 rows sat >=0.40 on 11-02)."""
     files = [os.path.join(PLOG, "calls.jsonl")] + sorted(
         glob.glob(os.path.join(PLOG, "calls-*.jsonl.zst")))
     out, seen = [], set()
@@ -93,6 +99,11 @@ def load_rows(since_ms: int, coins: set[str] | None, limit: int, model: str):
             if r.get("role") != "primary" or not r.get("prior_block_text"):
                 continue
             if model and r.get("model") != model:
+                continue
+            conf = (r.get("parsed") or {}).get("confidence")
+            if conf_min is not None and (conf is None or conf < conf_min):
+                continue
+            if conf_max is not None and (conf is None or conf >= conf_max):
                 continue
             if r.get("ts", 0) < since_ms:
                 continue
@@ -197,6 +208,10 @@ def main() -> int:
                     help="seconds between rows (seat-share throttle on live endpoint)")
     ap.add_argument("--profile", default=None,
                     help="config-models seat (default: LIVE llm.primary_engine.model_profile)")
+    ap.add_argument("--conf-min", type=float, default=None,
+                    help="only rows whose ARCHIVED live confidence >= this")
+    ap.add_argument("--conf-max", type=float, default=None,
+                    help="only rows whose ARCHIVED live confidence < this")
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--skip-existing", action="store_true", default=True)
     args = ap.parse_args()
@@ -211,7 +226,8 @@ def main() -> int:
                        .replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
     coins = {c.strip() for c in args.coins.split(",") if c.strip()} or None
 
-    rows = load_rows(since_ms, coins, args.limit, model)
+    rows = load_rows(since_ms, coins, args.limit, model,
+                     conf_min=args.conf_min, conf_max=args.conf_max)
     done = set()
     if args.skip_existing and os.path.exists(args.out):
         for line in open(args.out):
