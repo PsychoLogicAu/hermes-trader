@@ -1476,10 +1476,14 @@ while True:
                     # it never force-enters one.
                     try:
                         _res = maybe_execute(build_aligned_short_lane_analysis(_spec))
+                        # Gate blocks return `blocked_by` (list), not `reason` —
+                        # printing only reason made 9/10 blocked lane attempts
+                        # invisible in the log (go-live accrual audit 2026-11-06).
+                        _why = _res.get("reason") or _res.get("blocked_by") or "-"
                         logger.warning(
                             f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
                             f"maybe_execute -> executed={_res.get('executed')} "
-                            f"reason={_res.get('reason') or '-'}")
+                            f"reason={_why}")
                     except Exception as _lex:
                         logger.warning(
                             f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
