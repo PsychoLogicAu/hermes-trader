@@ -1255,6 +1255,20 @@ def scan_once(
     else:
         whale_signals = {}
 
+    # ── OI series accrual (log-only; kanban t_9f660914) ─────────────────────
+    # One append-only open-interest snapshot per scan so a future seat-state
+    # positioning block can be MEASURED offline (the whale-flow feed reached the
+    # gauntlet at 2% coverage and the whale_accumulation_map above is gated on
+    # whale *action* knobs that are off). Config-gated (`oi_accrual.enabled`,
+    # default off = zero fetches), never raises, and deliberately NOT joined to
+    # any verdict path — see hermes_trader/agents/oi_accrual.py.
+    try:
+        from hermes_trader.agents.oi_accrual import accrual_enabled, snapshot_and_log
+        if accrual_enabled(_cfg):
+            snapshot_and_log(_cfg)
+    except Exception as e:
+        logger.debug(f"[oi-accrual] skipped: {e}")
+
     results: List[Dict[str, Any]] = []
     errors = 0
     completed = 0
