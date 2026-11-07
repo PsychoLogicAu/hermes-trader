@@ -120,6 +120,123 @@ def test_duelist_model_only_inherits_primary_endpoint(monkeypatch):
     assert cfg["api_key"] == "pk"
 
 
+# ── endpoint precedence: a model PROFILE may name its own server ─────────
+# (t_848eb1c4) The second voice for the abstention veto is served by a
+# DIFFERENT box than the primary. Before this, `llm.duelist` inherited the
+# env endpoint no matter what its profile said — so a profile swap to a
+# remote seat silently sent the duel call to the primary's server, got an
+# error (call_duelist swallows it), wrote NO duel row, and the veto accrued
+# nothing while still failing open. Same pattern the decision_voice /
+# primary_engine seats already use.
+
+@pytest.fixture
+def _seat_profiles(tmp_path, monkeypatch):
+    """Own the agent-config file and MODEL_CONFIG_DIR for one test (the
+    conftest config file otherwise persists across tests)."""
+    from pathlib import Path
+    cfg_path = Path(cs.CONFIG_PATH)
+    backup = cfg_path.read_text() if cfg_path.exists() else None
+    models = tmp_path / "config-models"
+    models.mkdir()
+    monkeypatch.setattr(cs, "MODEL_CONFIG_DIR", str(models))
+    yield models
+    if backup is None:
+        cfg_path.unlink(missing_ok=True)
+    else:
+        cfg_path.write_text(backup)
+
+
+def _write_duelist_slot(**slot):
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump({"mode": "SHADOW", "llm": {"duelist": slot}}, f)
+
+
+def test_profile_base_url_wins_over_env(_seat_profiles, monkeypatch):
+    (_seat_profiles / "strata-seat.json").write_text(json.dumps(
+        {"model": "strata-model", "base_url": "http://strata.test:8080/v1",
+         "api_key": "MUST-NEVER-BE-USED"}))
+    _write_duelist_slot(model_profile="strata-seat")
+    monkeypatch.setenv("LLM_DUEL_BASE_URL", "http://duel.test/v1")
+    cfg = ds.duelist_config()
+    assert cfg["model"] == "strata-model"
+    assert cfg["base_url"] == "http://strata.test:8080/v1"
+    # A profile names a SERVER, never a credential: keys live in .env.local
+    # (config-repo hard rule), so duel_config() reads only the env layer and
+    # a key written into a profile file is inert by construction.
+    assert cfg["api_key"] != "MUST-NEVER-BE-USED"
+    monkeypatch.setenv("LLM_DUEL_API_KEY", "sk-test")
+    assert ds.duelist_config()["api_key"] == "sk-test"
+
+
+def test_inline_slot_base_url_overrides_the_profile(_seat_profiles, monkeypatch):
+    # config_store merge rule: inline slot keys override the profile, so an
+    # emergency endpoint override never needs a profile edit.
+    (_seat_profiles / "strata-seat.json").write_text(json.dumps(
+        {"model": "strata-model", "base_url": "http://strata.test:8080/v1"}))
+    _write_duelist_slot(model_profile="strata-seat", base_url="http://inline.test/v1")
+    assert ds.duelist_config()["base_url"] == "http://inline.test/v1"
+
+
+def test_profile_without_base_url_is_byte_identical(_seat_profiles, monkeypatch):
+    # The live spark profile names no base_url: the env layers must resolve
+    # exactly as before, so deploying the code changes no seat's endpoint.
+    (_seat_profiles / "spark-like.json").write_text(json.dumps(
+        {"model": "spark-model", "sampling": {"temperature": 0.7}}))
+    _write_duelist_slot(model_profile="spark-like")
+    monkeypatch.setenv("LLM_DUEL_BASE_URL", "http://duel.test/v1")
+    monkeypatch.delenv("LLM_DUEL_API_KEY", raising=False)
+    cfg = ds.duelist_config()
+    assert cfg["base_url"] == "http://duel.test/v1"
+    # and with no env at all it falls back to the primary's endpoint
+    monkeypatch.delenv("LLM_DUEL_BASE_URL", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "http://primary.test/v1")
+    assert ds.duelist_config()["base_url"] == "http://primary.test/v1"
+
+
+def test_missing_profile_leaves_env_endpoint_in_charge(_seat_profiles, monkeypatch):
+    # Fail-open: a typo'd profile name logs and degrades to inline/env keys.
+    _write_duelist_slot(model_profile="no-such-seat")
+    monkeypatch.setenv("LLM_DUEL_BASE_URL", "http://duel.test/v1")
+    assert ds.duelist_config()["base_url"] == "http://duel.test/v1"
+
+
+def test_profile_chat_template_kwargs_reach_the_seat(_seat_profiles, monkeypatch):
+    # The asymmetry that bit this task: model / sampling / max_tokens /
+    # base_url are all profile-resolved via resolve_model_slot, but
+    # chat_template_kwargs used to read the RAW slot — so a profile could
+    # say enable_thinking:false and the request would silently NOT carry it.
+    # For a thinking-capable second voice that is a silent data loss: the
+    # answer lands in reasoning_content with EMPTY content, call_duelist sees
+    # "no text", and NO duel row is ever written.
+    (_seat_profiles / "think-seat.json").write_text(json.dumps(
+        {"model": "think-model",
+         "chat_template_kwargs": {"enable_thinking": False}}))
+    _write_duelist_slot(model_profile="think-seat")
+    assert ds.effective_chat_template_kwargs("duelist") == {"enable_thinking": False}
+    # and the same for the primary slot (systemone era aside, a chat-era
+    # profile's template override must reach the chat body)
+    with open(cs.CONFIG_PATH, "w") as f:
+        json.dump({"mode": "SHADOW", "llm": {"primary": {"model_profile": "think-seat"}}}, f)
+    assert ds.effective_chat_template_kwargs("primary") == {"enable_thinking": False}
+
+
+def test_inline_chat_template_kwargs_override_the_profile(_seat_profiles):
+    (_seat_profiles / "think-seat.json").write_text(json.dumps(
+        {"model": "think-model",
+         "chat_template_kwargs": {"enable_thinking": False}}))
+    _write_duelist_slot(model_profile="think-seat",
+                        chat_template_kwargs={"enable_thinking": True})
+    assert ds.effective_chat_template_kwargs("duelist") == {"enable_thinking": True}
+
+
+def test_seat_without_chat_template_kwargs_is_a_no_op(_seat_profiles):
+    # Byte-identical POST body for every seat that names no template kwargs
+    # (the live spark profile names none) — the key stays absent.
+    (_seat_profiles / "plain-seat.json").write_text(json.dumps({"model": "plain-model"}))
+    _write_duelist_slot(model_profile="plain-seat")
+    assert ds.effective_chat_template_kwargs("duelist") == {}
+
+
 # ── output budget (max_tokens) ────────────────────────────────────────────
 
 def test_max_tokens_defaults_to_8192(monkeypatch):
@@ -994,17 +1111,29 @@ def _patch_research_network(monkeypatch, primary_text, duelist_text,
 
     monkeypatch.setattr(research, "_call_ai", fake_call_ai)
 
-    def fake_duelist(key, base_url, model, system_prompt, user_message, timeout_s=120.0, max_tokens=None):
-        assert key == "dk" and base_url == "http://duel.test/v1" and model == "duel-model"
+    def fake_duelist(primary_cfg, fallback_cfg, system_prompt, user_message,
+                     timeout_s=120.0):
+        # The seat configs travel as dicts now (a seat-backup needs its own
+        # endpoint/budget/template params) — the named seat's values are the
+        # ones under test here.
+        assert (primary_cfg["api_key"] == "dk"
+                and primary_cfg["base_url"] == "http://duel.test/v1"
+                and primary_cfg["model"] == "duel-model")
+        assert fallback_cfg is None  # no `llm.duelist.fallback` in this fixture
         assert system_prompt == "SYS"  # same prompt, both models
         assert user_message == "USER-PROMPT"
         time.sleep(0.05)  # slower than the primary, so duelist_ms > primary_ms
-        return duelist_text, duelist_server_ms
+        return (duelist_text, duelist_server_ms,
+                {"seat": "primary", "answered_by": primary_cfg["model"],
+                 "primary_model": primary_cfg["model"], "fallback_model": None,
+                 "primary_fail": None, "fallback_fail": None,
+                 "breaker_open": False})
 
-    # research.py binds call_duelist at import (from duel_store import ...),
-    # so patch the NAME IN THE research module — patching duel_store.call_duelist
-    # would not intercept the call.
-    monkeypatch.setattr(research, "call_duelist", fake_duelist)
+    # research.py binds the entry point at import (from duel_store import ...),
+    # so patch the NAME IN THE research module — patching duel_store's copy
+    # would not intercept the call. The entry point is the seat-aware wrapper
+    # (t_848eb1c4): research no longer calls a single seat directly.
+    monkeypatch.setattr(research, "call_duelist_with_fallback", fake_duelist)
 
 
 def test_research_records_duel_row_when_enabled(
@@ -1025,6 +1154,10 @@ def test_research_records_duel_row_when_enabled(
     assert analysis["verdict"] == "PASS"  # primary verdict drives everything
     assert analysis["duelist_at_entry"] == {
         "model": "duel-model", "verdict": "SHORT", "confidence": 0.7, "side": "short",
+        # t_848eb1c4: the seat that answered is part of the whitelist — the
+        # abstention veto resolves its ceiling per seat, and with a
+        # seat-backup the model above is not necessarily the named seat's.
+        "seat": "primary",
     }
     # the duel row landed in the JSONL
     rows = ds.load_duels()
@@ -1054,6 +1187,97 @@ def test_research_records_duel_row_when_enabled(
                if "[duel] BTC:" in r.message)
 
 
+def test_research_duel_row_carries_the_voice_bracket(
+        monkeypatch, _isolated_duel_file, _duelist_on, _session_log):
+    """L2 (t_848eb1c4): the duel corpus must carry the BRACKET the voice
+    itself proposed. The verdict/conf at any confidence was already logged;
+    without the bracket the accrued rows can only be priced on a fixed
+    horizon, and the bracket first-touch ruler is what flipped the
+    sole-voice verdict (fixed-4h +1.55pp vs own-bracket −0.34R/trade).
+
+    The model emits camelCase (entryPx/stopPx/tpPx) and parse_verdict
+    NORMALISES to snake_case — so the row must be read/written snake_case.
+    A runner that asks for `entryPx` silently loses the ruler; it already
+    did once, which is why this is pinned rather than assumed.
+    """
+    _patch_research_network(monkeypatch,
+                            'PASS\n{"verdict":"PASS","confidence":0.5}',
+                            'no edge here\n{"verdict":"PASS","confidence":0.45,'
+                            '"entryPx":101.5,"stopPx":99.25,"tpPx":106.0}')
+    perception = {"id": "pid-brk", "coin": "BTC", "type": "perp", "mid": 100.0,
+                  "composite_score": 40.0, "triggers": []}
+    research.research("BTC", perception)
+
+    rows = ds.load_duels()
+    assert len(rows) == 1
+    assert rows[0]["duelist_entry_px"] == 101.5
+    assert rows[0]["duelist_stop_px"] == 99.25
+    assert rows[0]["duelist_tp_px"] == 106.0
+    # the gate's key rides the same row, so one join prices the counterfactual
+    assert rows[0]["duelist_confidence"] == 0.45
+    assert rows[0]["duelist_verdict"] == "PASS"
+    # camelCase must NOT appear in the row (one spelling, snake_case)
+    assert "duelist_entryPx" not in rows[0]
+
+
+def test_research_row_names_the_seat_that_answered(
+        monkeypatch, _isolated_duel_file, _duelist_on, _session_log):
+    """Seat attribution (t_848eb1c4): when the seat-BACKUP answers, the row must
+    name the BACKUP's model and say why the named seat didn't answer. A fallback
+    row is a different voice — different endpoint, different confidence
+    distribution, and therefore a different abstention-veto ceiling — so a cohort
+    that silently pools the two is unmeasurable after the fact. The same fields
+    must reach the gate through `duelist_at_entry` (the whitelist in research).
+    """
+    _patch_research_network(monkeypatch,
+                            'PASS\n{"verdict":"PASS","confidence":0.5}',
+                            'PASS\n{"verdict":"PASS","confidence":0.45}')
+
+    def from_backup(primary_cfg, fallback_cfg, sp, um, timeout_s=120.0):
+        return ('PASS\n{"verdict":"PASS","confidence":0.45}', 88,
+                {"seat": "fallback", "answered_by": "spark-model",
+                 "primary_model": primary_cfg["model"],
+                 "fallback_model": "spark-model",
+                 "primary_fail": "exception:ConnectError",
+                 "fallback_fail": None, "breaker_open": False})
+
+    monkeypatch.setattr(research, "call_duelist_with_fallback", from_backup)
+    perception = {"id": "pid-seat", "coin": "BTC", "type": "perp", "mid": 100.0,
+                  "composite_score": 40.0, "triggers": []}
+    analysis = research.research("BTC", perception)
+
+    rows = ds.load_duels()
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["duelist_model"] == "spark-model"      # the voice that ANSWERED
+    assert r["duelist_seat"] == "fallback"
+    assert r["duelist_fallback"] is True
+    assert r["duelist_primary_fail"] == "exception:ConnectError"
+    at = analysis["duelist_at_entry"]
+    assert at["seat"] == "fallback" and at["model"] == "spark-model"
+    assert at["confidence"] == 0.45
+
+
+def test_research_duel_row_absent_bracket_is_none_not_zero(
+        monkeypatch, _isolated_duel_file, _duelist_on, _session_log):
+    # parse_verdict leaves stop/tp at 0.0 and entry_px at the perception mid
+    # when the model named no bracket. A 0.0 in a price column is a LIE the
+    # ruler would average, so it lands as None; the mid-stamped entry stays
+    # (it is the only price reference the row has).
+    _patch_research_network(monkeypatch,
+                            'PASS\n{"verdict":"PASS","confidence":0.5}',
+                            'PASS\n{"verdict":"PASS","confidence":0.52}')
+    perception = {"id": "pid-nobrk", "coin": "ETH", "type": "perp", "mid": 50.0,
+                  "composite_score": 30.0, "triggers": []}
+    research.research("ETH", perception)
+
+    rows = ds.load_duels()
+    assert len(rows) == 1
+    assert rows[0]["duelist_entry_px"] == 50.0
+    assert rows[0]["duelist_stop_px"] is None
+    assert rows[0]["duelist_tp_px"] is None
+
+
 def test_research_dormant_without_duelist(monkeypatch, _isolated_duel_file,
                                           _session_log, caplog):
     import logging
@@ -1065,7 +1289,7 @@ def test_research_dormant_without_duelist(monkeypatch, _isolated_duel_file,
         calls.append(a)
 
     # Patch the name in the research module (import-time binding), not duel_store's.
-    monkeypatch.setattr(research, "call_duelist", spy_duelist)
+    monkeypatch.setattr(research, "call_duelist_with_fallback", spy_duelist)
     _patch_research_network(monkeypatch,
                             'PASS\n{"verdict":"PASS","confidence":0.5}', "unused")
 
@@ -1095,7 +1319,7 @@ def test_research_survives_duelist_outage(monkeypatch, _isolated_duel_file,
     def boom(*a, **k):
         raise RuntimeError("duelist down")
 
-    monkeypatch.setattr(research, "call_duelist", boom)
+    monkeypatch.setattr(research, "call_duelist_with_fallback", boom)
 
     perception = {"id": "pid-err", "coin": "SOL", "type": "perp", "mid": 200.0,
                   "composite_score": 35.0, "triggers": []}
@@ -1113,3 +1337,89 @@ def test_parse_verdict_still_handles_duelist_shapes(monkeypatch):
         '{"verdict":"SHORT","confidence":0.7,"side":"short"}',
         "BTC", {"mid": 100.0})
     assert p["verdict"] == "SHORT" and p["side"] == "short" and p["ai_down"] is False
+
+
+# ── Seat-backup slot: `llm.duelist.fallback` (t_848eb1c4) ─────────────────
+
+def _write_duelist_seat_pair(models_dir):
+    """The prepared production shape: a Strata-hosted named seat + a lemonade
+    seat-backup, each as its own profile file."""
+    (models_dir / "flash-seat.json").write_text(json.dumps(
+        {"model": "flash-model", "base_url": "http://strata.test:8080/v1",
+         "max_tokens": 4096, "chat_template_kwargs": {"enable_thinking": False}}))
+    (models_dir / "spark-seat.json").write_text(json.dumps(
+        {"model": "spark-model", "base_url": "http://lemonade.test:13305/api/v1",
+         "max_tokens": 8192, "sampling": {"temperature": 0.7}}))
+    _write_duelist_slot(model_profile="flash-seat",
+                        fallback={"model_profile": "spark-seat"})
+
+
+def test_fallback_seat_resolves_its_own_profile(_seat_profiles, monkeypatch):
+    _write_duelist_seat_pair(_seat_profiles)
+    monkeypatch.delenv("LLM_DUEL_BASE_URL", raising=False)
+    primary, fb = ds.duelist_config(), ds.fallback_duelist_config()
+    assert fb is not None
+    assert fb["model"] == "spark-model" and fb["seat"] == "fallback"
+    # THE point of a seat-backup: it must never inherit the named seat's
+    # endpoint, or the fallback would re-hit the box that just failed.
+    assert fb["base_url"] == "http://lemonade.test:13305/api/v1"
+    assert fb["base_url"] != primary["base_url"]
+    # And its own budget/sampling/template kwargs travel with it.
+    assert fb["max_tokens"] == 8192
+    assert fb["chat_template_kwargs"] == {}
+    assert primary["chat_template_kwargs"] == {"enable_thinking": False}
+    assert fb["sampling"]["temperature"] == 0.7
+
+
+def test_no_fallback_block_means_no_backup(_seat_profiles):
+    # Byte-identical posture for every config that doesn't name a backup: one
+    # seat, no retry, no breaker.
+    _write_duelist_slot(model_profile="flash-only")
+    assert ds.fallback_duelist_config() is None
+    assert ds.effective_fallback_model() is None
+
+
+def test_backup_alone_does_not_enable_the_duelist(_seat_profiles, monkeypatch):
+    # The NAMED seat must exist. A backup-only config leaves the duelist dormant
+    # (same rule as effective_duelist_model refusing to inherit the primary's
+    # model): a second voice that only ever runs on the backup is a config error,
+    # not a way to enable the feature.
+    monkeypatch.delenv("LLM_DUEL_MODEL", raising=False)
+    monkeypatch.setenv("LLM_DUEL_BASE_URL", "http://backup.test:13305/api/v1")
+    (_seat_profiles / "only-backup.json").write_text(json.dumps({"model": "backup-model"}))
+    _write_duelist_slot(fallback={"model_profile": "only-backup"})
+    assert ds.effective_duelist_model() is None
+    assert ds.duelist_enabled() is False
+    assert ds.fallback_duelist_config() is not None  # resolvable, just never reached
+
+
+def test_backup_without_an_endpoint_is_disabled_not_defaulted(_seat_profiles, monkeypatch):
+    # The one asymmetry with the primary seat: a named backup whose endpoint
+    # nobody named is a CONFIG ERROR, and defaulting to the public OpenAI-compatible
+    # endpoint would pay a public API, egress the prompt, and stay invisible
+    # (a wrong host is just "no duel row"). Fails OPEN instead: no backup.
+    (_seat_profiles / "seatless.json").write_text(json.dumps({"model": "seatless-model"}))
+    _write_duelist_slot(model_profile="flash-seat", fallback={"model_profile": "seatless"})
+    for var in ("LLM_DUEL_BASE_URL", "LLM_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    assert ds.fallback_duelist_config() is None
+    monkeypatch.setenv("LLM_DUEL_BASE_URL", "http://duel-box.test:13305/api/v1")
+    fb = ds.fallback_duelist_config()
+    assert fb is not None and fb["base_url"] == "http://duel-box.test:13305/api/v1"
+
+
+def test_fallback_key_stays_env_only(_seat_profiles, monkeypatch):
+    # Credential rule (config-repo hard rule): a key in a profile FILE is
+    # inert, for the backup seat exactly as for the named seat.
+    _write_duelist_seat_pair(_seat_profiles)
+    (next(p for p in _seat_profiles.glob("*.json")
+          if p.name == "spark-seat.json")).write_text(json.dumps(
+        {"model": "spark-model", "base_url": "http://lemonade.test:13305/api/v1",
+         "api_key": "MUST-NEVER-BE-USED"}))
+    monkeypatch.setenv("LLM_DUEL_API_KEY", "sk-duel")
+    fb = ds.fallback_duelist_config()
+    assert fb is not None and fb["api_key"] == "sk-duel"
+    monkeypatch.delenv("LLM_DUEL_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "sk-primary")
+    fb2 = ds.fallback_duelist_config()
+    assert fb2 is not None and fb2["api_key"] == "sk-primary"

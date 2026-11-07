@@ -303,13 +303,23 @@ def effective_chat_template_kwargs(slot: str) -> Dict[str, Any]:
     """The slot's ``chat_template_kwargs``, passed VERBATIM to the model
     server in the POST body (e.g. ``{"enable_thinking": false}`` — disables a
     thinking model's thinking PER REQUEST instead of loading the model with
-    ``--llamacpp-args "--reasoning off"``). Nested-only:
-    ``llm.<slot>.chat_template_kwargs`` (no flat/env — the env vars are for
-    endpoint/key/model/budget, not template internals). Must be a dict —
-    anything else (and any config fault) degrades to {}, so the POST body is
-    byte-identical to the pre-feature default (fail-open, no-op). Hot, no
-    cache; a copy is returned so the body can never mutate the config dict."""
-    v = llm_slot(slot).get("chat_template_kwargs")
+    ``--llamacpp-args "--reasoning off"``). Nested slot key first, then the
+    model PROFILE named by ``llm.<slot>.model_profile`` (via
+    ``resolve_model_slot``, like model/sampling/max_tokens/base_url — inline
+    wins over the profile, and a seat with no profile is byte-identical).
+    No flat/env fallback: the env vars are for endpoint/key/model/budget, not
+    template internals. Must be a dict — anything else (and any config fault)
+    degrades to {}, so the POST body is byte-identical to the pre-feature
+    default (fail-open, no-op). Hot, no cache; a copy is returned so the body
+    can never mutate the config dict.
+    WHY the profile lookup matters (t_848eb1c4): a thinking-capable second
+    voice (qwen3.8-flash-next) answers in ``reasoning_content`` with EMPTY
+    ``content`` unless ``enable_thinking: false`` travels with the request;
+    ``call_duelist`` reads ``content``, sees no text, and writes NO duel row
+    — so a profile that names the model+sampling but whose template kwargs are
+    ignored silently starves the whole duelist corpus (0 rows, no error).
+    """
+    v = slot_get(slot, "chat_template_kwargs")
     return dict(v) if isinstance(v, dict) else {}
 
 
@@ -353,24 +363,165 @@ def server_processing_ms(data: Any) -> Optional[int]:
         return None
 
 
-def duelist_config() -> Dict[str, Any]:
+def _seat_slot_cfg(seat: str) -> Dict[str, Any]:
+    """The resolved slot dict for ONE duelist seat — hot (no cache), `{}` on
+    any fault (fail-open: a config problem must never cost a duel row).
+
+    ``seat="primary"``  → ``llm.duelist``, with the model profile named by its
+    ``model_profile`` merged underneath (``resolve_model_slot``; inline wins).
+    ``seat="fallback"`` → ``llm.duelist.fallback``, a nested seat-backup block
+    with its OWN ``model_profile``:
+
+        "llm": {"duelist": {
+            "model_profile": "qwen38-flash-duelist",
+            "fallback":    {"model_profile": "spark-x2.6-4b"}
+        }}
+
+    Why a second SEAT rather than a second model name: the backup is usually
+    served by a different box (the 2026-11-07 case — the Strata second voice is
+    not always up, the Spark seat lives on the lemonade A/B host), so model /
+    base_url / max_tokens / sampling / chat_template_kwargs must all travel
+    with the fallback's profile, exactly like the primary's. Same layered rules
+    as `duelist_config(seat="primary")`, one deliberate exception: the fallback
+    NEVER inherits the primary seat's `base_url` — copying a dead endpoint would
+    defeat the whole point.
+    """
+    block = llm_block()
+    slot = block.get("duelist")
+    if seat == "fallback":
+        nested = slot.get("fallback") if isinstance(slot, dict) else None
+        if not isinstance(nested, dict):
+            return {}
+        return resolve_model_slot(nested)
+    return resolve_model_slot(slot)
+
+
+def seat_sampling(slot_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-seat sampling: ``{**DUELIST_SAMPLING_PROFILE, **slot_cfg["sampling"]}``
+    — per-key merge, the same contract as `effective_duelist_sampling`, so a
+    fallback seat's profile sampling travels with it (the live spark profile's
+    temp 0.7 / top_p 0.8 / rep 1.05 is precisely what its live body already
+    sends, while `top_k 20` / `min_p 0.0` keep coming from the code default).
+    """
+    merged = dict(DUELIST_SAMPLING_PROFILE)
+    ov = slot_cfg.get("sampling") if isinstance(slot_cfg, dict) else None
+    if isinstance(ov, dict):
+        merged.update(ov)
+    return merged
+
+
+def effective_fallback_model() -> Optional[str]:
+    """The seat-backup's model: `llm.duelist.fallback.model` (inline, or the
+    profile its `model_profile` names), then `LLM_DUEL_FALLBACK_MODEL`. None =
+    no fallback configured, which keeps today's behaviour byte-identical (one
+    seat, no retry)."""
+    m = str(_seat_slot_cfg("fallback").get("model") or "").strip()
+    if m:
+        return m
+    return _first_env("LLM_DUEL_FALLBACK_MODEL") or None
+
+
+def fallback_duelist_config() -> Optional[Dict[str, Any]]:
+    """The seat-backup endpoint as a full call config, or None when no fallback
+    seat is named. See `duelist_config` for the primary seat's precedence and
+    `_seat_slot_cfg` for this slot's shape.
+
+    Endpoint precedence: the fallback seat's own `base_url` (inline, or its
+    profile's) → `LLM_DUEL_BASE_URL` → `LLM_BASE_URL` → code default. The
+    PRIMARY seat's `llm.duelist.base_url` is deliberately skipped.
+    Key: still env-only (`LLM_DUEL_API_KEY` → `LLM_API_KEY`) — no credential in
+    any profile file. No seat-specific key layer today: the spark seat has been
+    served from that same env chain since 2026-08-27 and its duel rows accrued
+    with `LLM_DUEL_API_KEY` unset (live container env measured 2026-11-07:
+    LLM_DUEL_API_KEY empty, LLM_API_KEY set), so the fallback needs no new
+    credential. If that box is ever started with `--api-key`, add a
+    `LLM_DUEL_FALLBACK_API_KEY` layer here rather than a profile field.
+    """
+    model = effective_fallback_model()
+    if not model:
+        return None
+    sc = _seat_slot_cfg("fallback")
+    # Endpoint: the seat's own naming first, and NO code default. This is the
+    # one deliberate asymmetry with the primary seat, which still defaults to
+    # the public OpenRouter endpoint for historical reasons. A seat-backup that
+    # lands there by accident would pay a public API and egress the prompt, and
+    # the fault would be invisible (call_duelist swallows everything, so a wrong
+    # host is just "no duel row"). The live container names the backup's box via
+    # LLM_DUEL_BASE_URL (measured 2026-11-07: http://192.168.1.16:13305/api/v1),
+    # so the normal config needs neither a profile base_url nor a new var.
+    url = (str(sc.get("base_url") or "").strip()
+           or _first_env(*_DUEL_URL_VARS)
+           or os.environ.get("LLM_BASE_URL", ""))
+    if not url:
+        logger.warning(
+            f"[duel] llm.duelist.fallback names '{model}' but NO endpoint resolves "
+            f"(fallback seat base_url / LLM_DUEL_BASE_URL / LLM_BASE_URL) — backup "
+            f"DISABLED rather than defaulting to the public endpoint; name the seat's "
+            f"server in its profile or env"
+        )
+        return None
+    return {
+        "seat": "fallback",
+        "model": model,
+        "base_url": url,
+        "api_key": _first_env(*_DUEL_KEY_VARS)
+        or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
+        "max_tokens": (_parse_max_tokens(sc.get("max_tokens"))
+                       or resolve_max_tokens("LLM_DUEL_MAX_TOKENS",
+                                            effective_primary_max_tokens())),
+        "sampling": seat_sampling(sc),
+        "chat_template_kwargs": (dict(sc["chat_template_kwargs"])
+                                 if isinstance(sc.get("chat_template_kwargs"), dict)
+                                 else {}),
+    }
+
+
+def duelist_config(seat: str = "primary") -> Dict[str, Any]:
     """The duelist endpoint, resolved from the agent config's `llm` block
     with an env fallback (all read at CALL time).
+
+    `seat="fallback"` resolves the seat-backup instead (see
+    `fallback_duelist_config`; identical layered rules, its own slot, and no
+    inheritance of the primary seat's base_url).
 
     The MODEL resolves `llm.duelist_model` → LLM_DUEL_MODEL (see
     `effective_duelist_model`) and is the only duelist-specific requirement —
     base_url/api_key fall back to the PRIMARY LLM's values when unset, so
     pointing the duelist at a differently-named model on the same server is
-    a one-line change. The model deliberately does NOT fall back to the
-    primary's model: a silent "duel the primary against itself" would double
-    LLM load with no A/B value — the feature is dormant until a duelist
-    model is named somewhere. max_tokens resolves the same layered way
+    a one-line change. The duelist MAY also name its own SERVER: a
+    `base_url` in `llm.duelist` or in the model profile its `model_profile`
+    names wins over the env layers (see the precedence note below) — a seat
+    served by a different box than the primary (the 2026-11-07 Strata second
+    voice) travels with its profile. The KEY never does: credentials stay in
+    .env.local. The model deliberately does NOT fall back to the primary's
+    model: a silent "duel the primary against itself" would double LLM load
+    with no A/B value — the feature is dormant until a duelist model is
+    named somewhere. max_tokens resolves the same layered way
     (`effective_duelist_max_tokens`).
     """
+    if seat == "fallback":
+        return fallback_duelist_config() or {}
     model = effective_duelist_model()
+    # Endpoint precedence (t_848eb1c4): the seat's resolved slot first —
+    # `llm.duelist.base_url`, or the base_url of the model PROFILE that
+    # `llm.duelist.model_profile` names (resolve_model_slot merges it in),
+    # exactly like the decision_voice / primary_engine seats, so a second
+    # voice served by a DIFFERENT server than the primary travels with its
+    # profile instead of silently inheriting the primary's endpoint. Then
+    # the env layers (LLM_DUEL_BASE_URL → LLM_BASE_URL) and the code
+    # default, byte-identical to the pre-change behaviour for every seat
+    # that names no base_url (the live spark profile names none).
+    # A wrong-host duelist is a SILENT failure: call_duelist swallows the
+    # HTTP error, returns no text, and no duel row is written — so the
+    # abstention veto accrues nothing and still fails open. Naming the
+    # server in the profile is what makes the swap reviewable in git.
+    # No key in a profile file, ever: credentials stay in .env.local
+    # (LLM_DUEL_API_KEY), and a Strata-served seat needs that var set.
+    slot_url = str(slot_get("duelist", "base_url") or "").strip()
     return {
-        "base_url": _first_env(*_DUEL_URL_VARS)
-        or os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
+        "base_url": (slot_url
+                     or _first_env(*_DUEL_URL_VARS)
+                     or os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")),
         "api_key": _first_env(*_DUEL_KEY_VARS)
         or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
         "model": model or "",
@@ -378,6 +529,17 @@ def duelist_config() -> Dict[str, Any]:
         # resolved budget → DEFAULT_MAX_TOKENS (see effective_duelist_max_tokens;
         # the duelist inherits the primary's value when its own is unset).
         "max_tokens": effective_duelist_max_tokens(),
+        # The rest of the POST-body params, resolved ONCE per seat
+        # (t_848eb1c4). `_async_duel_call` used to re-read the duelist SLOT
+        # inline for both of these, so a fallback seat would have sent the
+        # primary's `chat_template_kwargs`/sampling to a different model —
+        # for a thinking-capable primary that means sending enable_thinking:false
+        # to a seat that needs nothing, or (worse) omitting it for a seat that
+        # does, which yields empty `content` and no duel row. Values here are
+        # exactly what the inline resolution produced, so the primary seat's
+        # on-the-wire body is byte-identical.
+        "sampling": effective_duelist_sampling(),
+        "chat_template_kwargs": effective_chat_template_kwargs("duelist"),
     }
 
 
@@ -397,6 +559,19 @@ def record_duel(entry: Dict[str, Any]) -> None:
                 f.write(json.dumps(row) + "\n")
     except OSError:
         pass
+
+
+def answered(row: Dict[str, Any]) -> bool:
+    """Did this duel row record an ANSWER (as opposed to a failed call)?
+
+    Rows written before the failed-call logging (t_ea2c5fea) carry no
+    `duelist_ok` key, and every one of them is an answer — the old code wrote a
+    row ONLY for a successful call. So the default is True; a row explicitly
+    marked False is the new `no observation` record, which must never be read
+    as an opinion by anything downstream (the same reason `parse_verdict`'s
+    failure-PASS is excluded in prior_calls).
+    """
+    return bool(row.get("duelist_ok", True))
 
 
 def load_duels(limit: int = 5000) -> List[Dict[str, Any]]:
@@ -427,8 +602,16 @@ def resolve(coin: str, perception_id: str, max_scan: int = 400) -> Optional[Dict
     if not coin or not perception_id or perception_id == "unknown":
         return None
     for row in reversed(load_duels(limit=max_scan)):
-        if row.get("perception_id") == perception_id:
-            return row
+        if row.get("perception_id") != perception_id:
+            continue
+        # A failed-call row (t_ea2c5fea) is a record that the voice was ASKED
+        # and did not answer — it is not the duelist's row for this perception
+        # in the sense this function promises ("the duelist row", i.e. its
+        # verdict). Skipping it keeps every consumer's semantics byte-identical
+        # to before the failure rows existed.
+        if not answered(row):
+            continue
+        return row
     return None
 
 
@@ -442,6 +625,8 @@ def call_duelist(
     user_message: str,
     timeout_s: float = 120.0,
     max_tokens: Optional[int] = None,
+    sampling: Optional[Dict[str, Any]] = None,
+    chat_kwargs: Optional[Dict[str, Any]] = None,
 ) -> tuple:
     """POST the SAME prompt to the duelist endpoint. Returns ``(text,
     server_ms)`` — the raw text plus the model server's self-reported
@@ -451,17 +636,51 @@ def call_duelist(
     (402-affordability retry included), with the 402 branch omitted: the
     duelist is a shadow/eval consumer, so a paid-provider credit failure
     degrades to a missing row rather than burning a shrunk call.
+
+    ``sampling`` / ``chat_kwargs`` let a CALLER pin the per-seat POST-body
+    params (see `duelist_config`); None = resolve the duelist slot inline, i.e.
+    today's byte-identical body. A seat-backup must pass its own, or the
+    primary's template kwargs land on a different model.
+    """
+    text, server_ms, _reason = call_duelist_ex(
+        api_key, base_url, model, system_prompt, user_message,
+        timeout_s=timeout_s, max_tokens=max_tokens,
+        sampling=sampling, chat_kwargs=chat_kwargs)
+    return text, server_ms
+
+
+def call_duelist_ex(
+    api_key: str,
+    base_url: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    timeout_s: float = 120.0,
+    max_tokens: Optional[int] = None,
+    sampling: Optional[Dict[str, Any]] = None,
+    chat_kwargs: Optional[Dict[str, Any]] = None,
+) -> tuple:
+    """`call_duelist` plus the failure REASON: ``(text, server_ms, reason)``.
+
+    reason is None on success, else one of ``no-api-key`` / ``timeout`` /
+    ``exception:<Type>`` / ``http-<code>`` / ``no-choices`` / ``empty-content``.
+    The vocabulary exists so a seat outage is ATTRIBUTABLE rather than an
+    anonymous missing row: measured 2026-11-07, the live duelist's A/B box went
+    unreachable and the only trace was ~3,000 identical WARNING lines plus a
+    duel log that had simply stopped growing six hours earlier. ``empty-content``
+    is its own class because it is the signature of a thinking-mode answer
+    (content empty, answer in reasoning_content) — a config fault, not an outage.
     """
     if not api_key:
         logger.warning("[duel] duelist LLM_API_KEY not set — skipping duelist call")
-        return "", None
+        return "", None, "no-api-key"
     if max_tokens is None:
         max_tokens = effective_duelist_max_tokens()
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(
             _async_duel_call(api_key, base_url, model, system_prompt, user_message,
-                             timeout_s, max_tokens)
+                             timeout_s, max_tokens, sampling, chat_kwargs)
         )
     except Exception as e:  # noqa: BLE001 — the primary path must survive any duelist fault
         # LOUD by design (2026-08-27): this used to be DEBUG — the duelist
@@ -476,9 +695,9 @@ def call_duelist(
                 f"[duel] duelist call TIMED OUT after {timeout_s:.0f}s (non-fatal) — "
                 f"server was still generating (possible runaway); verdict not recorded"
             )
-        else:
-            logger.warning(f"[duel] duelist call failed (non-fatal): {type(e).__name__}: {e}")
-        return "", None
+            return "", None, "timeout"
+        logger.warning(f"[duel] duelist call failed (non-fatal): {type(e).__name__}: {e}")
+        return "", None, f"exception:{type(e).__name__}"
     finally:
         loop.close()
 
@@ -491,17 +710,25 @@ async def _async_duel_call(
     user_message: str,
     timeout_s: float,
     max_tokens: int,
+    sampling: Optional[Dict[str, Any]] = None,
+    chat_kwargs: Optional[Dict[str, Any]] = None,
 ) -> tuple:
-    """Returns ``(text, server_ms)``: the raw response text and the model
+    """Returns ``(text, server_ms, reason)``: the raw response text, the model
     server's self-reported processing time (``server_processing_ms`` — None
-    when the backend doesn't send ``timings``). See the caller for the
-    failure contract (any fault yields ``("", None)``)."""
+    when the backend doesn't send ``timings``), and the failure reason (None on
+    success — see `call_duelist_ex` for the vocabulary). ``sampling`` /
+    ``chat_kwargs`` None = resolve the duelist SLOT inline (the pre-fallback
+    behaviour, byte-identical body); a seat-backup passes its own.
+    """
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
         url = base_url.rstrip("/") + "/chat/completions"
         # Per-request chat-template overrides (same contract as the primary
         # slot — e.g. {"enable_thinking": false} for a thinking-capable
         # duelist model). Absent = {} → the key is NOT sent (no-op).
-        chat_kwargs = effective_chat_template_kwargs("duelist")
+        if chat_kwargs is None:
+            chat_kwargs = effective_chat_template_kwargs("duelist")
+        seat_sampling_params = (sampling if sampling is not None
+                                else effective_duelist_sampling())
 
         async def _post(max_toks: int):
             body = {
@@ -512,7 +739,7 @@ async def _async_duel_call(
                 ],
                 "stream": False,
                 "max_tokens": max_toks,
-                **effective_duelist_sampling(),
+                **seat_sampling_params,
             }
             if chat_kwargs:
                 body["chat_template_kwargs"] = chat_kwargs
@@ -551,12 +778,195 @@ async def _async_duel_call(
                 # server_ms from the response's own timings block (None when
                 # the backend doesn't report it) — the queue-free processing
                 # time the wall-clock timer can't separate from real work.
-                return (msg.get("content") or msg.get("reasoning") or "",
-                        server_processing_ms(data))
+                text = msg.get("content") or msg.get("reasoning") or ""
+                if not text.strip():
+                    # 200 + choices + no text: the thinking-mode signature
+                    # (answer in `reasoning_content`, empty `content`, which
+                    # this reader does NOT take) — a chat_template_kwargs
+                    # problem, not an outage, and it needs a different fix.
+                    logger.warning(
+                        f"[duel] duelist {model} returned 200 with EMPTY content "
+                        f"(thinking mode? chat_template_kwargs) — not recorded")
+                    return "", None, "empty-content"
+                return text, server_processing_ms(data), None
             logger.error("[duel] duelist returned 200 but no choices")
-            return "", None
+            return "", None, "no-choices"
         logger.warning(f"[duel] duelist call FAILED: HTTP {resp.status_code} (non-fatal)")
-    return "", None
+    return "", None, f"http-{resp.status_code}"
+
+
+# ── Seat fallback + failure breaker ───────────────────────────────────────
+# A second voice that is only sometimes reachable is the normal case, not the
+# exception (measured 2026-11-07: the Spark seat's lemonade A/B box at
+# LLM_DUEL_BASE_URL was ConnectError on EVERY scan, 0 duel rows for ~6 h, ~3,000
+# identical WARNING lines, and every scan still paid the dead call's latency).
+# So: try the named seat, then the seat-backup, and stop poking a seat that has
+# already failed N times in a row while a backup exists.
+
+BREAKER_DEFAULT_THRESHOLD = 3
+BREAKER_DEFAULT_COOLDOWN_S = 600.0
+
+# Module state, keyed by "<base_url>|<model>" — per-process by design (a
+# restart re-probes the seat). Tests clear it directly.
+_seat_failures: Dict[str, int] = {}
+_seat_cooling_until: Dict[str, float] = {}
+
+
+def fallback_breaker_cfg() -> Dict[str, float]:
+    """`llm.duelist.fallback_breaker {threshold, cooldown_s}` — hot (no cache),
+    fail-open to the defaults (3 failures, 600 s). `threshold: 0` disables the
+    breaker (every scan pays the dead seat's full timeout before the backup
+    runs). Only ever consulted when a fallback seat EXISTS: with a single seat
+    there is nothing to fall back to, so skipping it would just drop data."""
+    try:
+        block = llm_slot("duelist").get("fallback_breaker")
+    except Exception:  # noqa: BLE001 — fail-open
+        block = None
+    cfg = block if isinstance(block, dict) else {}
+    try:
+        threshold = int(cfg.get("threshold", BREAKER_DEFAULT_THRESHOLD))
+    except (TypeError, ValueError):
+        threshold = BREAKER_DEFAULT_THRESHOLD
+    try:
+        cooldown = float(cfg.get("cooldown_s", BREAKER_DEFAULT_COOLDOWN_S))
+    except (TypeError, ValueError):
+        cooldown = BREAKER_DEFAULT_COOLDOWN_S
+    return {"threshold": max(0, threshold), "cooldown_s": max(0.0, cooldown)}
+
+
+def _seat_key(cfg: Dict[str, Any]) -> str:
+    return f"{str(cfg.get('base_url') or '').rstrip('/')}|{str(cfg.get('model') or '')}"
+
+
+def _seat_cooling(key: str) -> bool:
+    until = _seat_cooling_until.get(key, 0.0)
+    if until and time.time() < until:
+        return True
+    if until:
+        # Cooldown expired: clear both counters so the next failure starts the
+        # trip count from zero again (a seat that has been back for a while is
+        # not "one failure away" from being skipped).
+        _seat_cooling_until.pop(key, None)
+        _seat_failures.pop(key, None)
+    return False
+
+
+def _seat_note(key: str) -> str:
+    url, _, model = key.partition("|")
+    return f"{model} @ {url}"
+
+
+def _seat_record_failure(key: str, breaker: Dict[str, float]) -> None:
+    n = _seat_failures.get(key, 0) + 1
+    _seat_failures[key] = n
+    threshold, cooldown = breaker["threshold"], breaker["cooldown_s"]
+    if threshold > 0 and n >= threshold:
+        _seat_cooling_until[key] = time.time() + cooldown
+        logger.warning(
+            f"[duel] seat {_seat_note(key)} failed {n}x in a row — skipping it for "
+            f"{cooldown:.0f}s and using the fallback seat (threshold/cooldown: "
+            f"llm.duelist.fallback_breaker)"
+        )
+        _seat_failures[key] = 0
+
+
+def _seat_record_success(key: str) -> None:
+    _seat_failures.pop(key, None)
+    _seat_cooling_until.pop(key, None)
+
+
+def call_duelist_with_fallback(
+    primary_cfg: Dict[str, Any],
+    fallback_cfg: Optional[Dict[str, Any]],
+    system_prompt: str,
+    user_message: str,
+    timeout_s: float = 120.0,
+) -> tuple:
+    """Put the prompt to the named duelist seat; if it yields no answer, try the
+    seat-backup. Returns ``(text, server_ms, meta)`` and NEVER raises.
+
+    ``meta`` is the attribution the duel row and the veto need:
+      ``seat``            "primary" | "fallback" | None (both failed)
+      ``answered_by``     the model name that actually answered (→ the duel
+                          row's `duelist_model`, and therefore the model the
+                          abstention veto looks its seat-profile ceiling up by)
+      ``primary_model`` / ``fallback_model``
+      ``primary_fail`` / ``fallback_fail``   reason vocabulary from `call_duelist_ex`
+      ``breaker_open``    the primary seat was skipped because it is cooling
+
+    Each seat calls with ITS OWN max_tokens / sampling / chat_template_kwargs —
+    never the other seat's. A fallback row is a different voice, so
+    `research._duelist_verdict` tags it (`duelist_fallback`) and the gate's
+    ceiling resolves against the ANSWERING seat's profile (t_848eb1c4): a
+    confidence ceiling fitted on one seat's distribution is meaningless on
+    another's (measured 2026-11-07 across the duel log — the 0.55 ceiling that
+    selects ~40% of qwen3.8-flash's abstentions selects ~99% of Spark's, whose
+    non-agreeing conf mass sits at 0.20/0.30/0.35/0.42).
+    """
+    meta: Dict[str, Any] = {
+        "seat": None,
+        "answered_by": None,
+        "primary_model": (primary_cfg or {}).get("model"),
+        "fallback_model": (fallback_cfg or {}).get("model"),
+        "primary_fail": None,
+        "fallback_fail": None,
+        "breaker_open": False,
+    }
+    breaker = fallback_breaker_cfg()
+    fb_cfg: Dict[str, Any] = fallback_cfg or {}
+    fb_usable = bool(fb_cfg.get("model"))
+
+    pkey = _seat_key(primary_cfg or {})
+    if not fb_usable or not _seat_cooling(pkey):
+        text, server_ms, reason = call_duelist_ex(
+            (primary_cfg or {}).get("api_key", ""), (primary_cfg or {}).get("base_url", ""),
+            (primary_cfg or {}).get("model", ""), system_prompt, user_message,
+            timeout_s=timeout_s, max_tokens=(primary_cfg or {}).get("max_tokens"),
+            sampling=(primary_cfg or {}).get("sampling"),
+            chat_kwargs=(primary_cfg or {}).get("chat_template_kwargs"))
+        if (text or "").strip():
+            _seat_record_success(pkey)
+            meta["seat"] = "primary"
+            meta["answered_by"] = (primary_cfg or {}).get("model")
+            return text, server_ms, meta
+        meta["primary_fail"] = reason or "unknown"
+        if fb_usable:
+            _seat_record_failure(pkey, breaker)
+    else:
+        meta["breaker_open"] = True
+        meta["primary_fail"] = "breaker-open"
+
+    if not fb_usable:
+        return "", None, meta
+
+    fkey = _seat_key(fb_cfg)
+    if _seat_cooling(fkey):
+        meta["fallback_fail"] = "breaker-open"
+        logger.warning(f"[duel] fallback seat {_seat_note(fkey)} also cooling — no duel row")
+        return "", None, meta
+
+    logger.warning(
+        f"[duel] seat {_seat_note(pkey)} unusable ({meta['primary_fail']}) — "
+        f"falling back to {_seat_note(fkey)}"
+    )
+    text, server_ms, reason = call_duelist_ex(
+        fb_cfg.get("api_key", ""), fb_cfg.get("base_url", ""),
+        fb_cfg.get("model", ""), system_prompt, user_message,
+        timeout_s=timeout_s, max_tokens=fb_cfg.get("max_tokens"),
+        sampling=fb_cfg.get("sampling"),
+        chat_kwargs=fb_cfg.get("chat_template_kwargs"))
+    if (text or "").strip():
+        _seat_record_success(fkey)
+        meta["seat"] = "fallback"
+        meta["answered_by"] = fb_cfg.get("model")
+        return text, server_ms, meta
+    meta["fallback_fail"] = reason or "unknown"
+    _seat_record_failure(fkey, breaker)
+    logger.warning(
+        f"[duel] fallback seat {_seat_note(fkey)} unusable too "
+        f"({meta['fallback_fail']}) — no duel row this scan"
+    )
+    return "", None, meta
 
 
 # ── Report ─────────────────────────────────────────────────────────────────
@@ -645,7 +1055,18 @@ def aggregate() -> Dict[str, Any]:
     # (aggregate never flushes).
     memory.load()
 
-    duels = load_duels()
+    duels_all = load_duels()
+    # t_ea2c5fea: the corpus now also carries failed-call rows (`duelist_ok:
+    # false`) so the denominator of "was the voice observable" is measurable.
+    # They must not contaminate anything that reads a duel row as an OPINION —
+    # the P&L backfill, the agreement rate and the latency stats all run on the
+    # ANSWERED rows only, and the failed set gets its own count + reason mix.
+    duels = [d for d in duels_all if answered(d)]
+    failed = [d for d in duels_all if not answered(d)]
+    fail_mix: Dict[str, int] = {}
+    for d in failed:
+        r = str(d.get("duelist_fail") or "unknown")
+        fail_mix[r] = fail_mix.get(r, 0) + 1
     closes = memory.get_closes() or []
     by_id = {d.get("perception_id"): d for d in duels if d.get("perception_id")}
 
@@ -697,6 +1118,14 @@ def aggregate() -> Dict[str, Any]:
 
     return {
         "duel_calls": len(duels),
+        # Call observability (t_ea2c5fea): answered vs attempted-but-failed, and
+        # why. `duel_calls` keeps its old meaning (answered rows) so every
+        # existing reader of the report is unaffected by the new row type.
+        "answered_calls": len(duels),
+        "failed_calls": len(failed),
+        "call_success_rate": (round(len(duels) / len(duels_all), 3)
+                              if duels_all else None),
+        "duel_failure_mix": fail_mix,
         "realized_closes": len(closes),
         "closes_with_duelist": matched,
         "duelist": {"model": duelist_config().get("model") or "(disabled)"},
@@ -733,6 +1162,14 @@ def print_report() -> None:
     print(f"Model duel — {r['duel_calls']} paired call(s), "
           f"{r['realized_closes']} realized close(s), {r['closes_with_duelist']} with duelist verdict")
     print(f"  duelist model: {r['duelist']['model']}")
+    # Observability line (t_ea2c5fea): a duel report that only counts ANSWERED
+    # calls hides the outage case — measured 2026-11-07, the named seat was
+    # unreachable for ~18 h and the report simply showed fewer calls.
+    if r.get("failed_calls"):
+        _tot = r["duel_calls"] + r["failed_calls"]
+        _pct = (1 - (r.get("call_success_rate") or 0)) * 100
+        print(f"  failed calls: {r['failed_calls']}/{_tot} ({_pct:.0f}% of scans "
+              f"got no answer) — by reason: {r['duel_failure_mix']}")
     print(f"  verdict agreement: {a['agree']} agree / {a['split']} split ", end="")
     if a["rate"] is None:
         print("--")

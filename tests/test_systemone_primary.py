@@ -258,9 +258,14 @@ def test_research_systemone_duel_row_names_answering_seat(monkeypatch):
         json.dump(cfg, f)
     _patch_research_deps(monkeypatch)
     duel_rows = []
+    # The seat-aware entry point (t_848eb1c4) — answered_by None means "the
+    # named seat answered", so the row's duelist_model still comes from the
+    # llm.duelist slot, which is exactly what this test pins.
     monkeypatch.setattr(
-        research, "call_duelist",
-        lambda *a, **k: ('x\n{"verdict":"PASS","confidence":0.4}', 55))
+        research, "call_duelist_with_fallback",
+        lambda *a, **k: ('x\n{"verdict":"PASS","confidence":0.4}', 55,
+                         {"seat": "primary", "answered_by": None,
+                          "primary_fail": None}))
     monkeypatch.setattr(research, "record_duel", lambda row: duel_rows.append(row))
     a = research.research("BTC", _perception())
     assert a["verdict"] == "LONG"
@@ -281,8 +286,10 @@ def test_research_chat_path_duel_row_labels_chat_slot(monkeypatch):
     _patch_research_deps(monkeypatch, 'x\n{"verdict":"PASS","confidence":0.2}')
     duel_rows = []
     monkeypatch.setattr(
-        research, "call_duelist",
-        lambda *a, **k: ('x\n{"verdict":"PASS","confidence":0.4}', 55))
+        research, "call_duelist_with_fallback",
+        lambda *a, **k: ('x\n{"verdict":"PASS","confidence":0.4}', 55,
+                         {"seat": "primary", "answered_by": None,
+                          "primary_fail": None}))
     monkeypatch.setattr(research, "record_duel", lambda row: duel_rows.append(row))
     research.research("BTC", _perception())
     assert len(duel_rows) == 1

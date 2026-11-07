@@ -179,12 +179,33 @@ DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}
 #                                         # {"enable_thinking": false})
 #       },
 #       "duelist": {                     # env fallbacks: LLM_DUEL_MODEL /
-#                                         # LLM_DUEL_MAX_TOKENS; absent
-#                                         # everywhere = duelist off
+#                                        # LLM_DUEL_BASE_URL /
+#                                        # LLM_DUEL_MAX_TOKENS; absent
+#                                        # everywhere = duelist off
 #           "model": "<duelist id>",
+#           "model_profile": "<config-models/name>",  # merged under the inline
+#           "base_url": "http://…",      # optional: a seat served by a
+#                                        # DIFFERENT box travels with its
+#                                        # profile (never a key — creds stay
+#                                        # in .env.local)
 #           "sampling": {...},           # duelist POST-body sampling
-#           "max_tokens": 8192           # duelist completion budget (inherits
+#           "max_tokens": 8192,          # duelist completion budget (inherits
 #                                        # the primary's resolved value)
+#           "chat_template_kwargs": {...},  # e.g. {"enable_thinking": false}
+#
+#           # Seat-backup (t_848eb1c4): tried only when the named seat yields no
+#           # answer. Its OWN profile, so model/base_url/budget/sampling/template
+#           # kwargs all travel with it — the backup is usually a different box.
+#           # It NEVER inherits the named seat's base_url, and with no endpoint
+#           # resolvable (profile / LLM_DUEL_BASE_URL / LLM_BASE_URL) the backup
+#           # is DISABLED rather than defaulting to the public endpoint.
+#           "fallback": {"model_profile": "<config-models/name>"},
+#
+#           # Failure breaker (only consulted when a fallback exists): after
+#           # `threshold` consecutive failures the failing seat is skipped for
+#           # `cooldown_s` while the backup answers; a success resets it. With
+#           # NO backup the breaker is inert (never drop data to save latency).
+#           "fallback_breaker": {"threshold": 3, "cooldown_s": 600},
 #       }
 #   }
 #

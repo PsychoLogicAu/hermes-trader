@@ -1501,6 +1501,11 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     # data gap (None) can never block a trade: the gate passes with no opinion.
     _duelist_at = analysis.get("duelist_at_entry") or {}
     _duelist_verdict = _duelist_at.get("verdict") or None
+    # The voice's OWN confidence — the key of abstention_veto_gate (the
+    # opposite-side gate above never sees this seat: 0/72 OPPOSITE calls in
+    # both measurement passes). None when the duel row predates the field
+    # or the seat produced no conf → the gate fails open.
+    _duelist_conf = _duelist_at.get("confidence")
     ctx = GateContext(
         confidence=analysis["confidence"],
         current_positions=positions,
@@ -1543,6 +1548,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         timestral_q10_path_pct=_tms_q10p,
         timestral_q90_path_pct=_tms_q90p,
         duelist_verdict=_duelist_verdict,
+        duelist_confidence=_duelist_conf,
+        # Which SEAT answered — `duelist_at_entry.model`, i.e. the model in the
+        # duel row, which under a seat-backup (`llm.duelist.fallback`) is not
+        # necessarily the seat `llm.duelist` names. abstention_veto_gate's
+        # ceiling is the second voice's OWN conf, so by the t_623a4dcf
+        # bar-ownership rule it is looked up in this seat's model profile
+        # (risk_gates.eval_all_gates). None = no duel row → gate fails open.
+        duelist_model=_duelist_at.get("model"),
         cohort_tag=analysis.get("cohort_tag"),
         primary_model=analysis.get("primary_model"),
         # State-admission clause (t_1999904f): the classic confidence gate
@@ -1668,6 +1681,20 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis['coin']} {trade_side.upper()} "
             f"(conf {analysis['confidence']:.2f}, composite "
             f"{analysis.get('composite_score', 0):.1f}): {_mtlv.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
+    # Second-voice ABSTENTION veto (t_848eb1c4): the duelist declined to
+    # endorse the entry and was unsure of its own shrug. Same would-block
+    # accrual pattern; the duelist's own conf — the key of this gate, absent
+    # from every other log line — rides the reason string, and the marker in
+    # gate_results joins to the duel JSONL by ts/coin.
+    _av = gate_output["results"].get("abstention_veto") or {}
+    if _av.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][ABSTENTION-VETO][SHADOW] WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_av.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
     # Quiet broad-tape gate (2026-09-10, WATCHLIST §B.17): a quiet

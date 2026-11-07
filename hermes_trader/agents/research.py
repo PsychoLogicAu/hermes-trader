@@ -17,12 +17,13 @@ import httpx
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.duel_store import (
-    call_duelist,
+    call_duelist_with_fallback,
     duelist_config,
     duelist_enabled,
     effective_chat_template_kwargs,
     effective_primary_max_tokens,
     effective_primary_model,
+    fallback_duelist_config,
     record_duel,
     server_processing_ms,
     slot_get,
@@ -1373,6 +1374,106 @@ def _archive_record(
         return {}
 
 
+def _px_or_none(v: Any) -> float | None:
+    """A positive price scalar from a parsed verdict, else None.
+
+    Used for the duel row's bracket fields: `parse_verdict` leaves stop/tp
+    at 0.0 when the model gave no bracket, and a 0.0 in a price column is a
+    LIE the ruler would average (it reads as a real take-profit at zero).
+    None means "this voice proposed no bracket" and stays out of the math.
+    Accepts the string forms models emit ("123.45"); rejects NaN/inf.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")) or f <= 0:
+        return None
+    return f
+
+
+def _duel_failure_row(
+    *,
+    coin: str,
+    perception: Dict[str, Any],
+    primary_model: str,
+    primary_verdict: str,
+    primary_confidence: float,
+    primary_ms: int,
+    primary_server_ms: int | None,
+    asked_model: str | None,
+    seat_meta: Dict[str, Any] | None,
+    duelist_ms: int,
+    fail_reason: str,
+) -> Dict[str, Any]:
+    """The duel-row shape for a call that produced NO ANSWER (t_ea2c5fea).
+
+    A failed duelist is not an opinion, so it must never be recorded as one
+    (no fabricated PASS, no zero price) — but it IS a duelist call, and the
+    corpus needs it as the denominator. Measured 2026-11-07: the named seat's
+    box was unreachable for ~18 h and the duel log simply stopped growing, so
+    every analysis question of the form "what did the voice say, and how often
+    could it not be asked at all" was unanswerable — the rows that would have
+    said `no observation` were indistinguishable from rows that were never
+    written. Same reason the failure REASON vocabulary exists in
+    `duel_store.call_duelist_ex`.
+
+    Kept deliberately compact (no reasoning, no bracket, no prompt): while a
+    seat is down this row lands once per coin-scan, the same rate as the
+    success rows, so its size is what keeps the log volume manageable.
+
+    `duelist_model` stays None — the field names the voice that ANSWERED (the
+    abstention veto resolves its per-seat ceiling through it), and on a failed
+    call nobody answered. Who was ASKED goes in `duelist_asked_model` so the
+    outage cohort is still attributable to a seat.
+    """
+    meta = seat_meta or {}
+    return {
+        "coin": coin,
+        # The scan identifier. `perception_id` is the documented join key to
+        # the ledger's entry/outcome rows (ledger.py: "perception_id is the
+        # join key to the duel perception log"), so a failed call is joinable
+        # to the exact scan it belongs to, like any other duel row.
+        "perception_id": perception.get("id", "unknown"),
+        "mode": str(read_agent_config().get("mode", "OFF")),
+        # Success flag on EVERY row (the success path writes True) so a reader
+        # never has to infer "the call worked" from the row's mere presence.
+        "duelist_ok": False,
+        # Why nothing came back. `duelist_fail` is the single group-by field
+        # (the reason the call ultimately produced nothing); the per-seat
+        # detail rides in the two *_fail fields.
+        "duelist_fail": fail_reason,
+        "duelist_model": None,
+        "duelist_asked_model": asked_model,
+        "duelist_asked_fallback_model": meta.get("fallback_model"),
+        "duelist_seat": meta.get("seat"),
+        "duelist_fallback": False,
+        "duelist_primary_fail": meta.get("primary_fail"),
+        "duelist_fallback_fail": meta.get("fallback_fail"),
+        # Skipped rather than attempted (failure breaker cooling) — a different
+        # operational story than an endpoint that was actually tried.
+        "duelist_breaker_open": bool(meta.get("breaker_open")),
+        "primary_model": primary_model or effective_primary_model(),
+        "primary_verdict": primary_verdict,
+        "primary_confidence": primary_confidence,
+        # No observation: verdict/confidence/side/bracket all stay None.
+        "duelist_verdict": None,
+        "duelist_confidence": None,
+        "duelist_side": None,
+        "duelist_entry_px": None,
+        "duelist_stop_px": None,
+        "duelist_tp_px": None,
+        "primary_ms": int(primary_ms or 0),
+        # Wall time of the FAILED attempt (a 120000 ms here = the client gave
+        # up mid-generation; a ~5 ms one = connection refused). Excluded from
+        # the report's latency stats, kept in the row for outage forensics.
+        "duelist_ms": int(duelist_ms or 0),
+        "primary_server_ms": (int(primary_server_ms)
+                              if primary_server_ms is not None else None),
+        "duelist_server_ms": None,
+    }
+
+
 def _duelist_verdict(
     system_prompt: str,
     user_message: str,
@@ -1406,24 +1507,60 @@ def _duelist_verdict(
     misread CLOSE is logged as PASS, not as a spurious CLOSE the book can't
     act on.
     """
+    # Failure-row bookkeeping (t_ea2c5fea): the corpus must hold a record of
+    # every duelist CALL, so the hook tracks how far it got. `attempted` is
+    # True only once a seat was actually asked — a fault before that (a broken
+    # config read) is not a call and must not fabricate a call record.
+    attempted = False
+    cfg: Dict[str, Any] = {}
+    seat_meta: Dict[str, Any] = {}
+    _dl_t0 = time.monotonic()   # bound before try: the except path times the attempt
     try:
         if not duelist_enabled():
             return None
         cfg = duelist_config()
+        # Seat-backup seat (t_848eb1c4): None unless `llm.duelist.fallback`
+        # names one. A second voice that is only sometimes reachable is the
+        # normal case — measured 2026-11-07, the live Spark seat's box was
+        # ConnectError on every scan and the duel log simply stopped growing
+        # (~3,000 identical WARNING lines was the only trace).
+        fb_cfg = fallback_duelist_config()
+        # From here the seat WAS asked (or attempted): every path out of the
+        # call — an answer, an empty answer, or an exception escaping the entry
+        # point — must leave a row behind (t_ea2c5fea). Set before the call, not
+        # after, so a defensive raise from the wrapper is covered too; the
+        # faults before this line (a broken config read) name no seat and write
+        # no call record.
+        attempted = True
         _dl_t0 = time.monotonic()
-        dl_text, dl_server_ms = call_duelist(cfg["api_key"], cfg["base_url"], cfg["model"],
-                                             system_prompt, user_message,
-                                             max_tokens=cfg["max_tokens"])
+        dl_text, dl_server_ms, seat_meta = call_duelist_with_fallback(
+            cfg, fb_cfg, system_prompt, user_message)
         duelist_ms = int((time.monotonic() - _dl_t0) * 1000)
+        # Name the seat that ANSWERED, not the seat that was asked: a fallback
+        # row is a different voice (different endpoint, different conf
+        # distribution), and `duelist_model` is what the abstention veto keys
+        # its per-seat ceiling on. See duel_store.call_duelist_with_fallback.
+        answering_model = seat_meta.get("answered_by") or cfg["model"]
         # Empty text = the duelist call failed (402/429/timeout — call_duelist
         # swallows errors and returns ("", None)). parse_verdict would tag it
         # verdict=PASS/ai_down, which would log a bogus "AGREE" row against a
         # primary that said PASS. A failed duelist is "no observation", not an
-        # opinion — record nothing.
+        # opinion — so it is recorded AS a failed call (t_ea2c5fea: every call
+        # gets a row, with `duelist_ok: false` and the reason) and still
+        # returns None, so nothing downstream treats it as an observation.
         if not (dl_text or "").strip():
+            _fail = (seat_meta.get("fallback_fail") or seat_meta.get("primary_fail")
+                     or "unknown")
             logger.warning(
-                f"[duel] {coin}: duelist {cfg['model']} returned no text — not recorded"
+                f"[duel] {coin}: duelist {cfg['model']} returned no text "
+                f"({_fail}) — recorded as a failed call, not a verdict"
             )
+            record_duel(_duel_failure_row(
+                coin=coin, perception=perception, primary_model=primary_model,
+                primary_verdict=primary_verdict,
+                primary_confidence=primary_confidence, primary_ms=primary_ms,
+                primary_server_ms=primary_server_ms, asked_model=cfg.get("model"),
+                seat_meta=seat_meta, duelist_ms=duelist_ms, fail_reason=_fail))
             return None
         dl_parsed = parse_verdict(dl_text, coin, perception, held_coins=held_coins)
         # Prompt/response archive (role=duelist). Its prompt is byte-identical
@@ -1431,7 +1568,7 @@ def _duelist_verdict(
         # text once per research call, not twice. Disabled by default; never
         # raises (prompt_log contract).
         prompt_log.record_call(_archive_record(
-            coin=coin, perception=perception, role="duelist", model=cfg["model"],
+            coin=coin, perception=perception, role="duelist", model=answering_model,
             system_prompt=None, user_message=None, raw_response=dl_text,
             parsed=dl_parsed, wall_ms=duelist_ms, server_ms=dl_server_ms,
         ))
@@ -1439,13 +1576,45 @@ def _duelist_verdict(
             "coin": coin,
             "perception_id": perception.get("id", "unknown"),
             "mode": str(read_agent_config().get("mode", "OFF")),
+            # Success flag on EVERY duel row (t_ea2c5fea): the failed-call rows
+            # carry False, so "was this call observable at all" is a field in
+            # the corpus, not an inference from the row's mere presence.
+            "duelist_ok": True,
             "primary_model": primary_model or effective_primary_model(),
-            "duelist_model": cfg["model"],
+            "duelist_model": answering_model,
+            # Seat attribution (t_848eb1c4). `duelist_model` names the voice
+            # that ANSWERED, which under a seat-backup is not necessarily the
+            # seat the config names; these three fields say what happened, so a
+            # fallback cohort can never be silently pooled with the named seat's
+            # (different endpoint, different confidence distribution, different
+            # veto ceiling — see risk_gates.abstention_veto_gate).
+            # `duelist_primary_fail` carries the reason vocabulary from
+            # duel_store.call_duelist_ex (exception:ConnectError / timeout /
+            # http-401 / empty-content / breaker-open).
+            "duelist_seat": seat_meta.get("seat"),
+            "duelist_fallback": seat_meta.get("seat") == "fallback",
+            "duelist_primary_fail": seat_meta.get("primary_fail"),
             "primary_verdict": primary_verdict,
             "primary_confidence": primary_confidence,
             "duelist_verdict": dl_parsed["verdict"],
             "duelist_confidence": dl_parsed["confidence"],
             "duelist_side": dl_parsed["side"],
+            # The BRACKET the voice itself proposed (t_848eb1c4, L2). The
+            # duel corpus already logged verdict/conf at ANY confidence;
+            # without these scalars the accrued corpus can only be priced on
+            # a fixed horizon, and the bracket first-touch ruler is what
+            # flipped the sole-voice verdict (fixed-4h +1.55pp vs own-bracket
+            # −0.34R/trade — scratch/_solevoice_ci.py, t_4432a31a). Read the
+            # SNAKE_CASE parsed keys: the model's JSON may say entryPx/stopPx
+            # and parse_verdict normalizes them, so a runner that asked for
+            # `entryPx` silently loses the ruler (it already did once).
+            # parse_verdict defaults entry_px to the perception mid, so a
+            # missing bracket reads as "entry at mid, no stop/tp" (0/absent →
+            # None here, never a fake 0.0 price). Log-only: nothing about the
+            # duelist's bracket executes.
+            "duelist_entry_px": _px_or_none(dl_parsed.get("entry_px")),
+            "duelist_stop_px": _px_or_none(dl_parsed.get("stop_px")),
+            "duelist_tp_px": _px_or_none(dl_parsed.get("tp_px")),
             "duelist_reasoning": (dl_parsed["reasoning"] or "")[:300],
             # Wall time of each LLM call (ms) — the same prompt to both
             # models, so latency is a directly comparable A/B dimension
@@ -1465,16 +1634,49 @@ def _duelist_verdict(
         # operator sees the queue-wait gap (wall − server) at a glance.
         _p_srv = f", {row['primary_server_ms']}ms srv" if row["primary_server_ms"] is not None else ""
         _d_srv = f", {row['duelist_server_ms']}ms srv" if row["duelist_server_ms"] is not None else ""
+        # Loud enough to matter: a fallback row is a DIFFERENT voice, so the
+        # operator reading the log must never mistake it for the named seat's.
+        _seat_tag = (f" [FALLBACK seat — named seat failed: {row['duelist_primary_fail']}]"
+                     if row.get("duelist_fallback") else "")
+        # The bracket the voice proposed, on the live line too (t_ea2c5fea): the
+        # JSONL row is the structured surface, but an operator tailing the log
+        # should see the ruler the voice named without a join. Only printed when
+        # the voice actually named one — most abstentions carry no bracket, and
+        # an empty `br --/--/--` on 44k lines is noise, not signal.
+        _brk = ""
+        if row["duelist_stop_px"] and row["duelist_tp_px"]:
+            _brk = (f", br {row['duelist_entry_px']}/{row['duelist_stop_px']}"
+                    f"/{row['duelist_tp_px']}")
         logger.info(
             f"[duel] {coin}: primary {row['primary_model']} {primary_verdict} "
             f"(conf {primary_confidence:.2f}, {row['primary_ms']}ms{_p_srv}) "
-            f"vs duelist {row['duelist_model']} {row['duelist_verdict']} "
-            f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms{_d_srv}) — "
+            f"vs duelist {row['duelist_model']}{_seat_tag} {row['duelist_verdict']} "
+            f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms{_d_srv}"
+            f"{_brk}) — "
             f"{'AGREE' if row['duelist_verdict'] == primary_verdict else 'SPLIT'}"
         )
         return row
     except Exception as e:  # noqa: BLE001 — the primary verdict is already in hand
         logger.warning(f"[duel] duelist hook failed for {coin} (non-fatal): {e!r}")
+        # The hook's OWN fault (parse/record crash after a seat answered) is
+        # still a duelist call that produced no observation — record it as one
+        # (t_ea2c5fea). Only once a seat was actually asked: a fault in the
+        # config read above is not a call, and a fabricated call row would
+        # pollute the outage cohort. Guarded separately because a row-write that
+        # faults must not replace the original error in the log.
+        if attempted:
+            try:
+                record_duel(_duel_failure_row(
+                    coin=coin, perception=perception, primary_model=primary_model,
+                    primary_verdict=primary_verdict,
+                    primary_confidence=primary_confidence, primary_ms=primary_ms,
+                    primary_server_ms=primary_server_ms,
+                    asked_model=cfg.get("model"), seat_meta=seat_meta,
+                    duelist_ms=int((time.monotonic() - _dl_t0) * 1000),
+                    fail_reason=f"hook-exception:{type(e).__name__}"))
+            except Exception as e2:  # noqa: BLE001 — logging must never break a verdict
+                logger.warning(f"[duel] {coin}: failed-call record could not be written "
+                               f"(non-fatal): {e2!r}")
         return None
 
 
@@ -2289,6 +2491,12 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 "verdict": duelist_row["duelist_verdict"],
                 "confidence": duelist_row["duelist_confidence"],
                 "side": duelist_row["duelist_side"],
+                # Which SEAT answered ("primary"/"fallback") — under a
+                # seat-backup the model above may not be the seat the config
+                # names, and the abstention veto resolves its ceiling per seat.
+                # WHITELIST REGRESSION POINT: a key not listed here never
+                # reaches the executor's GateContext.
+                "seat": duelist_row.get("duelist_seat"),
             }
             if duelist_row is not None else None
         ),
