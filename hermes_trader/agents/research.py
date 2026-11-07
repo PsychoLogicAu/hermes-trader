@@ -17,12 +17,13 @@ import httpx
 
 from hermes_trader.agents.config_store import read_agent_config
 from hermes_trader.agents.duel_store import (
-    call_duelist,
+    call_duelist_with_fallback,
     duelist_config,
     duelist_enabled,
     effective_chat_template_kwargs,
     effective_primary_max_tokens,
     effective_primary_model,
+    fallback_duelist_config,
     record_duel,
     server_processing_ms,
     slot_get,
@@ -1428,11 +1429,21 @@ def _duelist_verdict(
         if not duelist_enabled():
             return None
         cfg = duelist_config()
+        # Seat-backup seat (t_848eb1c4): None unless `llm.duelist.fallback`
+        # names one. A second voice that is only sometimes reachable is the
+        # normal case — measured 2026-11-07, the live Spark seat's box was
+        # ConnectError on every scan and the duel log simply stopped growing
+        # (~3,000 identical WARNING lines was the only trace).
+        fb_cfg = fallback_duelist_config()
         _dl_t0 = time.monotonic()
-        dl_text, dl_server_ms = call_duelist(cfg["api_key"], cfg["base_url"], cfg["model"],
-                                             system_prompt, user_message,
-                                             max_tokens=cfg["max_tokens"])
+        dl_text, dl_server_ms, seat_meta = call_duelist_with_fallback(
+            cfg, fb_cfg, system_prompt, user_message)
         duelist_ms = int((time.monotonic() - _dl_t0) * 1000)
+        # Name the seat that ANSWERED, not the seat that was asked: a fallback
+        # row is a different voice (different endpoint, different conf
+        # distribution), and `duelist_model` is what the abstention veto keys
+        # its per-seat ceiling on. See duel_store.call_duelist_with_fallback.
+        answering_model = seat_meta.get("answered_by") or cfg["model"]
         # Empty text = the duelist call failed (402/429/timeout — call_duelist
         # swallows errors and returns ("", None)). parse_verdict would tag it
         # verdict=PASS/ai_down, which would log a bogus "AGREE" row against a
@@ -1440,7 +1451,8 @@ def _duelist_verdict(
         # opinion — record nothing.
         if not (dl_text or "").strip():
             logger.warning(
-                f"[duel] {coin}: duelist {cfg['model']} returned no text — not recorded"
+                f"[duel] {coin}: duelist {cfg['model']} returned no text "
+                f"({seat_meta.get('primary_fail') or 'unknown'}) — not recorded"
             )
             return None
         dl_parsed = parse_verdict(dl_text, coin, perception, held_coins=held_coins)
@@ -1449,7 +1461,7 @@ def _duelist_verdict(
         # text once per research call, not twice. Disabled by default; never
         # raises (prompt_log contract).
         prompt_log.record_call(_archive_record(
-            coin=coin, perception=perception, role="duelist", model=cfg["model"],
+            coin=coin, perception=perception, role="duelist", model=answering_model,
             system_prompt=None, user_message=None, raw_response=dl_text,
             parsed=dl_parsed, wall_ms=duelist_ms, server_ms=dl_server_ms,
         ))
@@ -1458,7 +1470,19 @@ def _duelist_verdict(
             "perception_id": perception.get("id", "unknown"),
             "mode": str(read_agent_config().get("mode", "OFF")),
             "primary_model": primary_model or effective_primary_model(),
-            "duelist_model": cfg["model"],
+            "duelist_model": answering_model,
+            # Seat attribution (t_848eb1c4). `duelist_model` names the voice
+            # that ANSWERED, which under a seat-backup is not necessarily the
+            # seat the config names; these three fields say what happened, so a
+            # fallback cohort can never be silently pooled with the named seat's
+            # (different endpoint, different confidence distribution, different
+            # veto ceiling — see risk_gates.abstention_veto_gate).
+            # `duelist_primary_fail` carries the reason vocabulary from
+            # duel_store.call_duelist_ex (exception:ConnectError / timeout /
+            # http-401 / empty-content / breaker-open).
+            "duelist_seat": seat_meta.get("seat"),
+            "duelist_fallback": seat_meta.get("seat") == "fallback",
+            "duelist_primary_fail": seat_meta.get("primary_fail"),
             "primary_verdict": primary_verdict,
             "primary_confidence": primary_confidence,
             "duelist_verdict": dl_parsed["verdict"],
@@ -1499,10 +1523,14 @@ def _duelist_verdict(
         # operator sees the queue-wait gap (wall − server) at a glance.
         _p_srv = f", {row['primary_server_ms']}ms srv" if row["primary_server_ms"] is not None else ""
         _d_srv = f", {row['duelist_server_ms']}ms srv" if row["duelist_server_ms"] is not None else ""
+        # Loud enough to matter: a fallback row is a DIFFERENT voice, so the
+        # operator reading the log must never mistake it for the named seat's.
+        _seat_tag = (f" [FALLBACK seat — named seat failed: {row['duelist_primary_fail']}]"
+                     if row.get("duelist_fallback") else "")
         logger.info(
             f"[duel] {coin}: primary {row['primary_model']} {primary_verdict} "
             f"(conf {primary_confidence:.2f}, {row['primary_ms']}ms{_p_srv}) "
-            f"vs duelist {row['duelist_model']} {row['duelist_verdict']} "
+            f"vs duelist {row['duelist_model']}{_seat_tag} {row['duelist_verdict']} "
             f"(conf {row['duelist_confidence']:.2f}, {row['duelist_ms']}ms{_d_srv}) — "
             f"{'AGREE' if row['duelist_verdict'] == primary_verdict else 'SPLIT'}"
         )
@@ -2323,6 +2351,12 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
                 "verdict": duelist_row["duelist_verdict"],
                 "confidence": duelist_row["duelist_confidence"],
                 "side": duelist_row["duelist_side"],
+                # Which SEAT answered ("primary"/"fallback") — under a
+                # seat-backup the model above may not be the seat the config
+                # names, and the abstention veto resolves its ceiling per seat.
+                # WHITELIST REGRESSION POINT: a key not listed here never
+                # reaches the executor's GateContext.
+                "seat": duelist_row.get("duelist_seat"),
             }
             if duelist_row is not None else None
         ),
