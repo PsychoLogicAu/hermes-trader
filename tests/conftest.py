@@ -39,6 +39,11 @@ os.environ["HERMES_DV_FILE"] = os.path.join(_tmp, ".hermes-trader-dv.jsonl")
 # prompt-log, bind-mounted rw), so an unset var would let a test that calls
 # research() write real prompt text into the live archive dir.
 os.environ["HERMES_PROMPT_LOG_DIR"] = os.path.join(_tmp, "prompt-log")
+# 2026-11-07: the OI accrual series (oi_accrual.py, kanban t_9f660914) gets the same
+# treatment — HERMES_OI_SERIES_FILE is read per call and defaults to the bind-mounted
+# /app/log/oi-series.jsonl, so an unset var would let a test append snapshots into the
+# live accrual file the future positioning gauntlet will be scored on.
+os.environ["HERMES_OI_SERIES_FILE"] = os.path.join(_tmp, "oi-series.jsonl")
 # Force the duelist OFF regardless of the dev shell: with a duelist model
 # exported, any test touching research() would fire a second (real) LLM call.
 # DELETE (not empty-string) so a dev-shell export can't leak through — a test
