@@ -36,7 +36,7 @@ from hermes_trader.agents.dsl_exit import (
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.ledger import record_open, record_close
-from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality
+from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality, lane_mode
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
     cancel_open_orders_for_coin,
@@ -3609,11 +3609,21 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # dynamic 0.77 bar) vs normal entries at +$37.15 — the relaxation
         # admits exactly the late-top class it should guard; shadow accrues the
         # conf-vs-bar + coin distribution for replay before re-enabling.
-        _bt = gate.get("bypass_late_trend_chase", False)
-        _bs = bool(gate.get("bypass_late_trend_chase_shadow_mode", False))
+        # COLLAPSED to one key (2026-11-07, owner ask t_71c6d8ab):
+        # `bypass_late_trend_chase` = "live" | "shadow" | "off" (case-
+        # insensitive; invalid string fails safe to off with a loud warning).
+        # A legacy bool keeps this lane's historical composition: bool true =
+        # live (sibling shadow key ignored for the DECISION — it only ever
+        # logged refusals), bool false + shadow sibling = shadow accrual,
+        # both false/absent = off. Rationale: bool true + stale-true sibling
+        # logged floor-REFUSALS with "(shadow mode)" text that read as a
+        # shadowed lane while the lane was demonstrably live (11-06 audit).
+        _bmode = lane_mode(gate, "bypass_late_trend_chase",
+                           "bypass_late_trend_chase_shadow_mode",
+                           legacy="bool_authoritative")
         tape_note = ""
-        if conf >= bar:
-            bypassed = bool(_bt)
+        if conf >= bar and _bmode != "off":
+            bypassed = (_bmode == "live")
             # BTC-loudness meta-gate on the bypass (2026-09-13, spec
             # .hermes/specs/late-chase-btc-tape-gate.md): consulted ONLY at
             # bypass candidates (conf >= bar); master flag off ⇒ returns
@@ -3661,12 +3671,24 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 # set when the bypass is LIVE (shadow accruals never tag);
                 # harmless extra key if no regime_aware.scope is configured.
                 analysis["_entry_class"] = "late_chase"
-            elif _bs:
+            elif _bmode == "shadow":
                 logger.warning(
                     f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
                     f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
                     f"{bar:.2f}{bar_note}{tape_note}{comp_note}{trig_note}{fuel_note} — NOT "
                     f"bypassing (shadow mode), live rule stands")
+            elif not (_allowed and _allowed_c and _allowed_t and _allowed_f):
+                # Lane is LIVE but a floor refused: accrue exactly what the
+                # pre-floor rule would have released. This refusal accrual
+                # priced the floors on 11-06 (29 refused decisions =
+                # $45.09 saved / $0.98 forgone, t_71c6d8ab). Prefix kept
+                # parser-identical; only the suffix names the real reason.
+                logger.warning(
+                    f"[gate][SHADOW] late_chase_bypass WOULD HAVE BYPASSED "
+                    f"{coin} {side.upper()}: conf {conf:.2f} >= bar "
+                    f"{bar:.2f}{bar_note}{tape_note}{comp_note}{trig_note}{fuel_note} — NOT "
+                    f"bypassing (floor refused; pre-floor rule would have "
+                    f"released)")
         else:
             bypassed = False
         if not bypassed:
@@ -3710,12 +3732,20 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     # accrues the would-admit cohort for the promote/die call — same doctrine
     # as bypass_late_trend_chase_shadow_mode (t_954c9739 precedent: shadow the
     # release, keep the counterfactual data accruing). Key absent/false =
-    # live admission, byte-identical to before. Fires ONLY where the mover
+    # live admission, byte-identical to before. COLLAPSED to one key
+    # (2026-11-07, t_71c6d8ab): `mover_bypass` = "live" | "shadow" | "off";
+    # "off" treats the mover term as ABSENT (byte-identical block below, no
+    # accrual line). Legacy sibling keeps its historical meaning.
+    # Fires ONLY where the mover
     # term is decisive (not fresh, not bypassed): fresh-impulse admits and the
     # late-chase bypass lane are untouched; a bypassed uptrend mover long was
     # admitted by the late-chase bar, not by this term.
+    _mmode = lane_mode(gate, "mover_bypass", "mover_bypass_shadow_mode",
+                       legacy="structural_shadow_only")
+    if _mmode == "off" and structured_daily_mover:
+        structured_daily_mover = False
     if (structured_daily_mover and not fresh_impulse and not bypassed
-            and bool(gate.get("mover_bypass_shadow_mode", False))):
+            and _mmode == "shadow"):
         logger.warning(
             f"[gate][SHADOW] mover_bypass WOULD HAVE ADMITTED {coin} LONG: "
             f"conf {conf:.2f} >= bar "

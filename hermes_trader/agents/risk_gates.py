@@ -244,6 +244,46 @@ def _as_shadow(v: Any) -> bool:
     return not (v is False or str(v).strip().lower() == "false")
 
 
+def lane_mode(cfg: Any, key: str, shadow_key: "str | None" = None, *,
+              legacy: str = "bool_authoritative") -> str:
+    """One-tri-state collapse for the bypass lanes (owner ask 2026-11-07,
+    t_71c6d8ab): the bool + legacy `*_shadow_mode` sibling pair expressed
+    three different composition rules across the lanes, which read as a
+    shadow lane that was actually live. NEW form: `key` itself holds the
+    string "live" | "shadow" | "off" (case-insensitive). Invalid string ->
+    fail-safe "off" + warning (a typo must never silently LOOSEN an entry
+    gate). Legacy bool values keep each lane's historical composition so a
+    config swap and a code deploy can never interleave mid-flight:
+      bool_authoritative      (late-chase lane): true -> live (sibling
+                              ignored for the decision); false+sibling ->
+                              shadow; else off.
+      shadow_wins_base_required (low-liquidity bypass): bool required;
+                              true+sibling -> shadow; true alone -> live;
+                              else off.
+      structural_shadow_only (mover lane — the lane lives in code, there is
+                              no master bool): key absent + sibling ->
+                              shadow; key absent -> live.
+    """
+    raw = (cfg or {}).get(key)
+    if isinstance(raw, str):
+        m = raw.strip().lower()
+        if m in ("live", "shadow", "off"):
+            return m
+        logger.warning(f"[lane-mode] {key}={raw!r} is not live/shadow/off — "
+                       f"fail-safe 'off' (fix the config key)")
+        return "off"
+    sh = bool((cfg or {}).get(shadow_key)) if shadow_key else False
+    if legacy == "shadow_wins_base_required":
+        if not bool(raw):
+            return "off"
+        return "shadow" if sh else "live"
+    if legacy == "structural_shadow_only" and raw is None:
+        return "shadow" if sh else "live"
+    if bool(raw):
+        return "live"
+    return "shadow" if sh else "off"
+
+
 def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any], band_max: Any = None) -> str:
     """Render the short-clause tape-state stamp (t_860f95f8, 2026-10-30).
 
@@ -951,10 +991,18 @@ def market_liquidity_floor(
 
     # High-confidence bypass
     if gate_config:
-        if gate_config.get("bypass_low_volume"):
+        # One-key tri-state (lane_mode, 2026-11-07): prefer
+        # `bypass_low_volume: "live"|"shadow"|"off"`; the legacy bool +
+        # `bypass_low_volume_shadow_mode` pair keeps its historical
+        # composition (shadow sibling overrides the bool here) until the
+        # config swaps to the string form.
+        _lvmode = lane_mode(gate_config, "bypass_low_volume",
+                            "bypass_low_volume_shadow_mode",
+                            legacy="shadow_wins_base_required")
+        if _lvmode != "off":
             min_conf = gate_config.get("bypass_low_volume_min_conf", 0.85)
             if ctx.confidence >= min_conf:
-                if gate_config.get("bypass_low_volume_shadow_mode"):
+                if _lvmode == "shadow":
                     logger.warning(
                         f"[gate][SHADOW] low_liquidity_bypass WOULD HAVE RELEASED "
                         f"{ctx.coin} {ctx.trade_side.upper()}: conf {ctx.confidence:.2f} "
