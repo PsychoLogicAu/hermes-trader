@@ -235,6 +235,24 @@ def test_flow_cap_rolls_over_on_the_utc_day_key():
     assert r.get("shadow_would_block") is True
 
 
+# ── The parse_verdict MASK must not read as the strongest abstention ───────
+
+def test_masked_parse_fails_open_and_costs_no_cap_slot():
+    """parse_verdict's fallback for an unparseable/truncated answer is
+    verdict="PASS" + confidence=0.0 (research.py:1862-1863). PASS is a declined
+    endorsement for this gate and 0.0 is the LOWEST possible confidence, so the
+    mask would otherwise be the strongest possible veto — and it would burn a
+    `max_blocks_per_day` slot, silently throttling the real cohort."""
+    r = abstention_veto_gate(_ctx(verdict="PASS", duelist_conf=0.0), CFG_SHADOW)
+    assert r["pass"] is True
+    assert r.get("via") == "parse-mask"
+    assert "shadow_would_block" not in r
+    assert not risk_gates._abstention_veto_blocks  # the cap counter never moved
+    # A genuinely unconvincing decline at a hair above the mask still fires.
+    f = abstention_veto_gate(_ctx(verdict="PASS", duelist_conf=0.05), CFG_SHADOW)
+    assert f.get("shadow_would_block") is True
+
+
 # ── Pipeline registration: the marker must reach gate_results ──────────────
 
 def test_eval_all_gates_carries_abstention_veto():

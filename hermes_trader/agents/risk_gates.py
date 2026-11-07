@@ -2328,15 +2328,23 @@ def abstention_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResu
     `duelist_veto_gate` (the two gates' would-block cohorts stay
     separately attributable, so promoting one never double-counts the
     other). Everything else — PASS (the abstention token), CLOSE, an
-    unrecognised token — counts as a declined endorsement.
+    unrecognised token — counts as a declined endorsement. Cohort disjointness
+    is provable for the live parser: `duelist_veto_gate`'s only remaining
+    trigger is opposite-side, because the chat-era first-class VETO verdict
+    was retired 2026-10-19 (650726a, "not in the prompt, not parsed"), so no
+    chat seat can emit the token this gate would double-count. (docs/CONFIG.md
+    still describes the VETO shape in its 2026-09-03 sections — stale prose,
+    tracked on the board, not a live trigger.)
 
     Fail-safes (a data gap can never block): gate disabled; no duelist
     verdict; NO duelist confidence (the field is new — a duel row written
     before it existed, or a seat whose parser never emitted one); conf not
-    coercible to float. Passing results carry a `via` marker
-    (agree / opposite-side / conviction-escape / above-ceiling / flow-cap)
-    so the accrued corpus can separate "why it passed" without re-running
-    the rule.
+    coercible to float; conf at parse_verdict's `0.0` MASK (an unparseable or
+    truncated answer arrives as PASS + conf 0.0, which would otherwise read as
+    the strongest possible veto — `via: "parse-mask"`). Passing results carry
+    a `via` marker (agree / opposite-side / conviction-escape / above-ceiling /
+    flow-cap / parse-mask) so the accrued corpus can separate "why it passed"
+    without re-running the rule.
 
     SHADOW MODE (the shipped posture): with `shadow_mode` true (default)
     the gate STRUCTURALLY returns pass=True and carries
@@ -2362,6 +2370,18 @@ def abstention_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResu
         dl_conf = float(ctx.duelist_confidence)
     except (TypeError, ValueError):
         return {"pass": True}
+    if dl_conf <= 0.0:
+        # parse_verdict's MASK, not a measurement: an answer with no parseable
+        # final JSON comes back verdict="PASS" + confidence=0.0
+        # (research.py:1862-1863). PASS counts as a declined endorsement here,
+        # so without this guard a truncated or unparseable answer registers as
+        # the STRONGEST possible abstention (0.0 is the minimum conf) and even
+        # consumes a flow-cap slot. The mask is indistinguishable from a model
+        # reporting literal zero conviction — parse_verdict exposes no parse-ok
+        # flag — so the safe reading wins: an unmeasured conviction is not an
+        # objection. Corpus-side tell: such a row also loses its whole bracket,
+        # so duelist_stop_px/tp_px are both null (see research._px_or_none).
+        return {"pass": True, "via": "parse-mask"}
     dl_upper = str(dl).upper()
     side_upper = str(ctx.trade_side or "").upper()
     if dl_upper == side_upper:
