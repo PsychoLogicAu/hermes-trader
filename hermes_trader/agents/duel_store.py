@@ -561,6 +561,19 @@ def record_duel(entry: Dict[str, Any]) -> None:
         pass
 
 
+def answered(row: Dict[str, Any]) -> bool:
+    """Did this duel row record an ANSWER (as opposed to a failed call)?
+
+    Rows written before the failed-call logging (t_ea2c5fea) carry no
+    `duelist_ok` key, and every one of them is an answer — the old code wrote a
+    row ONLY for a successful call. So the default is True; a row explicitly
+    marked False is the new `no observation` record, which must never be read
+    as an opinion by anything downstream (the same reason `parse_verdict`'s
+    failure-PASS is excluded in prior_calls).
+    """
+    return bool(row.get("duelist_ok", True))
+
+
 def load_duels(limit: int = 5000) -> List[Dict[str, Any]]:
     """All recorded rows, oldest first, malformed lines skipped."""
     out: List[Dict[str, Any]] = []
@@ -589,8 +602,16 @@ def resolve(coin: str, perception_id: str, max_scan: int = 400) -> Optional[Dict
     if not coin or not perception_id or perception_id == "unknown":
         return None
     for row in reversed(load_duels(limit=max_scan)):
-        if row.get("perception_id") == perception_id:
-            return row
+        if row.get("perception_id") != perception_id:
+            continue
+        # A failed-call row (t_ea2c5fea) is a record that the voice was ASKED
+        # and did not answer — it is not the duelist's row for this perception
+        # in the sense this function promises ("the duelist row", i.e. its
+        # verdict). Skipping it keeps every consumer's semantics byte-identical
+        # to before the failure rows existed.
+        if not answered(row):
+            continue
+        return row
     return None
 
 
@@ -1034,7 +1055,18 @@ def aggregate() -> Dict[str, Any]:
     # (aggregate never flushes).
     memory.load()
 
-    duels = load_duels()
+    duels_all = load_duels()
+    # t_ea2c5fea: the corpus now also carries failed-call rows (`duelist_ok:
+    # false`) so the denominator of "was the voice observable" is measurable.
+    # They must not contaminate anything that reads a duel row as an OPINION —
+    # the P&L backfill, the agreement rate and the latency stats all run on the
+    # ANSWERED rows only, and the failed set gets its own count + reason mix.
+    duels = [d for d in duels_all if answered(d)]
+    failed = [d for d in duels_all if not answered(d)]
+    fail_mix: Dict[str, int] = {}
+    for d in failed:
+        r = str(d.get("duelist_fail") or "unknown")
+        fail_mix[r] = fail_mix.get(r, 0) + 1
     closes = memory.get_closes() or []
     by_id = {d.get("perception_id"): d for d in duels if d.get("perception_id")}
 
@@ -1086,6 +1118,14 @@ def aggregate() -> Dict[str, Any]:
 
     return {
         "duel_calls": len(duels),
+        # Call observability (t_ea2c5fea): answered vs attempted-but-failed, and
+        # why. `duel_calls` keeps its old meaning (answered rows) so every
+        # existing reader of the report is unaffected by the new row type.
+        "answered_calls": len(duels),
+        "failed_calls": len(failed),
+        "call_success_rate": (round(len(duels) / len(duels_all), 3)
+                              if duels_all else None),
+        "duel_failure_mix": fail_mix,
         "realized_closes": len(closes),
         "closes_with_duelist": matched,
         "duelist": {"model": duelist_config().get("model") or "(disabled)"},
@@ -1122,6 +1162,14 @@ def print_report() -> None:
     print(f"Model duel — {r['duel_calls']} paired call(s), "
           f"{r['realized_closes']} realized close(s), {r['closes_with_duelist']} with duelist verdict")
     print(f"  duelist model: {r['duelist']['model']}")
+    # Observability line (t_ea2c5fea): a duel report that only counts ANSWERED
+    # calls hides the outage case — measured 2026-11-07, the named seat was
+    # unreachable for ~18 h and the report simply showed fewer calls.
+    if r.get("failed_calls"):
+        _tot = r["duel_calls"] + r["failed_calls"]
+        _pct = (1 - (r.get("call_success_rate") or 0)) * 100
+        print(f"  failed calls: {r['failed_calls']}/{_tot} ({_pct:.0f}% of scans "
+              f"got no answer) — by reason: {r['duel_failure_mix']}")
     print(f"  verdict agreement: {a['agree']} agree / {a['split']} split ", end="")
     if a["rate"] is None:
         print("--")
