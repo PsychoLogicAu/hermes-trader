@@ -61,6 +61,17 @@ class GateContext:
         timestral_q10_path_pct: Optional[List[float]] = None,
         timestral_q90_path_pct: Optional[List[float]] = None,
         duelist_verdict: Optional[str] = None,
+        # The DUELIST's own confidence (t_848eb1c4). The live
+        # duelist_veto_gate never reads it — it is keyed on OPPOSITE-SIDE
+        # disagreement and escapes on the PRIMARY's conf. It is here for
+        # abstention_veto_gate, whose key is the second voice's conf on its
+        # own non-committal answer (measured 2026-11-06/07: the veto signal
+        # is CEILING-keyed — the value sits in LOW-conf abstentions, and a
+        # conf floor destroys the edge). Sourced from the same
+        # `duelist_at_entry` snapshot as duelist_verdict (research.py);
+        # default None = byte-identical for every other construction site,
+        # and the gate fails open on it.
+        duelist_confidence: Optional[float] = None,
         # Cohort admission (B.46): with-the-signal vwap entries carry the
         # cohort tag + answering model so the classic confidence gate can
         # apply the same model+cohort admission as the runner gate.
@@ -173,6 +184,10 @@ class GateContext:
         # maybe_execute. None = the duelist is disabled or failed — the
         # veto has no opinion and passes.
         self.duelist_verdict = duelist_verdict
+        # The duelist's OWN confidence (None = no verdict / older duel row).
+        # Consumed only by abstention_veto_gate; duelist_veto_gate ignores
+        # it (it escapes on the PRIMARY's conf).
+        self.duelist_confidence = duelist_confidence
         self.cohort_tag = cohort_tag
         self.primary_model = primary_model
         self.daily_move_pct = daily_move_pct
@@ -2256,6 +2271,129 @@ def duelist_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     return {"pass": False, "reason": reason}
 
 
+# Per-day would-block tally for abstention_veto_gate's flow cap. Module
+# state keyed by UTC date (trade logs are UTC, so the day boundary matches
+# the ledger's); the key rolls over by itself, so no cleanup task exists.
+# Tests reset it directly (tests/test_abstention_veto_gate.py).
+_abstention_veto_blocks: Dict[str, int] = {}
+
+
+def abstention_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Second-voice ABSTENTION veto (shadow-only as shipped, t_848eb1c4).
+
+    The other duelist gate — `duelist_veto_gate` — can only object when the
+    second model takes the OPPOSITE side. Measured 2026-11-06/07 on the
+    2026-10-20→11-06 window (72 executed entries, two full 205-scan passes,
+    qwen3.8-flash-next-iq3_s answering the duelist prompt): OPPOSITE-side
+    disagreement was **0/72 in BOTH passes**. What that voice actually does
+    is DECLINE to endorse the entry — and the veto value sits in its
+    LOW-confidence declines. This gate keys on exactly that.
+
+    KEY (ceiling, not floor): it fires when the duelist's own confidence in
+    its non-committal answer is `<= max_confidence`. A conf FLOOR is the
+    house pattern and it is WRONG here — it inverts this signal: pass1
+    `>= 0.55` fired 12× and netted **−$2.19**, while the 0.55 CEILING fired
+    42× at **+$21.22** (pass2: 44×, +$18.17; all four half-windows positive
+    in both passes, 40/46 rule-set overlap). Read it as "the second voice
+    was not even sure it was right to shrug".
+
+    ESCAPE (primary conviction, checked FIRST so its marker wins): the entry
+    passes when the PRIMARY's conf ≥ `escape_min_conf` OR its composite ≥
+    `escape_min_composite` — the same conviction-override shape as
+    `duelist_veto_gate`. With escape at 0.78/60 the flow cut drops from
+    58–61% of entries to 32–49% while keeping +$15–16 of the gross.
+
+    FLOW CAP (`max_blocks_per_day`, 0/absent = uncapped): the uncapped rule
+    vetoes over half the book, which is a flow-reducer long before it is an
+    edge. The counter is bumped for every would-block — INCLUDING shadow
+    ones — so the accrued cohort is what a live flip would actually have
+    blocked; a suppression is marked `via: "flow-cap"` and stays greppable.
+
+    SIZE OF THE PRIZE (why this ships shadow-only): most of the gross is
+    "the primary was already unconvincing" — the sub-0.65 admissions the
+    L0 config fix already closed (−$16.29 of the −$24.03 cohort book). The
+    voice's MARGINAL value is +$4.93 (pass1) / +$1.88 (pass2), i.e. 1–2
+    trades at the $2.52 risk unit: inside noise at n=72. Score any future
+    flip MARGINAL-over-L0, CI-excludes-0 in both passes, 4/4 half-window
+    signs, enrichment ≥1.15×, winners-forgone ≤60%, reject if one coin
+    carries it (XMR alone cost −8.6R in all three qwen arms), and on a
+    SECOND accrual window — the same abstention-keyed shape LOST money in
+    the 2026-09-03 headroom replay (blocked 27/32, blocked cohort +$0.57),
+    so the sign is regime-dependent. Evidence trail: t_4432a31a comments
+    9–12, skill `hermes-trader-llm-model-comparison` →
+    references/second-voice-veto-shape.md, scratch/_veto_rule_spec.md.
+
+    VERDICT SEMANTICS: "non-agreeing" = the duelist's answer is not the
+    entry's own side. OPPOSITE-side disagreement is delegated to
+    `duelist_veto_gate` (the two gates' would-block cohorts stay
+    separately attributable, so promoting one never double-counts the
+    other). Everything else — PASS (the abstention token), CLOSE, an
+    unrecognised token — counts as a declined endorsement.
+
+    Fail-safes (a data gap can never block): gate disabled; no duelist
+    verdict; NO duelist confidence (the field is new — a duel row written
+    before it existed, or a seat whose parser never emitted one); conf not
+    coercible to float. Passing results carry a `via` marker
+    (agree / opposite-side / conviction-escape / above-ceiling / flow-cap)
+    so the accrued corpus can separate "why it passed" without re-running
+    the rule.
+
+    SHADOW MODE (the shipped posture): with `shadow_mode` true (default)
+    the gate STRUCTURALLY returns pass=True and carries
+    `shadow_would_block`; the executor logs it loudly
+    (`[gate][ABSTENTION-VETO][SHADOW] WOULD HAVE BLOCKED …`) and the marker
+    rides the `gate_results` dict into the session-log `execute` event and
+    the `Trade result:` line — joinable to the ledger by analysis_id/coin/
+    side and to the duel JSONL by ts/coin. That accrual surface IS the
+    deliverable; no live flip is implied.
+    """
+    cfg = gate_cfg or {}
+    if not bool(cfg.get("enabled", False)):
+        return {"pass": True}
+    dl = ctx.duelist_verdict
+    if not dl:
+        return {"pass": True}
+    if ctx.duelist_confidence is None:
+        # No confidence recorded for this duel (a duel row written before
+        # the field existed, or a seat whose answer carried none): the voice
+        # has no measurable conviction, which is NOT an objection.
+        return {"pass": True}
+    try:
+        dl_conf = float(ctx.duelist_confidence)
+    except (TypeError, ValueError):
+        return {"pass": True}
+    dl_upper = str(dl).upper()
+    side_upper = str(ctx.trade_side or "").upper()
+    if dl_upper == side_upper:
+        return {"pass": True, "via": "agree"}
+    if {dl_upper, side_upper} == {"LONG", "SHORT"}:
+        # The duelist would trade AGAINST this entry — that objection is
+        # duelist_veto_gate's job, not this gate's.
+        return {"pass": True, "via": "opposite-side"}
+    esc_conf = float(cfg.get("escape_min_conf", 0.78) or 0.78)
+    esc_comp = float(cfg.get("escape_min_composite", 60.0) or 60.0)
+    if ctx.confidence >= esc_conf or ctx.composite_score >= esc_comp:
+        return {"pass": True, "via": "conviction-escape"}
+    max_conf = float(cfg.get("max_confidence", 0.55) or 0.55)
+    if dl_conf > max_conf:
+        return {"pass": True, "via": "above-ceiling"}
+    reason = (f"abstention_veto ({ctx.trade_side} entry, duelist said "
+              f"{dl_upper} at conf {dl_conf:.2f} <= {max_conf:.2f}; primary "
+              f"conf {ctx.confidence:.2f} < {esc_conf:.2f}, composite "
+              f"{ctx.composite_score:.1f} < {esc_comp:.0f})")
+    cap = int(cfg.get("max_blocks_per_day", 0) or 0)
+    if cap > 0:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if _abstention_veto_blocks.get(day, 0) >= cap:
+            return {"pass": True, "via": "flow-cap",
+                    "reason": f"abstention_veto suppressed by flow cap "
+                              f"({cap}/day): {reason}"}
+        _abstention_veto_blocks[day] = _abstention_veto_blocks.get(day, 0) + 1
+    if bool(cfg.get("shadow_mode", True)):
+        return {"pass": True, "reason": reason, "shadow_would_block": True}
+    return {"pass": False, "reason": reason}
+
+
 def _quiet_tape_variant(
     name: str,
     label: str,
@@ -2648,6 +2786,14 @@ def eval_all_gates(
     # gap can never block a trade.
     results["duelist_veto"] = duelist_veto_gate(
         ctx, effective_config.get("duelist_veto_gate") or {})
+    # Second-voice ABSTENTION veto (t_848eb1c4): the duelist DECLINED to
+    # endorse the entry and was unsure of its own shrug (its conf <= the
+    # ceiling), unless the primary's own conviction escapes it. The
+    # opposite-side shape above can never fire for this voice (0/72 in both
+    # measurement passes), so this is the gate that actually sees it.
+    # Shadow as shipped — the marker in gate_results IS the accrual.
+    results["abstention_veto"] = abstention_veto_gate(
+        ctx, effective_config.get("abstention_veto_gate") or {})
     # Forecast-agreement tail veto: chronos AND timesfm both adverse. Shadow
     # until shadow_mode is flipped (2026-09-02 sweep: the AND shape is the
     # most split-half-robust veto cell). Passes when either model's paths
