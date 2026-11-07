@@ -1373,6 +1373,24 @@ def _archive_record(
         return {}
 
 
+def _px_or_none(v: Any) -> float | None:
+    """A positive price scalar from a parsed verdict, else None.
+
+    Used for the duel row's bracket fields: `parse_verdict` leaves stop/tp
+    at 0.0 when the model gave no bracket, and a 0.0 in a price column is a
+    LIE the ruler would average (it reads as a real take-profit at zero).
+    None means "this voice proposed no bracket" and stays out of the math.
+    Accepts the string forms models emit ("123.45"); rejects NaN/inf.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")) or f <= 0:
+        return None
+    return f
+
+
 def _duelist_verdict(
     system_prompt: str,
     user_message: str,
@@ -1446,6 +1464,22 @@ def _duelist_verdict(
             "duelist_verdict": dl_parsed["verdict"],
             "duelist_confidence": dl_parsed["confidence"],
             "duelist_side": dl_parsed["side"],
+            # The BRACKET the voice itself proposed (t_848eb1c4, L2). The
+            # duel corpus already logged verdict/conf at ANY confidence;
+            # without these scalars the accrued corpus can only be priced on
+            # a fixed horizon, and the bracket first-touch ruler is what
+            # flipped the sole-voice verdict (fixed-4h +1.55pp vs own-bracket
+            # −0.34R/trade — scratch/_solevoice_ci.py, t_4432a31a). Read the
+            # SNAKE_CASE parsed keys: the model's JSON may say entryPx/stopPx
+            # and parse_verdict normalizes them, so a runner that asked for
+            # `entryPx` silently loses the ruler (it already did once).
+            # parse_verdict defaults entry_px to the perception mid, so a
+            # missing bracket reads as "entry at mid, no stop/tp" (0/absent →
+            # None here, never a fake 0.0 price). Log-only: nothing about the
+            # duelist's bracket executes.
+            "duelist_entry_px": _px_or_none(dl_parsed.get("entry_px")),
+            "duelist_stop_px": _px_or_none(dl_parsed.get("stop_px")),
+            "duelist_tp_px": _px_or_none(dl_parsed.get("tp_px")),
             "duelist_reasoning": (dl_parsed["reasoning"] or "")[:300],
             # Wall time of each LLM call (ms) — the same prompt to both
             # models, so latency is a directly comparable A/B dimension

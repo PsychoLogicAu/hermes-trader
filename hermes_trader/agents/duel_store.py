@@ -303,13 +303,23 @@ def effective_chat_template_kwargs(slot: str) -> Dict[str, Any]:
     """The slot's ``chat_template_kwargs``, passed VERBATIM to the model
     server in the POST body (e.g. ``{"enable_thinking": false}`` — disables a
     thinking model's thinking PER REQUEST instead of loading the model with
-    ``--llamacpp-args "--reasoning off"``). Nested-only:
-    ``llm.<slot>.chat_template_kwargs`` (no flat/env — the env vars are for
-    endpoint/key/model/budget, not template internals). Must be a dict —
-    anything else (and any config fault) degrades to {}, so the POST body is
-    byte-identical to the pre-feature default (fail-open, no-op). Hot, no
-    cache; a copy is returned so the body can never mutate the config dict."""
-    v = llm_slot(slot).get("chat_template_kwargs")
+    ``--llamacpp-args "--reasoning off"``). Nested slot key first, then the
+    model PROFILE named by ``llm.<slot>.model_profile`` (via
+    ``resolve_model_slot``, like model/sampling/max_tokens/base_url — inline
+    wins over the profile, and a seat with no profile is byte-identical).
+    No flat/env fallback: the env vars are for endpoint/key/model/budget, not
+    template internals. Must be a dict — anything else (and any config fault)
+    degrades to {}, so the POST body is byte-identical to the pre-feature
+    default (fail-open, no-op). Hot, no cache; a copy is returned so the body
+    can never mutate the config dict.
+    WHY the profile lookup matters (t_848eb1c4): a thinking-capable second
+    voice (qwen3.8-flash-next) answers in ``reasoning_content`` with EMPTY
+    ``content`` unless ``enable_thinking: false`` travels with the request;
+    ``call_duelist`` reads ``content``, sees no text, and writes NO duel row
+    — so a profile that names the model+sampling but whose template kwargs are
+    ignored silently starves the whole duelist corpus (0 rows, no error).
+    """
+    v = slot_get(slot, "chat_template_kwargs")
     return dict(v) if isinstance(v, dict) else {}
 
 
@@ -361,16 +371,38 @@ def duelist_config() -> Dict[str, Any]:
     `effective_duelist_model`) and is the only duelist-specific requirement —
     base_url/api_key fall back to the PRIMARY LLM's values when unset, so
     pointing the duelist at a differently-named model on the same server is
-    a one-line change. The model deliberately does NOT fall back to the
-    primary's model: a silent "duel the primary against itself" would double
-    LLM load with no A/B value — the feature is dormant until a duelist
-    model is named somewhere. max_tokens resolves the same layered way
+    a one-line change. The duelist MAY also name its own SERVER: a
+    `base_url` in `llm.duelist` or in the model profile its `model_profile`
+    names wins over the env layers (see the precedence note below) — a seat
+    served by a different box than the primary (the 2026-11-07 Strata second
+    voice) travels with its profile. The KEY never does: credentials stay in
+    .env.local. The model deliberately does NOT fall back to the primary's
+    model: a silent "duel the primary against itself" would double LLM load
+    with no A/B value — the feature is dormant until a duelist model is
+    named somewhere. max_tokens resolves the same layered way
     (`effective_duelist_max_tokens`).
     """
     model = effective_duelist_model()
+    # Endpoint precedence (t_848eb1c4): the seat's resolved slot first —
+    # `llm.duelist.base_url`, or the base_url of the model PROFILE that
+    # `llm.duelist.model_profile` names (resolve_model_slot merges it in),
+    # exactly like the decision_voice / primary_engine seats, so a second
+    # voice served by a DIFFERENT server than the primary travels with its
+    # profile instead of silently inheriting the primary's endpoint. Then
+    # the env layers (LLM_DUEL_BASE_URL → LLM_BASE_URL) and the code
+    # default, byte-identical to the pre-change behaviour for every seat
+    # that names no base_url (the live spark profile names none).
+    # A wrong-host duelist is a SILENT failure: call_duelist swallows the
+    # HTTP error, returns no text, and no duel row is written — so the
+    # abstention veto accrues nothing and still fails open. Naming the
+    # server in the profile is what makes the swap reviewable in git.
+    # No key in a profile file, ever: credentials stay in .env.local
+    # (LLM_DUEL_API_KEY), and a Strata-served seat needs that var set.
+    slot_url = str(slot_get("duelist", "base_url") or "").strip()
     return {
-        "base_url": _first_env(*_DUEL_URL_VARS)
-        or os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1"),
+        "base_url": (slot_url
+                     or _first_env(*_DUEL_URL_VARS)
+                     or os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1")),
         "api_key": _first_env(*_DUEL_KEY_VARS)
         or os.environ.get("LLM_API_KEY", os.environ.get("OPENROUTER_API_KEY", "")),
         "model": model or "",
