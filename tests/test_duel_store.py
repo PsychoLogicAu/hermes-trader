@@ -1379,6 +1379,20 @@ def test_no_fallback_block_means_no_backup(_seat_profiles):
     assert ds.effective_fallback_model() is None
 
 
+def test_backup_alone_does_not_enable_the_duelist(_seat_profiles, monkeypatch):
+    # The NAMED seat must exist. A backup-only config leaves the duelist dormant
+    # (same rule as effective_duelist_model refusing to inherit the primary's
+    # model): a second voice that only ever runs on the backup is a config error,
+    # not a way to enable the feature.
+    monkeypatch.delenv("LLM_DUEL_MODEL", raising=False)
+    monkeypatch.setenv("LLM_DUEL_BASE_URL", "http://backup.test:13305/api/v1")
+    (_seat_profiles / "only-backup.json").write_text(json.dumps({"model": "backup-model"}))
+    _write_duelist_slot(fallback={"model_profile": "only-backup"})
+    assert ds.effective_duelist_model() is None
+    assert ds.duelist_enabled() is False
+    assert ds.fallback_duelist_config() is not None  # resolvable, just never reached
+
+
 def test_backup_without_an_endpoint_is_disabled_not_defaulted(_seat_profiles, monkeypatch):
     # The one asymmetry with the primary seat: a named backup whose endpoint
     # nobody named is a CONFIG ERROR, and defaulting to the public OpenAI-compatible
