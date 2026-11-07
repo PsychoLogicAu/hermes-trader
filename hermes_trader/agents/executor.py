@@ -1549,6 +1549,13 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         timestral_q90_path_pct=_tms_q90p,
         duelist_verdict=_duelist_verdict,
         duelist_confidence=_duelist_conf,
+        # Which SEAT answered — `duelist_at_entry.model`, i.e. the model in the
+        # duel row, which under a seat-backup (`llm.duelist.fallback`) is not
+        # necessarily the seat `llm.duelist` names. abstention_veto_gate's
+        # ceiling is the second voice's OWN conf, so by the t_623a4dcf
+        # bar-ownership rule it is looked up in this seat's model profile
+        # (risk_gates.eval_all_gates). None = no duel row → gate fails open.
+        duelist_model=_duelist_at.get("model"),
         cohort_tag=analysis.get("cohort_tag"),
         primary_model=analysis.get("primary_model"),
         # State-admission clause (t_1999904f): the classic confidence gate

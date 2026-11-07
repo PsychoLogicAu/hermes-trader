@@ -72,6 +72,15 @@ class GateContext:
         # default None = byte-identical for every other construction site,
         # and the gate fails open on it.
         duelist_confidence: Optional[float] = None,
+        # Which duelist SEAT answered — the model name in the duel row
+        # (`duelist_at_entry.model`). Under a seat-backup
+        # (`llm.duelist.fallback`, t_848eb1c4) that is not necessarily the seat
+        # the config names, and a confidence CEILING is compared against the
+        # SECOND voice's own conf, so by the t_623a4dcf bar-ownership rule the
+        # ceiling is looked up in THIS seat's model profile. None = seat unknown
+        # → config block only (byte-identical for every other construction
+        # site).
+        duelist_model: Optional[str] = None,
         # Cohort admission (B.46): with-the-signal vwap entries carry the
         # cohort tag + answering model so the classic confidence gate can
         # apply the same model+cohort admission as the runner gate.
@@ -188,6 +197,7 @@ class GateContext:
         # Consumed only by abstention_veto_gate; duelist_veto_gate ignores
         # it (it escapes on the PRIMARY's conf).
         self.duelist_confidence = duelist_confidence
+        self.duelist_model = duelist_model
         self.cohort_tag = cohort_tag
         self.primary_model = primary_model
         self.daily_move_pct = daily_move_pct
@@ -2394,11 +2404,22 @@ def abstention_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResu
     esc_comp = float(cfg.get("escape_min_composite", 60.0) or 60.0)
     if ctx.confidence >= esc_conf or ctx.composite_score >= esc_comp:
         return {"pass": True, "via": "conviction-escape"}
-    max_conf = float(cfg.get("max_confidence", 0.55) or 0.55)
+    max_conf_raw = cfg.get("max_confidence", 0.55)
+    if max_conf_raw is None:
+        # An explicit `max_confidence: null` from a SEAT profile (see
+        # eval_all_gates' seat-keyed override): this voice has no fitted
+        # ceiling, and borrowing a bar measured on another seat's confidence
+        # distribution would fabricate a cohort. Fail open, separately
+        # greppable.
+        return {"pass": True, "via": "no-seat-bar",
+                "bar_source": cfg.get("bar_source", "seat-profile-null")}
+    max_conf = float(max_conf_raw or 0.55)
+    bar_source = str(cfg.get("bar_source", "config-block"))
     if dl_conf > max_conf:
-        return {"pass": True, "via": "above-ceiling"}
+        return {"pass": True, "via": "above-ceiling", "bar_source": bar_source}
     reason = (f"abstention_veto ({ctx.trade_side} entry, duelist said "
-              f"{dl_upper} at conf {dl_conf:.2f} <= {max_conf:.2f}; primary "
+              f"{dl_upper} at conf {dl_conf:.2f} <= {max_conf:.2f} "
+              f"[seat {ctx.duelist_model or 'unspecified'} bar={bar_source}]; primary "
               f"conf {ctx.confidence:.2f} < {esc_conf:.2f}, composite "
               f"{ctx.composite_score:.1f} < {esc_comp:.0f})")
     cap = int(cfg.get("max_blocks_per_day", 0) or 0)
@@ -2409,9 +2430,13 @@ def abstention_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResu
                     "reason": f"abstention_veto suppressed by flow cap "
                               f"({cap}/day): {reason}"}
         _abstention_veto_blocks[day] = _abstention_veto_blocks.get(day, 0) + 1
+    # `bar_source` rides the result (not just the reason prose) because the
+    # accrual is read from gate_results JSON: with a seat-backup the two
+    # cohorts are priced by different bars and must stay separable.
     if bool(cfg.get("shadow_mode", True)):
-        return {"pass": True, "reason": reason, "shadow_would_block": True}
-    return {"pass": False, "reason": reason}
+        return {"pass": True, "reason": reason, "bar_source": bar_source,
+                "shadow_would_block": True}
+    return {"pass": False, "reason": reason, "bar_source": bar_source}
 
 
 def _quiet_tape_variant(
@@ -2812,8 +2837,33 @@ def eval_all_gates(
     # opposite-side shape above can never fire for this voice (0/72 in both
     # measurement passes), so this is the gate that actually sees it.
     # Shadow as shipped — the marker in gate_results IS the accrual.
-    results["abstention_veto"] = abstention_veto_gate(
-        ctx, effective_config.get("abstention_veto_gate") or {})
+    #
+    # Seat-keyed ceiling (t_848eb1c4, option B): `max_confidence` is compared
+    # against the SECOND voice's own conf, so by the t_623a4dcf bar-ownership
+    # rule it belongs in THAT seat's model profile —
+    # `gate_bars.abstention_veto_gate.max_confidence`. With a seat-backup
+    # (`llm.duelist.fallback`) the answering seat can change mid-run, and a
+    # borrowed ceiling silently mis-prices the cohort: measured 2026-11-07 over
+    # the live duel log, ceiling 0.55 selects ~40% of qwen3.8-flash-next's
+    # non-agreeing answers but ~99% of Spark-X2.6's (44,017 of 44,592 — its
+    # abstention conf mass sits at 0.20/0.30/0.35/0.42), which degenerates into
+    # the flat PASS-keyed shape that LOST money in the 2026-09-03 headroom
+    # replay. ONLY the ceiling travels with the seat: the escape bars compare
+    # the PRIMARY's conf (they stay in the config block / the primary seat's
+    # profile) and `max_blocks_per_day` is book-wide. A seat profile may also
+    # say `max_confidence: null` = "no fitted ceiling for this voice" → the gate
+    # fails open with via: "no-seat-bar" instead of borrowing a bar. The result
+    # carries `bar_source` ("config-block" / "duelist-seat-profile") so the
+    # accrued cohorts are separable by which bar priced them.
+    av_cfg = dict(effective_config.get("abstention_veto_gate") or {})
+    if ctx.duelist_model:
+        dl_bars = (read_model_profile_for_model(str(ctx.duelist_model)) or {}).get("gate_bars")
+        if isinstance(dl_bars, dict) and isinstance(dl_bars.get("abstention_veto_gate"), dict):
+            seat_bars = dl_bars["abstention_veto_gate"]
+            if "max_confidence" in seat_bars:
+                av_cfg["max_confidence"] = seat_bars["max_confidence"]
+                av_cfg["bar_source"] = "duelist-seat-profile"
+    results["abstention_veto"] = abstention_veto_gate(ctx, av_cfg)
     # Forecast-agreement tail veto: chronos AND timesfm both adverse. Shadow
     # until shadow_mode is flipped (2026-09-02 sweep: the AND shape is the
     # most split-half-robust veto cell). Passes when either model's paths

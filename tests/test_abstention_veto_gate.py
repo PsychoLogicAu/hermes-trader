@@ -16,11 +16,13 @@ confidence = the voice has no objection), the INCLUSIVE `<=` ceiling
 boundary, the OPPOSITE-side delegation to duelist_veto_gate, escape
 precedence (the primary's conviction outranks the voice's hesitation, and
 its marker wins), the shadow marker (structurally passes), the per-day flow
-cap counting shadow would-blocks, and the eval_all_gates registration that
-puts the marker in `gate_results`.
+cap counting shadow would-blocks, the eval_all_gates registration that
+puts the marker in `gate_results`, and the seat-keyed ceiling (the bar lives
+in the ANSWERING seat's model profile — see the section at the bottom).
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -288,3 +290,121 @@ def test_eval_all_gates_without_config_block_is_inert():
     out = risk_gates.eval_all_gates(ctx, {"min_ai_confidence": 0.5},
                                     last_trade_time=None)
     assert out["results"]["abstention_veto"] == {"pass": True}
+
+
+# ── Seat-keyed ceiling (t_848eb1c4, option B) ──────────────────────────────
+# The ceiling is compared against the SECOND voice's own conf, so by the
+# t_623a4dcf bar-ownership rule it lives in that seat's model profile
+# (`gate_bars.abstention_veto_gate.max_confidence`), keyed by the ANSWERING
+# model — which under a seat-backup (`llm.duelist.fallback`) is not the seat
+# the config names. Measured 2026-11-07 over the live duel log: ceiling 0.55
+# selects ~40% of qwen3.8-flash-next's non-agreeing answers but ~99% of
+# Spark-X2.6's (44,017 of 44,592; its abstention conf mass sits at
+# 0.20/0.30/0.35/0.42) — a borrowed bar silently degenerates into the flat
+# PASS-keyed shape that LOST money in the 2026-09-03 replay. Only the ceiling
+# travels: the escape bars compare the PRIMARY's conf, and the flow cap is
+# book-wide.
+
+_BASE_CFG = {
+    "min_ai_confidence": 0.5,
+    "max_concurrent": 5,
+    "max_trade_notional_usd": 300,
+    "min_market_volume_usd": 1_000_000,
+    "coin_allowlist": [],
+    "coin_blocklist": [],
+    "cooldown_min": 0,
+    "max_crypto_long_correlated": 2,
+    "max_total_notional_pct": 1.0,
+    "counter_regime_min_conf": 0.0,
+    "block_counter_trend_bypass": False,
+}
+
+
+@pytest.fixture
+def seat_profiles(tmp_path, monkeypatch):
+    """Isolated MODEL_CONFIG_DIR for seat-bar lookups."""
+    from hermes_trader.agents import config_store
+    monkeypatch.setattr(config_store, "MODEL_CONFIG_DIR", str(tmp_path))
+    return tmp_path
+
+
+def _profile(tmp_path, fname, **keys):
+    (tmp_path / fname).write_text(json.dumps(keys))
+
+
+def _eval(ctx, gate_cfg):
+    return risk_gates.eval_all_gates(
+        ctx, dict(_BASE_CFG, abstention_veto_gate=dict(gate_cfg)),
+        last_trade_time=None)["results"]["abstention_veto"]
+
+
+def test_unprofiled_seat_uses_the_config_block_bar(seat_profiles):
+    ctx = _ctx(verdict="PASS", duelist_conf=0.45)
+    ctx.duelist_model = "voice-without-a-profile"
+    r = _eval(ctx, CFG_SHADOW)
+    assert r["shadow_would_block"] is True
+    assert r["bar_source"] == "config-block"
+
+
+def test_seat_profile_ceiling_overrides_the_config_block(seat_profiles):
+    # 0.45 is under the config block's 0.55 but over this seat's 0.20 — the
+    # seat's own bar must win, and the result must SAY which bar priced it.
+    _profile(seat_profiles, "voice-b.json", model="voice-b",
+             gate_bars={"abstention_veto_gate": {"max_confidence": 0.20}})
+    ctx = _ctx(verdict="PASS", duelist_conf=0.45)
+    ctx.duelist_model = "voice-b"
+    r = _eval(ctx, CFG_SHADOW)
+    assert r["pass"] is True and r["via"] == "above-ceiling"
+    assert r["bar_source"] == "duelist-seat-profile"
+    assert not risk_gates._abstention_veto_blocks  # a pass costs no cap slot
+
+
+def test_seat_ceiling_fires_at_its_own_value_not_the_configs(seat_profiles):
+    _profile(seat_profiles, "voice-b.json", model="voice-b",
+             gate_bars={"abstention_veto_gate": {"max_confidence": 0.30}})
+    ctx = _ctx(verdict="PASS", duelist_conf=0.25)
+    ctx.duelist_model = "voice-b"
+    r = _eval(ctx, CFG_SHADOW)
+    assert r["shadow_would_block"] is True
+    assert "0.25 <= 0.30" in r["reason"]
+    assert "bar=duelist-seat-profile" in r["reason"]
+
+
+def test_null_seat_ceiling_fails_open_as_no_seat_bar(seat_profiles):
+    # An explicitly unfitted voice must NOT inherit another seat's bar: the
+    # result is a separately greppable fail-open, and the flow cap stays clean.
+    _profile(seat_profiles, "spark-x.json", model="spark-x",
+             gate_bars={"abstention_veto_gate": {"max_confidence": None}})
+    ctx = _ctx(verdict="PASS", duelist_conf=0.05)
+    ctx.duelist_model = "spark-x"
+    r = _eval(ctx, CFG_SHADOW)
+    assert r["pass"] is True and r["via"] == "no-seat-bar"
+    assert "shadow_would_block" not in r
+    assert not risk_gates._abstention_veto_blocks
+
+
+def test_seat_profile_cannot_move_the_escape_bars(seat_profiles):
+    # Ownership rule: escape_min_* compare the PRIMARY's conf, so a duelist
+    # seat profile naming them must be ignored (otherwise a seat swap silently
+    # re-tunes the primary's conviction escape).
+    _profile(seat_profiles, "voice-b.json", model="voice-b",
+             gate_bars={"abstention_veto_gate": {
+                 "max_confidence": 0.55, "escape_min_conf": 0.10,
+                 "escape_min_composite": 0, "shadow_mode": False}})
+    ctx = _ctx(verdict="PASS", duelist_conf=0.45, confidence=0.70, composite=40.0)
+    ctx.duelist_model = "voice-b"
+    r = _eval(ctx, CFG_SHADOW)
+    assert r["pass"] is True                      # still shadow, escapes intact
+    assert r["shadow_would_block"] is True        # 0.70 < 0.78 escape bar
+
+
+def test_matching_is_by_answering_model_not_profile_file_name(seat_profiles):
+    # The duel row carries the MODEL name; profiles are keyed by file name, so
+    # the lookup must resolve through the profile's "model" field (the same
+    # weld as read_model_profile_for_model's primary-seat path).
+    _profile(seat_profiles, "qwen38-flash-duelist.json",
+             model="Voice C", gate_bars={"abstention_veto_gate": {"max_confidence": 0.10}})
+    ctx = _ctx(verdict="PASS", duelist_conf=0.45)
+    ctx.duelist_model = "voice c"
+    r = _eval(ctx, CFG_SHADOW)
+    assert r["via"] == "above-ceiling" and r["bar_source"] == "duelist-seat-profile"
