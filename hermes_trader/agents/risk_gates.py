@@ -2981,6 +2981,16 @@ def eval_all_gates(
 # plausible 1-8/day range the accrual review assumes.
 _as_lane_last_emit: Dict[str, float] = {}
 
+# Whipsaw guard TAGS (t_59ab9009, shadow v1 — recorded, never blocking; the
+# live-admission use is scoped in the board task, prospective accrual first):
+# whip_extreme — BTC 24h drift within this many pp of its own 12h minimum,
+# i.e. the tape is making its worst move RIGHT NOW (flash bottom; the 11-09
+# 07:05-07:55 cluster, 8x max_loss, had btc24 == its 12h min at entry —
+# scratch/_whipsaw_scoping.py catches that cluster at every swept threshold).
+# whip_bounce — BTC 1h change at/above this, the V is already underway.
+_WHIP_EXTREME_PP = 0.10
+_WHIP_BOUNCE_PP = 0.50
+
 
 def aligned_short_lane_emit(
     candidates: List[Dict[str, Any]],
@@ -3006,9 +3016,14 @@ def aligned_short_lane_emit(
     seat was actually asked this cycle (conf-if-asked).
 
     Anti-rules are RECORDED in anti=, never blocking: nearx (the near-cross
-    bucket) and tapeup_only (an aligned early-long with NO struct support
-    while BTC 24h drift >= 0 — the tapeup-only anti-cell from the
-    early-upswing decomp).
+    bucket), tapeup_only (an aligned early-long with NO struct support while
+    BTC 24h drift >= 0 — the tapeup-only anti-cell from the early-upswing
+    decomp), whip_extreme (aligned_short while the BTC 24h drift sits within
+    _WHIP_EXTREME_PP of its own 12h minimum — a crash in progress / flash
+    bottom, the 11-09 stop-out signature, t_59ab9009) and whip_bounce
+    (aligned_short while BTC 1h change >= _WHIP_BOUNCE_PP — the V-rebound is
+    already underway). Missing tape keys degrade to untagged, never to a
+    signal.
 
     Caller owns failure isolation (the trading loop wraps this in try/except);
     internally a btc_tape data gap degrades to `btc_tape=n/a`, never a skip.
@@ -3070,6 +3085,14 @@ def aligned_short_lane_emit(
         if (cand.get("lane") == "early_long" and "aligned" in variant
                 and not struct and tape is not None and tape["drift"] >= 0):
             antis.append("tapeup_only")
+        if cand.get("lane") == "aligned_short" and tape is not None:
+            _d24, _dmin = tape.get("drift"), tape.get("drift_min12")
+            if (_d24 is not None and _dmin is not None
+                    and _d24 <= _dmin + _WHIP_EXTREME_PP):
+                antis.append("whip_extreme")
+            _b1h = tape.get("btc1h")
+            if _b1h is not None and _b1h >= _WHIP_BOUNCE_PP:
+                antis.append("whip_bounce")
         # probe records carry lowercase short/long; the line + every
         # downstream parse (test LINE_RE, review script) is UPPERCASE.
         side = str(cand.get("side") or "short").upper()
