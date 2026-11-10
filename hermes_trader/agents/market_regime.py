@@ -249,6 +249,10 @@ def regime_snapshot() -> Dict[str, Dict[str, object]]:
 _TAPE_TTL_S = 300  # 5min — same cadence as REGIME_TTL_S
 _TAPE_MIN_BARS = 200  # fail-safe: < ~16h of 5m history → no opinion
 _TAPE_NET6H_BARS = 72  # 6h of 5m bars — the lane fast-arm window (t_2e23804b)
+_TAPE_WINDOW_BARS = 290  # ~24h of 5m bars — the drift/vol window (289 steps)
+_TAPE_WHIP_LOOKBACK_BARS = 144  # 12h — trail window of the drift_min12 min (t_59ab9009)
+_TAPE_B1H_STEPS = 12  # 12 × 5m bars = 1h — the bounce view (t_59ab9009)
+_TAPE_FETCH_BARS = _TAPE_WINDOW_BARS + _TAPE_WHIP_LOOKBACK_BARS  # 434 = 36h
 _tape_cache: Tuple[Optional[Dict[str, Any]], float] = (None, 0.0)
 
 
@@ -469,7 +473,8 @@ def _detect_cached(proxy: str) -> Optional[str]:
 
 
 def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
-    """Trailing-24h BTC broad-tape activity: {"vol": %, "drift": %, "net6h": %|None}.
+    """Trailing-24h BTC broad-tape activity: {"vol", "drift", "net6h",
+    "btc1h", "drift_min12"} (%, None where noted).
 
     vol    = pstdev of 5m log-returns × sqrt(288) × 100 (dailyized %),
     drift  = (last close / first close − 1) × 100 (% over the ~24h window),
@@ -477,15 +482,25 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
              momentum view of the SAME 290 bars (no extra price call). Added
              2026-10-30 for the aligned-short lane's fast arm (board
              t_2e23804b): the 24h drift is a lagging confirmation that can sit
-             9h behind a fresh dump, the 6h net is the onset trigger. None if
-             the window is too short; every pre-existing consumer reads only
-             vol/drift, so an extra key is inert for them.
+             9h behind a fresh dump, the 6h net is the onset trigger.
+    btc1h  = (last close / close 12 bars back − 1) × 100 — the bounce view
+             (whip_bounce guard input, t_59ab9009).
+    drift_min12 = min of the SAME 24h-drift reading over the last 12h of
+             eval points (drift at k for k in the trailing 144 bars). When
+             drift ≈ drift_min12 the tape is at the EXTREME of its own day —
+             a crash in progress / flash bottom, the regime where aligned
+             shorts stop out on V-rebounds (11-09 cluster, t_1f3114cc); when
+             drift sits well above it, the drop is a day old and grinding.
+             None if history is shorter than the 36h needed to trail it —
+             every pre-existing consumer reads vol/drift (net6h/btc1h/
+             drift_min12 are inert extras), and consumers of the new keys
+             must treat None as no-opinion, never as a signal.
 
-    Both are lookback-only (no lookahead beyond the still-forming last
-    5m bar's close, which is the live price). Returns None on a data gap
-    (fetch failure or insufficient history) — the consuming gate MUST pass
-    with no opinion: a data gap can never block a trade. Cached for
-    `_TAPE_TTL_S`; `force=True` bypasses the cache (tests / operator).
+    All lookback-only (no lookahead beyond the still-forming last 5m bar's
+    close, which is the live price). Returns None on a data gap (fetch
+    failure or insufficient history) — the consuming gate MUST pass with no
+    opinion: a data gap can never block a trade. Cached for `_TAPE_TTL_S`;
+    `force=True` bypasses the cache (tests / operator).
     """
     global _tape_cache
     now = time.time()
@@ -493,7 +508,7 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     if not force and cached is not None and (now - ts) < _TAPE_TTL_S:
         return cached
     try:
-        candles = fetch_hl_candles(CRYPTO_PROXY, interval="5m", count=290)
+        candles = fetch_hl_candles(CRYPTO_PROXY, interval="5m", count=_TAPE_FETCH_BARS)
     except Exception as e:
         logger.warning(f"[regime] tape-activity fetch failed for {CRYPTO_PROXY}: {e}")
         return None
@@ -502,12 +517,23 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     closes = [float(c.c) for c in candles if float(c.c) > 0]
     if len(closes) < _TAPE_MIN_BARS:
         return None
-    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+    w = closes[-_TAPE_WINDOW_BARS:] if len(closes) >= _TAPE_WINDOW_BARS else closes
+    rets = [math.log(w[i] / w[i - 1]) for i in range(1, len(w))]
     vol = statistics.pstdev(rets) * math.sqrt(288) * 100
-    drift = (closes[-1] / closes[0] - 1) * 100
-    net6h = ((closes[-1] / closes[-_TAPE_NET6H_BARS - 1] - 1) * 100
-             if len(closes) > _TAPE_NET6H_BARS else None)
-    _tape_cache = ({"vol": vol, "drift": drift, "net6h": net6h}, now)
+    drift = (w[-1] / w[0] - 1) * 100
+    net6h = ((w[-1] / w[-_TAPE_NET6H_BARS - 1] - 1) * 100
+             if len(w) > _TAPE_NET6H_BARS else None)
+    btc1h = ((w[-1] / w[-_TAPE_B1H_STEPS - 1] - 1) * 100
+             if len(w) > _TAPE_B1H_STEPS else None)
+    # drift at the same 289-step offset, at each eval point in the last 12h
+    steps = _TAPE_WINDOW_BARS - 1
+    drift_min12 = None
+    if len(closes) >= steps + 1 + _TAPE_WHIP_LOOKBACK_BARS:
+        drift_min12 = min(
+            (closes[k] / closes[k - steps] - 1) * 100
+            for k in range(len(closes) - _TAPE_WHIP_LOOKBACK_BARS, len(closes)))
+    _tape_cache = ({"vol": vol, "drift": drift, "net6h": net6h,
+                    "btc1h": btc1h, "drift_min12": drift_min12}, now)
     return _tape_cache[0]
 
 
@@ -516,7 +542,7 @@ def tape_eval(scalars: Optional[Dict[str, Any]],
     """Which tape STATE clause fires, evaluated the same way everywhere.
 
     Pure — no I/O, no config singleton. Takes the scalars from
-    ``btc_tape_activity()`` ({"vol","drift","net6h"}) plus a config sub-block
+    ``btc_tape_activity()`` ({"vol","drift","net6h",...}) plus a config sub-block
     and answers the clause questions, so every tape-armed consumer (the
     aligned-short lane arm, board t_2e23804b, and later the state_admission
     band, board t_860f95f8) speaks ONE vocabulary and ONE boundary convention

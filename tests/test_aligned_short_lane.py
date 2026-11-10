@@ -385,10 +385,12 @@ CAND_L = [{"coin": "LONGC", "ts": 1792600000001, "mid": 9.0, "comp": 60.0,
 
 def _emit_lane(monkeypatch, caplog, cands=None, cfg=None,
                open_coins=frozenset(), slots_used=2, max_slots=8, conf=None,
-               tape_drift=-4.2, tape_vol=3.1):
+               tape_drift=-4.2, tape_vol=3.1, tape_extra=None):
     from hermes_trader.agents import market_regime
+    _t = {"vol": tape_vol, "drift": tape_drift}
+    _t.update(tape_extra or {})
     monkeypatch.setattr(market_regime, "btc_tape_activity",
-                        lambda force=False: {"vol": tape_vol, "drift": tape_drift})
+                        lambda force=False: _t)
     caplog.set_level("WARNING", logger="hermes_trader.agents.risk_gates")
     return risk_gates.aligned_short_lane_emit(
         cands if cands is not None else list(CAND),
@@ -509,6 +511,41 @@ class TestEmit:
         line = [r.getMessage() for r in caplog.records
                 if "WOULD ADMIT" in r.getMessage()][0]
         assert "anti=-" in line and "struct_flags=trendFlip1h" in line
+
+    # --- whip_* tags (t_59ab9009): recorded, never blocking ---------------
+    def _whip_line(self, caplog):
+        return [r.getMessage() for r in caplog.records
+                if "WOULD ADMIT" in r.getMessage()][0]
+
+    def test_anti_whip_extreme_tagged(self, monkeypatch, caplog):
+        # drift -4.2 within 0.10pp of its 12h min (-4.15): crash in progress
+        assert self._emit(monkeypatch, caplog,
+                          tape_extra={"drift_min12": -4.15}) == 1
+        assert "whip_extreme" in self._whip_line(caplog)
+
+    def test_no_whip_extreme_when_drop_is_a_day_old(self, monkeypatch, caplog):
+        # min -6.5 was 12h ago; current -4.2 sits above -> grind, no tag
+        assert self._emit(monkeypatch, caplog,
+                          tape_extra={"drift_min12": -6.5}) == 1
+        assert "anti=-" in self._whip_line(caplog)
+
+    def test_anti_whip_bounce_tagged(self, monkeypatch, caplog):
+        assert self._emit(monkeypatch, caplog,
+                          tape_extra={"drift_min12": -6.5, "btc1h": 0.6}) == 1
+        assert "whip_bounce" in self._whip_line(caplog)
+
+    def test_whip_keys_absent_is_inert(self, monkeypatch, caplog):
+        # Old tape fixture shape (no new keys): line stays byte-identical
+        # to pre-guard output — None is no-opinion, never a signal.
+        assert self._emit(monkeypatch, caplog) == 1
+        assert "anti=-" in self._whip_line(caplog)
+
+    def test_whip_tags_never_reach_early_long(self, monkeypatch, caplog):
+        # guard is scoped to the aligned_short cell; even an extreme tape
+        # must not whip-tag the early_long lane
+        assert self._emit(monkeypatch, caplog, cands=[dict(CAND_L[0])],
+                          tape_extra={"drift_min12": -4.15, "btc1h": 0.9}) == 1
+        assert "anti=-" in self._whip_line(caplog)
 
 
 # ── emitter: LANE PRIORITY (slot order across the two lanes) ───────────────
@@ -918,10 +955,61 @@ class TestTapeNet6h:
 
     def test_vol_and_drift_keys_unchanged(self, monkeypatch):
         tape = self._tape(monkeypatch, [100.0 + (i % 3) for i in range(290)])
-        assert set(tape) == {"vol", "drift", "net6h"}
+        assert set(tape) == {"vol", "drift", "net6h", "btc1h", "drift_min12"}
         # first close 100.0, last (i=289, 289%3==1) 101.0 -> +1.0% over 24h
         assert tape["vol"] > 0 and tape["drift"] == pytest.approx(1.0)
         assert tape["net6h"] == pytest.approx(0.0)   # 72 bars = 24 cycles, net 0
+        assert tape["btc1h"] == pytest.approx(0.0)   # 12 bars = 4 cycles, net 0
+        # 290 bars < 434 needed to trail the 12h min: degrade to None, not a signal
+        assert tape["drift_min12"] is None
+
+
+class TestTapeWhipFeatures:
+    """btc1h + drift_min12 (t_59ab9009 whipsaw guard inputs) come from the
+    SAME fetch (434 bars = 24h window + 12h trail): drift_min12 is the
+    trailing-12h minimum of the same 24h-drift reading. Fresh crash:
+    drift == drift_min12 (at the extreme). V already rebound: drift sits
+    above it."""
+
+    def _tape(self, monkeypatch, closes):
+        from hermes_trader.agents import market_regime as mr
+        candles = [Candle(t=i * 300_000, o=c, h=c, l=c, c=c, v=1.0)
+                   for i, c in enumerate(closes)]
+        monkeypatch.setattr(mr, "fetch_hl_candles",
+                            lambda coin, interval="5m", count=290: candles)
+        monkeypatch.setattr(mr, "_tape_cache", (None, 0.0))
+        res = mr.btc_tape_activity(force=True)
+        assert res is not None
+        return res
+
+    def test_fresh_crash_is_at_the_extreme(self, monkeypatch):
+        closes = [100.0] * 434
+        for i in range(434 - 289, 434):     # -4% dump completing right now
+            closes[i] = 96.0
+        tape = self._tape(monkeypatch, closes)
+        assert tape["drift"] == pytest.approx(-4.0)
+        assert tape["drift_min12"] == pytest.approx(-4.0)   # min == current
+        assert tape["btc1h"] == pytest.approx(0.0)
+
+    def test_old_v_keeps_drift_above_the_min(self, monkeypatch):
+        closes = [100.0] * 434
+        for i in range(145, 362):           # -5% crash ~24h ago...
+            closes[i] = 95.0
+        for i in range(362, 434):           # ...rebounded 6h+ ago
+            closes[i] = 100.0
+        tape = self._tape(monkeypatch, closes)
+        assert tape["drift"] == pytest.approx(0.0)
+        assert tape["drift_min12"] == pytest.approx(-5.0)   # grind, not extreme
+
+    def test_btc1h_measures_the_last_12_bars_only(self, monkeypatch):
+        closes = [100.0] * 434
+        for i in range(434 - 12, 434):      # +1% bounce inside the last hour
+            closes[i] = 101.0
+        tape = self._tape(monkeypatch, closes)
+        assert tape["btc1h"] == pytest.approx(1.0)
+        # the bounce is inside the 24h window too: drift sits above the
+        # 12h-trail min only at the newest eval points — sanity, not a signal
+        assert tape["drift_min12"] is not None and tape["drift_min12"] <= tape["drift"]
 
 
 class TestLaneCohortWeld:
