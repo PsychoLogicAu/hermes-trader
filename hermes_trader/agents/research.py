@@ -2144,6 +2144,100 @@ def parse_verdict(
     }
 
 
+# ── [tape-state] shadow accrual line (t_12707dad, 2026-11-09) ───────────
+# Log-only regime gauge for QUIET-TAPE counterfactuals. The 2026-11-09 TV
+# quiet-tape scan (scratch/tv_scan leaderboard, 12 reps, zero OOS-positive)
+# showed every quiet-tape ENTRY mechanism dies under the live exit frame;
+# what regime meters CAN provide is context the LLM currently lacks —
+# per-coin RELATIVE quietness (quiet_tape_gate only knows absolute
+# 24h vol/drift) and whether a quiet box is coiled or already broken.
+# Population: every research() call (thin-history skips excluded), i.e. the
+# same decision-prompt cohort the setup-shadow join uses. NEVER enters the
+# state dict / prompt (would contaminate the counterfactual). Constants are
+# the TV sources' own math, deliberately hardcoded (flight recorder, not a
+# knob — [setup-shadow] pattern):
+#   atrp  = ATR14/close, percentile-rank vs its own 1h history
+#           (rxrbnfrt percentrank(250); our fetch is 100 bars -> window 80)
+#   box   = wtNyHWfO quiet range: 12-bar 1h range <= 2.5 x ATR14, edges
+#           frozen at the forming bar; QUIET / BROKE_UP / BROKE_DOWN / NONE
+TAPE_ATR_PERIOD = 14
+TAPE_PCTRANK_WINDOW = 80
+TAPE_BOX_BARS = 12
+TAPE_BOX_ATR_MAX = 2.5
+TAPE_BOX_LOOKBACK = 24
+TAPE_MIN_BARS = 40
+
+
+def _tape_state_line(coin: str, c1h: List[Candle]) -> Optional[str]:
+    """Return the [tape-state] accrual line, or None when not computable.
+
+    Snapshot gauge over the fetched 1h series (confirmed bars; the trailing
+    forming bar is treated as 'now' — a gauge, not a backtest signal).
+    Pure: reads only, mutates nothing.
+    """
+    n = len(c1h)
+    if n < TAPE_MIN_BARS:
+        return None
+    atrr = atr(c1h, TAPE_ATR_PERIOD)
+    closes = [candle_val(c, "c") for c in c1h]
+    hi = [candle_val(c, "h") for c in c1h]
+    lo = [candle_val(c, "l") for c in c1h]
+    i = n - 1
+    if atrr[i] is None or math.isnan(atrr[i]) or closes[i] <= 0:
+        return None
+    atrp = [
+        (atrr[j] / closes[j] * 100.0)
+        if atrr[j] is not None and not math.isnan(atrr[j]) and closes[j] > 0
+        else None
+        for j in range(n)
+    ]
+    cur = atrp[i]
+    if cur is None:
+        return None
+    cur_f: float = cur
+    w_start = max(TAPE_ATR_PERIOD, i - TAPE_PCTRANK_WINDOW + 1)
+    window: List[float] = [
+        x for x in (atrp[j] for j in range(w_start, i + 1)) if x is not None
+    ]
+    if len(window) < 20:
+        return None
+    pctrank = round(100.0 * sum(1 for v in window if v <= cur_f) / len(window))
+
+    box_state, box_age, edge_up, edge_dn = "NONE", None, None, None
+    # Box candidates are evaluated up to bar i-1 only: if bar i's own extremes
+    # joined the edges, a break could never register (high >= close always).
+    # So: most recent quiet box formed BEFORE the current bar, current close
+    # measured against it — QUIET (inside), BROKE_UP/DOWN (outside), NONE.
+    for j in range(i - 1, max(i - TAPE_BOX_LOOKBACK, TAPE_BOX_BARS - 1) - 1, -1):
+        if atrr[j] is None or math.isnan(atrr[j]):
+            continue
+        seg_h = max(hi[j - TAPE_BOX_BARS + 1: j + 1])
+        seg_l = min(lo[j - TAPE_BOX_BARS + 1: j + 1])
+        if (seg_h - seg_l) <= TAPE_BOX_ATR_MAX * atrr[j]:
+            box_age = i - j
+            if closes[i] > seg_h:
+                box_state = "BROKE_UP"
+            elif closes[i] < seg_l:
+                box_state = "BROKE_DOWN"
+            else:
+                box_state = "QUIET"
+            edge_up = (seg_h - closes[i]) / closes[i] * 100.0
+            edge_dn = (closes[i] - seg_l) / closes[i] * 100.0
+            break
+
+    parts = [
+        f"[tape-state] {coin}",
+        f"atrpct={cur:.2f}",
+        f"pctrank={pctrank}",
+        f"box={box_state}",
+    ]
+    if box_age is not None:
+        parts.append(f"age={box_age}")
+        parts.append(f"up={edge_up:+.2f}%")
+        parts.append(f"dn={edge_dn:+.2f}%")
+    return " ".join(parts)
+
+
 def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     """Full AI research pipeline for a perception — returns an analysis dict."""
     c1h = fetch_hl_candles(coin, "1h", 100)
@@ -2182,6 +2276,17 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
     tf1h = _compute_indicators(c1h)
     tf4h = _compute_indicators(c4h)
     tf1d = _compute_indicators(c1d)
+
+    # [tape-state] shadow accrual (t_12707dad): ONE emit owner; log-only,
+    # never touches the prompt/state dicts (prompt invariance proven by
+    # prompt-log grep after deploy). Fail-soft: a gauge fault never costs
+    # the decision.
+    try:
+        _ts_line = _tape_state_line(coin, c1h)
+        if _ts_line:
+            logger.info(_ts_line)
+    except Exception:  # noqa: BLE001
+        pass
 
     config = read_agent_config()
     mode = str(config.get("mode", "OFF"))
