@@ -92,7 +92,8 @@ class TestFlipTracker:
         assert perception.dn_burst_count(3600.0, now=t0 + 180) == 2
         assert perception.dn_flip_age_s("X", now=t0 + 240) == 60.0
         assert perception.dn_flip_age_s("NOPE", now=t0 + 240) is None
-        # window edge: first flip (t0) falls out of a 30-min window at t0+240
+        # window edge: both flips (t0, t0+180) are still INSIDE a 30-min
+        # window at t0+240; they fall out only past t0+1800
         assert perception.dn_burst_count(1800.0, now=t0 + 240) == 2
 
     def test_other_arms_ignored(self):

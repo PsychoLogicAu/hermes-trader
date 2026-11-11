@@ -445,9 +445,15 @@ def note_dn_arm_flips(hits: List[TriggerHit], coin: str,
 
 def dn_burst_count(window_s: float = 1800.0,
                    now: Optional[float] = None) -> int:
-    """DN flips across the universe in the trailing window (default 30m)."""
+    """DN flips across the universe in the trailing window (default 30m).
+    NOTE: event log prunes at a 1h cutoff — window_s > 3600 undercounts
+    silently; support wider windows by raising the prune cutoff too.
+    Snapshot (tuple) before summing: scan-pool threads append/popleft
+    concurrently and CPython raises RuntimeError on deque-mutation-during-
+    iteration (reviewer stress-reproduced); the snapshot removes even the
+    try/except degrade-to-dash."""
     now = time.time() if now is None else now
-    return sum(1 for t, _c in _dn_flip_events if t >= now - window_s)
+    return sum(1 for t, _c in tuple(_dn_flip_events) if t >= now - window_s)
 
 
 def dn_flip_age_s(coin: str, now: Optional[float] = None) -> Optional[float]:

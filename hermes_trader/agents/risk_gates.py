@@ -3094,7 +3094,9 @@ def aligned_short_lane_emit(
             if _b1h is not None and _b1h >= _WHIP_BOUNCE_PP:
                 antis.append("whip_bounce")
         # Breadth-onset shadow TAGS (t_d8b728bb, record-only, hot-rollback
-        # key aligned_short_lane.breadth_tags=false): burstcnt = DN momentum
+        # key aligned_short_lane.breadth_tags=false — the key gates the TAGS
+        # only; the perception flip-tracker bookkeeping keeps running either
+        # way, intended so a re-enable starts warm): burstcnt = DN momentum
         # flips across the universe in the trailing 30min (breadth thrust —
         # flips cluster on dump days and LEAD the drift band arming,
         # scratch/_breadth_onset.py: from that vantage med MFE12 -3.6% vs the
