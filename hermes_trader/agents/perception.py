@@ -14,6 +14,7 @@ import os
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -409,6 +410,52 @@ def _momentum_shadow_line(coin: str, up_hit: TriggerHit,
             f"live={live_side} ts={ts_move:+.1f}%/{ts_side}")
 
 
+# ── DN-arm flip event tracker (t_d8b728bb, breadth-onset shadow accrual) ──
+# Detects per-coin flat->DN transitions of the downtrendMomentum arm across
+# the universe scan. The lane emitter reads them for the burstcnt=/flip_age_m=
+# tags on WOULD ADMIT lines (RECORD-ONLY — never affects firing, never
+# blocks). Rationale: DN flips across many coins cluster on dump days and
+# LEAD the BTC 24h-drift band arming; from that vantage the leg is ~2x
+# deeper (med MFE12 -3.6% vs the lane's post-plunge ~-1.5, 9/9-candidate
+# offline sample, scratch/_breadth_onset.py — suggestion-grade, prospective
+# accrual is the validator). GIL-safe best-effort: coin scans run in a pool
+# and a miscounted tag degrades the tag, never a trade decision.
+_dn_arm_prev: Dict[str, bool] = {}
+_dn_flip_at: Dict[str, float] = {}
+_dn_flip_events: "deque" = deque(maxlen=1024)
+
+
+def note_dn_arm_flips(hits: List[TriggerHit], coin: str,
+                      now: Optional[float] = None) -> None:
+    """Call once per coin-scan with that scan's trigger hits; records
+    flat->DN transitions (and DN->flat resets) for the breadth tags."""
+    dn = next((h for h in hits if h.get("name") == "downtrendMomentum"), None)
+    if dn is None:
+        return
+    now = time.time() if now is None else now
+    fired = bool(dn.get("fired"))
+    if fired and not _dn_arm_prev.get(coin, False):
+        _dn_flip_at[coin] = now
+        _dn_flip_events.append((now, coin))
+        cutoff = now - 3600.0
+        while _dn_flip_events and _dn_flip_events[0][0] < cutoff:
+            _dn_flip_events.popleft()
+    _dn_arm_prev[coin] = fired
+
+
+def dn_burst_count(window_s: float = 1800.0,
+                   now: Optional[float] = None) -> int:
+    """DN flips across the universe in the trailing window (default 30m)."""
+    now = time.time() if now is None else now
+    return sum(1 for t, _c in _dn_flip_events if t >= now - window_s)
+
+
+def dn_flip_age_s(coin: str, now: Optional[float] = None) -> Optional[float]:
+    """Seconds since THIS coin's own last DN flip; None when untracked."""
+    t = _dn_flip_at.get(coin)
+    return None if t is None else (time.time() if now is None else now) - t
+
+
 def resolve_scan_gate(agent_cfg: Optional[Dict[str, Any]],
                       static_default: float) -> float:
     """Resolve the scan composite gate per tick (t_b1d64fe2).
@@ -534,6 +581,11 @@ def _scan_single_market(
                                            thresholds.get("trendMomentumPct", 3.0),
                                            theilsen_mode=_mts_mode),
         ]
+
+        # Breadth-onset tracker feed (t_d8b728bb): record DN-arm transitions
+        # on EVERY scan (independent of theilsen_mode — the fired state of the
+        # live arms is what the burst tags count). Record-only.
+        note_dn_arm_flips(hits, market["coin"])
 
         # Momentum arm-comparison accrual (t_62c58463): ONE [momentum-shadow]
         # line per scan where either arm fires or the arms disagree — grep

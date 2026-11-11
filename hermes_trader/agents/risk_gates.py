@@ -3093,6 +3093,32 @@ def aligned_short_lane_emit(
             _b1h = tape.get("btc1h")
             if _b1h is not None and _b1h >= _WHIP_BOUNCE_PP:
                 antis.append("whip_bounce")
+        # Breadth-onset shadow TAGS (t_d8b728bb, record-only, hot-rollback
+        # key aligned_short_lane.breadth_tags=false): burstcnt = DN momentum
+        # flips across the universe in the trailing 30min (breadth thrust —
+        # flips cluster on dump days and LEAD the drift band arming,
+        # scratch/_breadth_onset.py: from that vantage med MFE12 -3.6% vs the
+        # lane's post-plunge ~-1.5); flip_age_m = minutes since THIS coin's
+        # own DN flip (leg freshness at entry); retrace_pp = how far the BTC
+        # 24h drift sits above its own 12h minimum — the freshness attr from
+        # the 11-10 cohort forensics (at-extreme entries -259, just-off-
+        # extreme +282). All three are entry-time computable; missing input
+        # degrades to '-', never to a signal or a block.
+        breadth_s = ""
+        if bool(lane_cfg.get("breadth_tags", True)):
+            try:
+                from hermes_trader.agents.perception import (dn_burst_count,
+                                                             dn_flip_age_s)
+                _age = dn_flip_age_s(coin)
+                _age_s = "-" if _age is None else f"{_age / 60.0:.0f}"
+                breadth_s = f"burstcnt={dn_burst_count()} flip_age_m={_age_s}"
+            except Exception:
+                breadth_s = "burstcnt=- flip_age_m=-"
+            _rp = None
+            if (tape is not None and tape.get("drift") is not None
+                    and tape.get("drift_min12") is not None):
+                _rp = tape["drift"] - tape["drift_min12"]
+            breadth_s += f" retrace_pp={'-' if _rp is None else f'{_rp:+.2f}'}"
         # probe records carry lowercase short/long; the line + every
         # downstream parse (test LINE_RE, review script) is UPPERCASE.
         side = str(cand.get("side") or "short").upper()
@@ -3116,6 +3142,7 @@ def aligned_short_lane_emit(
             f"ema1d={ema1d_s} struct_flags={','.join(struct) or '-'} "
             f"btc_tape_drift={drift_s} anti={','.join(antis) or '-'} "
             f"lane_priority={mode}#{rank} "
+            + (f"{breadth_s} " if breadth_s else "") +
             f"— NOT admitting (shadow v1; exit mirror max_loss 5 / protect 1 / "
             f"retrace .25 / breach 2 / stale 720m priced off-line)")
         _as_lane_last_emit[coin] = now_ms
