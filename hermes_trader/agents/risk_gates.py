@@ -2961,6 +2961,46 @@ def eval_all_gates(
     return {"results": results, "blocked": blocked, "block_reasons": block_reasons}
 
 
+def lane_reject_reason(res: Dict[str, Any]) -> str:
+    """One-line attribution for the LIVE lane's
+    `[aligned-short-lane][LIVE] <coin> maybe_execute -> executed=False reason=<X>`
+    (board t_c777983d). maybe_execute rejections come in two shapes:
+
+    - pre-gate refusals carry `reason` (mode_off, ai_veto, cooldown, sizing,
+      margin, notional floor, order_failed, no_fill...), and
+    - gate blocks (eval_all_gates) carry NO `reason` — they carry `blocked_by`,
+      the list of per-gate reason strings (ctx values embedded, e.g.
+      "confidence 0.42 < 0.65"), plus the full `gate_results` map.
+
+    Printing only `reason` made every reject of the 9/10 rejected LIVE admits
+    in the 11-01..06 live experiment read `reason=-`, so which gate ate the
+    cohort was unmeasurable. Pure result-dict decode — never changes gate
+    behavior. The executed=False fallbacks are self-describing so a future
+    result-shape drift shows up as `unattributed(keys:...)` in the log
+    instead of '-'.
+    """
+    reason = res.get("reason")
+    if reason:
+        return str(reason)
+    # gate_results is the most complete source: key -> {"pass": bool,
+    # "reason": str | None}. eval_all_gates appends result.get("reason", key)
+    # to blocked_by, so a gate returning an explicit {"pass": False,
+    # "reason": None} puts a bare None in the list — naming failing gates
+    # from gate_results keeps EVERY blocked gate named even with mixed
+    # None/reason entries (independent-review nit, t_c777983d).
+    fails = [(k, v.get("reason"))
+             for k, v in (res.get("gate_results") or {}).items()
+             if isinstance(v, dict) and not v.get("pass", True)]
+    if fails:
+        return "; ".join(str(r) if r else f"gates:{k}" for k, r in fails)
+    parts = [str(r) for r in (res.get("blocked_by") or []) if r]
+    if parts:
+        return "; ".join(parts)
+    if res.get("executed"):
+        return "-"  # success line — the reason slot is meaningless
+    return "unattributed(keys:" + ",".join(sorted(res)) + ")"
+
+
 # ── Lane shadow emitter: ALIGNED-SHORT + EARLY-LONG (board t_2e23804b) ─────
 # Turn the per-scan probe records perception._aligned_short_probe collected
 # into `[aligned-short-lane][SHADOW] WOULD ADMIT` accrual lines — the lane's
@@ -2981,15 +3021,44 @@ def eval_all_gates(
 # plausible 1-8/day range the accrual review assumes.
 _as_lane_last_emit: Dict[str, float] = {}
 
-# Whipsaw guard TAGS (t_59ab9009, shadow v1 — recorded, never blocking; the
-# live-admission use is scoped in the board task, prospective accrual first):
+# Whipsaw guard TAGS (t_59ab9009; LIVE admission use landed t_d442381f):
 # whip_extreme — BTC 24h drift within this many pp of its own 12h minimum,
 # i.e. the tape is making its worst move RIGHT NOW (flash bottom; the 11-09
 # 07:05-07:55 cluster, 8x max_loss, had btc24 == its 12h min at entry —
 # scratch/_whipsaw_scoping.py catches that cluster at every swept threshold).
 # whip_bounce — BTC 1h change at/above this, the V is already underway.
+# The SHADOW emit records them in anti= (never blocking — accrual keeps
+# measuring tag coverage); the LIVE picker turns any of them into a SKIP.
+# Measured as-if-blocking over the 22d book (scratch/_whipsaw_scoping.py,
+# STEP=0.10 B1H=0.50, run 2026-11-13): G1 n=508 +$274.10 with the whip-1
+# cohort W1 flipping -36.98 -> +64.15; the 11-09 flash-V cluster (11 entries,
+# -$99.74 day) is 100% blocked. Both sides read these constants through
+# whip_guard_tags() below — tag and block cannot drift.
 _WHIP_EXTREME_PP = 0.10
 _WHIP_BOUNCE_PP = 0.50
+
+
+def whip_guard_tags(lane: Optional[str],
+                    tape: Optional[Dict[str, Any]]) -> List[str]:
+    """Whipsaw guard tags for one candidate — the single source of truth.
+
+    Pure: reads only the lane name + the tape dict; missing/None keys
+    degrade to untagged (no-opinion), never to a signal or a block. Scoped
+    to the aligned_short lane (whip tags never reach early_long). The
+    SHADOW emit extends anti= with the result (record-only); the LIVE
+    picker skips any candidate whose result is non-empty (t_d442381f).
+    """
+    tags: List[str] = []
+    if lane != "aligned_short" or not tape:
+        return tags
+    _d24, _dmin = tape.get("drift"), tape.get("drift_min12")
+    if (_d24 is not None and _dmin is not None
+            and _d24 <= _dmin + _WHIP_EXTREME_PP):
+        tags.append("whip_extreme")
+    _b1h = tape.get("btc1h")
+    if _b1h is not None and _b1h >= _WHIP_BOUNCE_PP:
+        tags.append("whip_bounce")
+    return tags
 
 
 def aligned_short_lane_emit(
@@ -3085,14 +3154,7 @@ def aligned_short_lane_emit(
         if (cand.get("lane") == "early_long" and "aligned" in variant
                 and not struct and tape is not None and tape["drift"] >= 0):
             antis.append("tapeup_only")
-        if cand.get("lane") == "aligned_short" and tape is not None:
-            _d24, _dmin = tape.get("drift"), tape.get("drift_min12")
-            if (_d24 is not None and _dmin is not None
-                    and _d24 <= _dmin + _WHIP_EXTREME_PP):
-                antis.append("whip_extreme")
-            _b1h = tape.get("btc1h")
-            if _b1h is not None and _b1h >= _WHIP_BOUNCE_PP:
-                antis.append("whip_bounce")
+        antis.extend(whip_guard_tags(cand.get("lane"), tape))
         # Breadth-onset shadow TAGS (t_d8b728bb, record-only, hot-rollback
         # key aligned_short_lane.breadth_tags=false — the key gates the TAGS
         # only; the perception flip-tracker bookkeeping keeps running either
@@ -3215,6 +3277,8 @@ def aligned_short_lane_live_admit(
 
     Ordering mirrors the accrual's booking order (composite descending) so the
     live cohort is the same subset the slot-capped replay priced.
+    Whipsaw guard (t_d442381f): any candidate tagged whip_extreme/whip_bounce
+    by whip_guard_tags() is skipped, never admitted.
     """
     live = (lane_cfg or {}).get("live")
     if not isinstance(live, dict) or not bool(live.get("enabled", False)):
@@ -3379,6 +3443,21 @@ def aligned_short_lane_live_admit(
         if mom > mom_max:
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: mom6h_net "
                          f"{mom:+.1f}% > {mom_max:+.1f}%")
+            continue
+        # WHIP BLOCK (t_d442381f, pre-arm 2): the shadow anti= tags become
+        # a live SKIP here — the 22d as-if-blocking book prices the whip
+        # cohort as the stop-out cluster (see constants block), so a live
+        # admit while a whip tag is true is the defined BAD. Same helper
+        # the SHADOW emit calls, so the block can never drift from what
+        # the accrual measures. WARNING level: this is a live gate decision
+        # and "the next dump replay shows whip skips" is the check.
+        _whips = whip_guard_tags(cand.get("lane"), tape)
+        if _whips:
+            logger.warning(
+                f"[aligned-short-lane][LIVE] {coin} skip: whip "
+                f"{','.join(_whips)} — drift {drift:+.2f}% vs 12h min "
+                f"{_fmt((tape or {}).get('drift_min12'))}, btc1h "
+                f"{_fmt((tape or {}).get('btc1h'))}")
             continue
         if coin in (open_coins or set()):
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: position open")

@@ -1455,6 +1455,7 @@ while True:
                 from hermes_trader.agents.risk_gates import (
                     aligned_short_lane_live_admit,
                     build_aligned_short_lane_analysis,
+                    lane_reject_reason,
                 )
                 from hermes_trader.ledger import count_open_with_lane
                 _lane_tag = str(_as_live.get("cohort_tag",
@@ -1477,9 +1478,11 @@ while True:
                     try:
                         _res = maybe_execute(build_aligned_short_lane_analysis(_spec))
                         # Gate blocks return `blocked_by` (list), not `reason` —
-                        # printing only reason made 9/10 blocked lane attempts
-                        # invisible in the log (go-live accrual audit 2026-11-06).
-                        _why = _res.get("reason") or _res.get("blocked_by") or "-"
+                        # printing only reason made every reject of the 9/10
+                        # rejected LIVE admits invisible in the log (go-live
+                        # accrual audit 2026-11-06; decode centralized + pinned
+                        # board t_c777983d).
+                        _why = lane_reject_reason(_res)
                         logger.warning(
                             f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
                             f"maybe_execute -> executed={_res.get('executed')} "

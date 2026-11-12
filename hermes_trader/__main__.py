@@ -151,11 +151,11 @@ def cmd_execute():
             if result.get("executed"):
                 print(GREEN(f"  ✅ {a['coin']} executed @ {result.get('entry_px', 0):,.2f} (${result.get('size_usd', 0):,.0f})"))
             else:
-                reason = result.get("reason") or result.get("blocked_by")
-                if isinstance(reason, list):
-                    print(YELLOW(f"  ✗ Blocked: {', '.join(reason)}"))
-                else:
-                    print(YELLOW(f"  ✗ Blocked: {reason}"))
+                # Single decode (t_c777983d review nit): one decode everywhere
+                # prevents drift, and ', '.join(reason) would TypeError on the
+                # None entry eval_all_gates can put into blocked_by.
+                from hermes_trader.agents.risk_gates import lane_reject_reason
+                print(YELLOW(f"  ✗ Blocked: {lane_reject_reason(result)}"))
             return
 
     print("  No CONFIRMED analysis to execute.\n")
