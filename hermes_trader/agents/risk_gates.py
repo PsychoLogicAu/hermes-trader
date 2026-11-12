@@ -2961,6 +2961,40 @@ def eval_all_gates(
     return {"results": results, "blocked": blocked, "block_reasons": block_reasons}
 
 
+def lane_reject_reason(res: Dict[str, Any]) -> str:
+    """One-line attribution for the LIVE lane's
+    `[aligned-short-lane][LIVE] <coin> maybe_execute -> executed=False reason=<X>`
+    (board t_c777983d). maybe_execute rejections come in two shapes:
+
+    - pre-gate refusals carry `reason` (mode_off, ai_veto, cooldown, sizing,
+      margin, notional floor, order_failed, no_fill...), and
+    - gate blocks (eval_all_gates) carry NO `reason` — they carry `blocked_by`,
+      the list of per-gate reason strings (ctx values embedded, e.g.
+      "confidence 0.42 < 0.65"), plus the full `gate_results` map.
+
+    Printing only `reason` made 9/10 blocked lane attempts in the 11-01..06
+    live experiment read `reason=-`, so which gate ate the cohort was
+    unmeasurable. Pure result-dict decode — never changes gate behavior.
+    The executed=False fallbacks are self-describing so a future result-shape
+    drift shows up as `unattributed(keys:...)` in the log instead of '-'.
+    """
+    reason = res.get("reason")
+    if reason:
+        return str(reason)
+    parts = [str(r) for r in (res.get("blocked_by") or []) if r]
+    if parts:
+        return "; ".join(parts)
+    if res.get("executed"):
+        return "-"  # success line — the reason slot is meaningless
+    # Blocked with no usable reason strings (e.g. a gate returning
+    # {"pass": False, "reason": None}): name the failing gates by key.
+    fails = [k for k, v in (res.get("gate_results") or {}).items()
+             if isinstance(v, dict) and not v.get("pass", True)]
+    if fails:
+        return "gates:" + ",".join(sorted(fails))
+    return "unattributed(keys:" + ",".join(sorted(res)) + ")"
+
+
 # ── Lane shadow emitter: ALIGNED-SHORT + EARLY-LONG (board t_2e23804b) ─────
 # Turn the per-scan probe records perception._aligned_short_probe collected
 # into `[aligned-short-lane][SHADOW] WOULD ADMIT` accrual lines — the lane's
