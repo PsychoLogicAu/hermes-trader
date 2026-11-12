@@ -70,6 +70,23 @@ def test_null_reason_entries_fall_back_to_failing_gate_keys():
     assert out != "-"
 
 
+def test_mixed_null_and_real_reasons_name_every_failing_gate():
+    # Independent-review nit: with SOME entries None, the naive blocked_by
+    # filter would silently drop the null-reason gate's identity. The decode
+    # must name every failing gate — real reason where present, key otherwise.
+    res = {
+        "executed": False, "mode": "LIVE",
+        "blocked_by": ["confidence 0.42 < 0.65", None],
+        "gate_results": {
+            "confidence": {"pass": False, "reason": "confidence 0.42 < 0.65"},
+            "quiet_tape": {"pass": False, "reason": None},
+        },
+    }
+    out = lane_reject_reason(res)
+    assert "confidence 0.42 < 0.65" in out
+    assert "gates:quiet_tape" in out
+
+
 # ── 4. shape drift self-reports instead of silently printing '-' ───────────
 def test_unexpected_reject_shape_self_reports():
     out = lane_reject_reason({"executed": False, "mode": "LIVE", "analysis_id": "a1"})

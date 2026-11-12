@@ -2972,26 +2972,32 @@ def lane_reject_reason(res: Dict[str, Any]) -> str:
       the list of per-gate reason strings (ctx values embedded, e.g.
       "confidence 0.42 < 0.65"), plus the full `gate_results` map.
 
-    Printing only `reason` made 9/10 blocked lane attempts in the 11-01..06
-    live experiment read `reason=-`, so which gate ate the cohort was
-    unmeasurable. Pure result-dict decode — never changes gate behavior.
-    The executed=False fallbacks are self-describing so a future result-shape
-    drift shows up as `unattributed(keys:...)` in the log instead of '-'.
+    Printing only `reason` made every reject of the 9/10 rejected LIVE admits
+    in the 11-01..06 live experiment read `reason=-`, so which gate ate the
+    cohort was unmeasurable. Pure result-dict decode — never changes gate
+    behavior. The executed=False fallbacks are self-describing so a future
+    result-shape drift shows up as `unattributed(keys:...)` in the log
+    instead of '-'.
     """
     reason = res.get("reason")
     if reason:
         return str(reason)
+    # gate_results is the most complete source: key -> {"pass": bool,
+    # "reason": str | None}. eval_all_gates appends result.get("reason", key)
+    # to blocked_by, so a gate returning an explicit {"pass": False,
+    # "reason": None} puts a bare None in the list — naming failing gates
+    # from gate_results keeps EVERY blocked gate named even with mixed
+    # None/reason entries (independent-review nit, t_c777983d).
+    fails = [(k, v.get("reason"))
+             for k, v in (res.get("gate_results") or {}).items()
+             if isinstance(v, dict) and not v.get("pass", True)]
+    if fails:
+        return "; ".join(str(r) if r else f"gates:{k}" for k, r in fails)
     parts = [str(r) for r in (res.get("blocked_by") or []) if r]
     if parts:
         return "; ".join(parts)
     if res.get("executed"):
         return "-"  # success line — the reason slot is meaningless
-    # Blocked with no usable reason strings (e.g. a gate returning
-    # {"pass": False, "reason": None}): name the failing gates by key.
-    fails = [k for k, v in (res.get("gate_results") or {}).items()
-             if isinstance(v, dict) and not v.get("pass", True)]
-    if fails:
-        return "gates:" + ",".join(sorted(fails))
     return "unattributed(keys:" + ",".join(sorted(res)) + ")"
 
 

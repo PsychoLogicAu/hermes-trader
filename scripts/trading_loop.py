@@ -1478,9 +1478,10 @@ while True:
                     try:
                         _res = maybe_execute(build_aligned_short_lane_analysis(_spec))
                         # Gate blocks return `blocked_by` (list), not `reason` —
-                        # printing only reason made 9/10 blocked lane attempts
-                        # invisible in the log (go-live accrual audit 2026-11-06;
-                        # decode centralized + pinned board t_c777983d).
+                        # printing only reason made every reject of the 9/10
+                        # rejected LIVE admits invisible in the log (go-live
+                        # accrual audit 2026-11-06; decode centralized + pinned
+                        # board t_c777983d).
                         _why = lane_reject_reason(_res)
                         logger.warning(
                             f"[aligned-short-lane][LIVE] {_spec.get('coin')} "
