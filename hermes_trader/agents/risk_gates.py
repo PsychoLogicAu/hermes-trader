@@ -3028,12 +3028,18 @@ _as_lane_last_emit: Dict[str, float] = {}
 # scratch/_whipsaw_scoping.py catches that cluster at every swept threshold).
 # whip_bounce — BTC 1h change at/above this, the V is already underway.
 # The SHADOW emit records them in anti= (never blocking — accrual keeps
-# measuring tag coverage); the LIVE picker turns any of them into a SKIP.
-# Measured as-if-blocking over the 22d book (scratch/_whipsaw_scoping.py,
-# STEP=0.10 B1H=0.50, run 2026-11-13): G1 n=508 +$274.10 with the whip-1
-# cohort W1 flipping -36.98 -> +64.15; the 11-09 flash-V cluster (11 entries,
-# -$99.74 day) is 100% blocked. Both sides read these constants through
-# whip_guard_tags() below — tag and block cannot drift.
+# measuring tag coverage); the LIVE picker skips ONLY whip_bounce
+# (rescoped, t_9b3276ab pre-arm 2b): under the tape gate whip_extreme is
+# TRUE for 100% of ARMED entries — the gate arms while the tape drops and
+# a dropping tape's 24h drift sits at its own 12h min — so blocking on
+# extreme empties the armed book (n=0/22d, scratch/_lane_bucket_guard_
+# 20261113.py). The 22d +$199 as-if price (scratch/_whipsaw_scoping.py,
+# STEP=0.10 B1H=0.50, 2026-11-13) was measured on the UNARMED book and
+# does not transfer; on the armed cell bounce-only is +$80.52/n=21 and no
+# age-scoped extreme variant beats it (scratch/_lane_whip_rescope_
+# 20261113.py). extreme is ANNOTATED on live admits (whip_tags=) so the
+# live book keeps the same audit trail. Both sides read these constants
+# through whip_guard_tags() below — tag and block cannot drift.
 _WHIP_EXTREME_PP = 0.10
 _WHIP_BOUNCE_PP = 0.50
 
@@ -3046,7 +3052,8 @@ def whip_guard_tags(lane: Optional[str],
     degrade to untagged (no-opinion), never to a signal or a block. Scoped
     to the aligned_short lane (whip tags never reach early_long). The
     SHADOW emit extends anti= with the result (record-only); the LIVE
-    picker skips any candidate whose result is non-empty (t_d442381f).
+    picker skips only whip_bounce and annotates whip_extreme
+    (t_9b3276ab rescope of the blanket skip, t_d442381f).
     """
     tags: List[str] = []
     if lane != "aligned_short" or not tape:
@@ -3275,10 +3282,12 @@ def aligned_short_lane_live_admit(
 ) -> List[Dict[str, Any]]:
     """Select this cycle's live lane entries. Returns admission specs.
 
-    Ordering mirrors the accrual's booking order (composite descending) so the
-    live cohort is the same subset the slot-capped replay priced.
-    Whipsaw guard (t_d442381f): any candidate tagged whip_extreme/whip_bounce
-    by whip_guard_tags() is skipped, never admitted.
+    Ordering mirrors the accrual's booking order (composite descending) so
+    the live cohort is the same subset the slot-capped replay priced.
+    Whipsaw guard (rescoped, t_9b3276ab): whip_bounce tags from
+    whip_guard_tags() SKIP the candidate; whip_extreme is admitted with a
+    whip_tags= annotation (it is true for every armed entry — blocking it
+    empties the book; see the constants block).
     """
     live = (lane_cfg or {}).get("live")
     if not isinstance(live, dict) or not bool(live.get("enabled", False)):
@@ -3444,20 +3453,23 @@ def aligned_short_lane_live_admit(
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: mom6h_net "
                          f"{mom:+.1f}% > {mom_max:+.1f}%")
             continue
-        # WHIP BLOCK (t_d442381f, pre-arm 2): the shadow anti= tags become
-        # a live SKIP here — the 22d as-if-blocking book prices the whip
-        # cohort as the stop-out cluster (see constants block), so a live
-        # admit while a whip tag is true is the defined BAD. Same helper
-        # the SHADOW emit calls, so the block can never drift from what
-        # the accrual measures. WARNING level: this is a live gate decision
-        # and "the next dump replay shows whip skips" is the check.
+        # WHIP BLOCK — RESCOPED (t_9b3276ab pre-arm 2b; was blanket-any-tag
+        # in t_d442381f): only whip_bounce skips live admission. Under the
+        # tape gate, whip_extreme is true for EVERY armed entry (the gate
+        # arms while the tape is at its own 12h min), so blanket-blocking
+        # it admitted n=0/22d — armed books: extreme/both = $0, bounce-only
+        # = +$80.52/n=21 vs unguarded +$71.15/n=25 (scratch/_lane_bucket_
+        # guard_20261113.py, scratch/_lane_whip_rescope_20261113.py,
+        # 2026-11-13). extreme stays a shadow tag + a live ANNOTATION:
+        # accrual keeps measuring it and the live book keeps the audit
+        # trail. WARNING level on the skip: it is a live gate decision.
         _whips = whip_guard_tags(cand.get("lane"), tape)
-        if _whips:
+        if "whip_bounce" in _whips:
             logger.warning(
-                f"[aligned-short-lane][LIVE] {coin} skip: whip "
-                f"{','.join(_whips)} — drift {drift:+.2f}% vs 12h min "
-                f"{_fmt((tape or {}).get('drift_min12'))}, btc1h "
-                f"{_fmt((tape or {}).get('btc1h'))}")
+                f"[aligned-short-lane][LIVE] {coin} skip: whip whip_bounce "
+                f"— btc1h {_fmt((tape or {}).get('btc1h'))} (V underway), "
+                f"drift {drift:+.2f}% vs 12h min "
+                f"{_fmt((tape or {}).get('drift_min12'))}")
             continue
         if coin in (open_coins or set()):
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: position open")
@@ -3491,6 +3503,7 @@ def aligned_short_lane_live_admit(
             "btc_tape_vol": _vol_raw,
             "btc_net6h": _n6_raw,
             "arm": arm,
+            "whip_tags": ",".join(_whips) or "-",
             **({"tape_state": stamp} if stamp else {}),
             "cohort_tag": tag,
             "ts": now_ms,
@@ -3504,6 +3517,7 @@ def aligned_short_lane_live_admit(
             f"ema4h_dist={float(cand.get('ema4h_dist_pct', 0) or 0):+.3f}% "
             f"ema4h_dist_bucket={cand.get('ema4h_bucket') or 'n/a'} "
             f"lane={cand.get('lane')} variant={','.join(cand.get('variant') or []) or '-'} "
+            f"whip_tags={','.join(_whips) or '-'} "
             f"lane_slots={lane_open + len(picked)}/{lane_slots} "
             f"pool_slots={slots_used + len(picked)}/{max_slots} "
             f"cohort={LANE_LIVE_MODEL}/{tag} — entering via maybe_execute "
