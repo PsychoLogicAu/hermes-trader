@@ -161,6 +161,19 @@ def test_malformed_band_keys_inert(monkeypatch):
     assert _runner_entry_block_reason(_analysis(), cfg) == ""
 
 
+def test_nonnumeric_drift_value_inert(monkeypatch):
+    # reviewer-pass hardening: the sensor contract is numeric, but a string
+    # in the dict must degrade to inert, never raise out of the runner gate.
+    def _read():
+        return {"vol": 1.0, "drift": "down"}
+    monkeypatch.setattr(executor, "_late_chase_tape_read", _read)
+    hc = []
+    monkeypatch.setattr(executor, "_tape_history_read",
+                        lambda: hc.append(1) or _hist(STALE))
+    assert _runner_entry_block_reason(_analysis(), _config("live")) == ""
+    assert hc == []
+
+
 # ── band + arm semantics ─────────────────────────────────────────────────────
 
 def test_drift_out_of_band_no_history_fetch(monkeypatch):

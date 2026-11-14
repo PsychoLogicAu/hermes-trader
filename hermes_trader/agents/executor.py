@@ -3392,8 +3392,12 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     # early-return admission (cohort ADMIT, seat-bar ADMIT, sub-floor
     # state-clause, mover bypass). Fail-safe asymmetry: drift gap / history
     # gap / malformed keys = INERT. A data gap may fail a *gate* closed but
-    # may never fire a protective *veto* (opposite of the arm-gate contract
+    # may never fire a protective veto (opposite of the arm-gate contract
     # on purpose). Absent key = zero tape/history fetches (byte-identical).
+    # KNOB ALIGNMENT: btc24_min_pct (veto floor) is an INDEPENDENT knob from
+    # tape_state.shallow_arm_pct (default -2.0); a misaligned pair (band
+    # floor above the shallow-arm level) silently widens the veto window.
+    # The intended shape keeps them equal (deploy block: both -2.0).
     _trs_cfg = config.get("tape_recovery_short_veto_gate") or {}
     _trs_mode = str(_trs_cfg.get("mode", "off")).strip().lower()
     _trs_mn, _trs_mx = _trs_cfg.get("btc24_min_pct"), _trs_cfg.get("btc24_max_pct")
@@ -3403,9 +3407,13 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             _trs_mn, _trs_mx = float(_trs_mn), float(_trs_mx)
             _trs_tt = _late_chase_tape_read()
             _trs_drift = _trs_tt.get("drift") if isinstance(_trs_tt, dict) else None
+            if _trs_drift is not None:
+                _trs_drift = float(_trs_drift)  # reviewer pass 2026-11-14:
+                # coerce INSIDE the try — a non-numeric sensor value must
+                # degrade to inert, never raise out of the runner gate.
         except (TypeError, ValueError):
             _trs_drift = None  # malformed keys -> inert (fail-open)
-        if _trs_drift is not None and _trs_mn <= float(_trs_drift) < _trs_mx:
+        if _trs_drift is not None and _trs_mn <= _trs_drift < _trs_mx:
             _trs_hist = _tape_history_read()
             _trs_tapecfg = _trs_cfg.get("tape_state")
             if not isinstance(_trs_tapecfg, dict):
