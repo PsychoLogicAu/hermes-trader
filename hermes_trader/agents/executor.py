@@ -3556,6 +3556,68 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             or (fresh_impulse and score >= min_score)
         )
         if not structured_short:
+            # TAPE-ARMED follow-through admit (t_104c00f2, 2026-11-14): the
+            # structure disjuncts above all demand VOL-SPIKE evidence
+            # (60-min rolling impulse triggers, slow-burn, breakout/burst).
+            # A low-vol grind decline satisfies none of them: the mammoth-era
+            # funnel showed 50 conf>=0.60 SHORTs killed here in 4.4h that
+            # priced +$44.25 (WR 44/50, zero -5% stops) while BTC ground down.
+            # The tape-recovery veto already distinguishes the two classes
+            # with a crossing CLOCK: an ACTIVE arm (fresh venture through the
+            # band floor inside its clock) is crash follow-through — exactly
+            # the population this gate was NOT built to cull ("no armed
+            # crossing" is the veto's refusal signature). Invert the same
+            # verdict: armed -> the decline is mechanically structured even
+            # without an impulse. Band/clock config is SHARED with
+            # tape_recovery_short_veto_gate (one clock, no knob misalignment;
+            # absent block = inert). Tri-state lane key
+            # `short_tape_structure`: off (default, zero fetches) / shadow
+            # (WOULD-ADMIT accrual, still blocked) / live. Fail-safe mirror
+            # of the veto (pinned): a data gap may never ADMIT either —
+            # drift gap / history gap / malformed keys = inert. The veto's
+            # placement law holds: this exempts ONLY the structure clause;
+            # the veto itself, late-chase, liquidity floors, cooldowns and
+            # slots all ran or run around it.
+            _ts_mode = lane_mode(gate, "short_tape_structure")
+            if _ts_mode in ("shadow", "live"):
+                _tsv = config.get("tape_recovery_short_veto_gate") or {}
+                _ts_mn, _ts_mx = _tsv.get("btc24_min_pct"), _tsv.get("btc24_max_pct")
+                if _ts_mn is not None and _ts_mx is not None:
+                    try:
+                        _ts_mn, _ts_mx = float(_ts_mn), float(_ts_mx)
+                        _ts_tt = _late_chase_tape_read()
+                        _ts_drift = (float(_ts_tt["drift"])
+                                     if isinstance(_ts_tt, dict)
+                                     and _ts_tt.get("drift") is not None else None)
+                    except (TypeError, ValueError, KeyError):
+                        _ts_drift = None  # malformed -> inert (never admits)
+                    if _ts_drift is not None and _ts_mn <= _ts_drift < _ts_mx:
+                        _ts_hist = _tape_history_read()
+                        _ts_tcfg = _tsv.get("tape_state")
+                        if not isinstance(_ts_tcfg, dict):
+                            _ts_tcfg = {}
+                        _ts_arms = tape_state_arms(_ts_hist, _ts_tcfg,
+                                                   band_max=_ts_mx)
+                        if isinstance(_ts_arms, dict) and any(
+                                isinstance(a, dict) and a.get("active")
+                                for a in _ts_arms.values()):
+                            _ts_detail = (
+                                f"{coin} SHORT score={score:.0f}, "
+                                f"slow={slow_count}: BTC trail-24h drift "
+                                f"{_ts_drift:+.2f}% in [{_ts_mn:+.1f}, "
+                                f"{_ts_mx:+.1f})% with ACTIVE arm — crash "
+                                f"follow-through tape "
+                                f"[{tape_state_stamp(_ts_hist, _ts_tcfg, band_max=_ts_mx)}]")
+                            if _ts_mode == "live":
+                                logger.info(
+                                    f"[gate][SHORT-TAPE-STRUCTURE] ADMIT {_ts_detail}")
+                                structured_short = True
+                            else:
+                                logger.info(
+                                    f"[gate][SHORT-TAPE-STRUCTURE][SHADOW] "
+                                    f"WOULD ADMIT {_ts_detail} — structure "
+                                    f"bar still applied (shadow lane)")
+        if not structured_short:
             return (f"runner_gate_blocked (short needs downtrend momentum or "
                     f"fresh impulse+structure; score={score:.0f}, slow={slow_count})")
         return ""
