@@ -36,7 +36,7 @@ from hermes_trader.agents.dsl_exit import (
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.ledger import record_open, record_close
-from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality, lane_mode
+from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality, lane_mode, tape_state_arms, tape_state_stamp
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
     cancel_open_orders_for_coin,
@@ -3375,6 +3375,57 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             else:
                 logger.warning(f"[gate][MILD-TAPE-LONG] VETO {_mtl_detail}")
                 return "runner_gate_blocked (mild-down tape long veto)"
+
+    # Tape-recovery SHORT veto (t_860f95f8, 2026-11-14): the mirror-family
+    # refusal for the OTHER side. Evidence: the two live facepalms XMR/SOL
+    # 11-13 05:32/06:02Z (core-lane shorts at conf 0.65/0.67 exactly on the
+    # bar, stamped btc_regime=down while the tape was already recovering) are
+    # the same crash-aftermath residue the state_admission arm-gate refuses in
+    # shadow — the conf>=0.65 population simply has no tape-drift check.
+    # Rule: side is SHORT, drift sits in the veto band [min,max), AND the
+    # crossing clock shows NO active arm — no fresh venture through the band
+    # floor within its clock (deep -3/48h, shallow -2/12h by default, knobs
+    # under tape_state, identical semantics to the state_admission arm-gate:
+    # disarm persistence + hard kill honored). No active arm means the band
+    # reading is decay/LHS-slide/recovery residue, not crash evidence.
+    # Placement law: same as the LONG veto directly above — MUST precede EVERY
+    # early-return admission (cohort ADMIT, seat-bar ADMIT, sub-floor
+    # state-clause, mover bypass). Fail-safe asymmetry: drift gap / history
+    # gap / malformed keys = INERT. A data gap may fail a *gate* closed but
+    # may never fire a protective *veto* (opposite of the arm-gate contract
+    # on purpose). Absent key = zero tape/history fetches (byte-identical).
+    _trs_cfg = config.get("tape_recovery_short_veto_gate") or {}
+    _trs_mode = str(_trs_cfg.get("mode", "off")).strip().lower()
+    _trs_mn, _trs_mx = _trs_cfg.get("btc24_min_pct"), _trs_cfg.get("btc24_max_pct")
+    if (side == "short" and _trs_mode in ("shadow", "live")
+            and _trs_mn is not None and _trs_mx is not None):
+        try:
+            _trs_mn, _trs_mx = float(_trs_mn), float(_trs_mx)
+            _trs_tt = _late_chase_tape_read()
+            _trs_drift = _trs_tt.get("drift") if isinstance(_trs_tt, dict) else None
+        except (TypeError, ValueError):
+            _trs_drift = None  # malformed keys -> inert (fail-open)
+        if _trs_drift is not None and _trs_mn <= float(_trs_drift) < _trs_mx:
+            _trs_hist = _tape_history_read()
+            _trs_tapecfg = _trs_cfg.get("tape_state")
+            if not isinstance(_trs_tapecfg, dict):
+                _trs_tapecfg = {}
+            _trs_arms = tape_state_arms(_trs_hist, _trs_tapecfg, band_max=_trs_mx)
+            if isinstance(_trs_arms, dict) and not any(
+                    isinstance(a, dict) and a.get("active")
+                    for a in _trs_arms.values()):
+                _trs_detail = (f"{coin} SHORT on BTC trail-24h drift "
+                               f"{float(_trs_drift):+.2f}% in [{_trs_mn:+.1f}, "
+                               f"{_trs_mx:+.1f})% at conf {conf:.2f} — no armed "
+                               f"crossing (recovery/LHS residue) tape "
+                               f"[{tape_state_stamp(_trs_hist, _trs_tapecfg, band_max=_trs_mx)}]")
+                if _trs_mode == "shadow":
+                    logger.warning(
+                        f"[gate][TAPE-RECOVERY-SHORT][SHADOW] WOULD VETO "
+                        f"{_trs_detail} — NOT vetoing (shadow mode; kill-switch lever)")
+                else:
+                    logger.warning(f"[gate][TAPE-RECOVERY-SHORT] VETO {_trs_detail}")
+                    return "runner_gate_blocked (tape-recovery short veto)"
 
     cohort_tag = str(analysis.get("cohort_tag") or "").strip().lower()
     if cohort_tag:
