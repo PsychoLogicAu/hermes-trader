@@ -8,8 +8,10 @@ applies (bars that were still forming at old-fetch time are old now and pass
 legitimately; day-aligned chunk windows never crossed the forming boundary
 mid-window, see plan risks).
 
-Non-day files (topup-*.json, analysis caches) are skipped exactly like the
-legacy reader does.
+Every *.json bar-chunk in an interval dir is ingested — day-named AND the
+analysis-window caches (topup-*/lane*/night*/ab-*) that the legacy reader
+skipped: they're raw candleSnapshot bars, and PK dedupe + the confirmed-bar
+guard make them safe. manifest.json is excluded.
 
 Usage:
   python3 scripts/candlestore_import.py \
@@ -23,24 +25,20 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hermes_trader.client import candlestore as cs  # noqa: E402
 
 
-def day_files(iv_dir: str):
-    """Chunk files whose NAME starts YYYYMMDD (legacy reader convention)."""
+def chunk_files(iv_dir: str):
+    """ALL bar-chunk JSONs in an interval dir. Legacy reader skipped
+    non-day files (topup-*/lane*/night*) because of its day-window mapping —
+    as a store they're raw candleSnapshot bars and worth ingesting; PK dedupe
+    + confirmed-bar guard apply regardless. manifest.json excluded."""
     if not os.path.isdir(iv_dir):
         return []
-    out = []
-    for fn in sorted(os.listdir(iv_dir)):
-        try:
-            datetime.strptime(fn[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        out.append(fn)
-    return out
+    return [fn for fn in sorted(os.listdir(iv_dir))
+            if fn.endswith(".json") and fn != "manifest.json"]
 
 
 def main() -> int:
@@ -70,7 +68,7 @@ def main() -> int:
         file_n = ins_n = 0
         for iv in cs.MS_PER_INTERVAL:
             iv_dir = os.path.join(cdir, iv)
-            for fn in day_files(iv_dir):
+            for fn in chunk_files(iv_dir):
                 try:
                     bars = json.load(open(os.path.join(iv_dir, fn)))
                 except Exception:

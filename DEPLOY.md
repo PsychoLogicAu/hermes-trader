@@ -108,6 +108,21 @@ flyctl volumes snapshots create hermes_data
 flyctl volumes snapshots list hermes_data
 ```
 
+### Candle store (t_18e7517a)
+
+`./candlestore/candles.db` (bind mount) is the ONLY copy of bar history past
+HL retention (1m ~3.5d, 5m ~17d) — recreate without a backup = permanent loss.
+Host-side snapshot + verify (keep-newest-7 rotation built in):
+
+```bash
+scripts/candlestore_backup.sh   # -> archive/candlestore/candles-<UTC>.db.zst
+```
+
+Posture = hot `candle_store.enabled` block in `.agent-config.json` (config
+repo, `scripts/deploy.sh "why: ..."`); the mount/env alone never activate it.
+Flip ON from the config repo, watch `[candlestore] cycle:` lines in
+trader-logs; seed backfill paces itself (~200 weight/min via HL_LIMITER).
+
 ## Switching to a custom domain
 
 ```bash
