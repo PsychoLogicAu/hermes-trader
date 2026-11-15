@@ -95,6 +95,20 @@ def test_forming_bar_never_stored(store):
     assert [b["t"] for b in got] == [b["t"] for b in bars[:4]]
 
 
+def test_legacy_none_volume_and_string_numerics(store):
+    """Import tolerance: v=None -> 0.0, string numerics parse; a bar with an
+    unusable PRICE is skipped entirely (complete-or-absent invariant)."""
+    now = T0 + 10 ** 10
+    bars = [
+        {"t": T0, "o": "1", "h": "2", "l": "0.5", "c": "1.5", "v": None},
+        {"t": T0 + 300_000, "o": 1, "h": None, "l": 0.5, "c": 1.5, "v": 10},
+    ]
+    assert store.upsert_bars("BTC", "5m", bars, now_ms=now) == 1
+    stored = store.series("BTC", "5m")
+    assert len(stored) == 1 and stored[0]["v"] == 0.0
+    assert stored[0]["o"] == 1.0  # string numeric coerced
+
+
 def test_boundary_confirmed_at_exact_close(store):
     """t + dur == now is CONFIRMED (the forming bar's end instant has passed)."""
     bars = _bars(5)

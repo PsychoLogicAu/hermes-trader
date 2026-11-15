@@ -177,17 +177,34 @@ class CandleStore:
         """
         dur = MS_PER_INTERVAL.get(interval, 300_000)
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+
+        def _f(x, default=None):
+            if x is None:
+                return default
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return default
+
         rows = []
         for b in bars:
             if isinstance(b, dict):
-                t, o, h, l, c, v = (b["t"], b["o"], b["h"], b["l"], b["c"], b["v"])
+                t, o, h, l, c, v = (b.get("t"), b.get("o"), b.get("h"),
+                                    b.get("l"), b.get("c"), b.get("v"))
             else:  # Candle (pydantic) or any attr-holder
                 t, o, h, l, c, v = b.t, b.o, b.h, b.l, b.c, b.v
+            # Legacy scratch chunks occasionally carry None volume (and
+            # string numerics); a bar with an unusable PRICE is skipped —
+            # a stored bar must be complete or absent (replays read blind).
+            o, h, l, c = _f(o), _f(h), _f(l), _f(c)
+            v = _f(v, 0.0)
+            if t is None or o is None or h is None or l is None or c is None:
+                continue
+            t = int(t)
             if t + dur > now_ms:
                 continue  # still-forming candle — never persisted
-            rows.append((coin, interval, int(t),
-                         struct.pack("<5f", float(o), float(h),
-                                     float(l), float(c), float(v))))
+            rows.append((coin, interval, t,
+                         struct.pack("<5f", o, h, l, c, v)))
         if not rows:
             return 0
         with self._lock:
