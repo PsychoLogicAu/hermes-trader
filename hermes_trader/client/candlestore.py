@@ -75,7 +75,18 @@ CREATE TABLE IF NOT EXISTS bars (
   interval TEXT NOT NULL,     -- '1m','5m','15m','1h','4h','1d'
   t        INTEGER NOT NULL,  -- bar OPEN time, epoch ms (HL 't')
   ohlcv    BLOB NOT NULL,     -- struct.pack('<5f', o,h,l,c,v)
+  -- float32 is DELIBERATE (reviewer 2026-11-15): HL candle prices are tick
+  -- values exactly representable under 2^24 (ULP ~0.016 at BTC 110k);
+  -- volume rounding (~0.06 at 1e6) is noise for analysis. Halves row size
+  -- vs '<5d' = ~30% more rolling depth under the 1 GB cap. Complete-or-
+  -- absent, never partial.
   PRIMARY KEY (coin, interval, t)
+);
+CREATE TABLE IF NOT EXISTS empty_marks(
+  coin      TEXT NOT NULL,
+  interval  TEXT NOT NULL,
+  marked_at INTEGER NOT NULL,  -- when candleSnapshot last returned [] (no history)
+  PRIMARY KEY (coin, interval)
 );
 """
 
@@ -149,7 +160,14 @@ class CandleStore:
     def __init__(self, dir_path: str) -> None:
         os.makedirs(dir_path, exist_ok=True)
         self.path = os.path.join(dir_path, DB_NAME)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        # RLock + EVERY _con use (reads included, reviewer t_18e7517a
+        # 2026-11-15): sharing one check_same_thread=False connection means
+        # unlocked concurrent execute() corrupts C-level statement state
+        # (InterfaceError 'bad parameter') and readers join a writer's open
+        # transaction (dirty reads). The lock must serialize reads AND
+        # writes on this connection; re-entrant because prune_to_size calls
+        # est_bytes while holding it.
         self._con = sqlite3.connect(self.path, check_same_thread=False, timeout=10)
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=NORMAL")
@@ -230,8 +248,10 @@ class CandleStore:
             q += " AND t<?"
             args.append(int(t1_ms))
         q += " ORDER BY t"
+        with self._lock:
+            rows = self._con.execute(q, args).fetchall()  # materialize under lock
         out = []
-        for t, blob in self._con.execute(q, args):
+        for t, blob in rows:
             o, h, l, c, v = struct.unpack("<5f", blob)
             out.append({"t": t, "o": o, "h": h, "l": l, "c": c, "v": v})
         return out
@@ -239,18 +259,20 @@ class CandleStore:
     def coverage(self, coin: str, interval: str) -> List[tuple]:
         """[(YYYYMMDD, n_bars), ...] — per-UTC-day rollup, sorted."""
         out = []
-        rows = self._con.execute(
-            "SELECT CAST(t/86400000 AS INTEGER) d, COUNT(*) FROM bars "
-            "WHERE coin=? AND interval=? GROUP BY d ORDER BY d",
-            (coin, interval)).fetchall()
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT CAST(t/86400000 AS INTEGER) d, COUNT(*) FROM bars "
+                "WHERE coin=? AND interval=? GROUP BY d ORDER BY d",
+                (coin, interval)).fetchall()
         for day_epoch, n in rows:
             day = datetime.fromtimestamp(day_epoch * 86_400, tz=timezone.utc)
             out.append((day.strftime("%Y%m%d"), n))
         return out
 
     def coins(self) -> List[str]:
-        return [r[0] for r in self._con.execute(
-            "SELECT DISTINCT coin FROM bars ORDER BY coin")]
+        with self._lock:
+            return [r[0] for r in self._con.execute(
+                "SELECT DISTINCT coin FROM bars ORDER BY coin")]
 
     def count_bars(self, coin: Optional[str] = None,
                    interval: Optional[str] = None) -> int:
@@ -262,7 +284,8 @@ class CandleStore:
         if interval is not None:
             q += (" AND" if coin is not None else " WHERE") + " interval=?"
             args.append(interval)
-        return self._con.execute(q, args).fetchone()[0]
+        with self._lock:
+            return self._con.execute(q, args).fetchone()[0]
 
     # ── gap planner (retention-honest) ─────────────────────────────────
 
@@ -279,9 +302,10 @@ class CandleStore:
         dur = MS_PER_INTERVAL.get(interval, 300_000)
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
         horizon_ms = horizon_days(interval) * DAY_MS
-        row = self._con.execute(
-            "SELECT MAX(t) FROM bars WHERE coin=? AND interval=?",
-            (coin, interval)).fetchone()
+        with self._lock:
+            row = self._con.execute(
+                "SELECT MAX(t) FROM bars WHERE coin=? AND interval=?",
+                (coin, interval)).fetchone()
         last_t = row[0]
         if last_t is None:
             gap_start = now_ms - horizon_ms
@@ -299,17 +323,24 @@ class CandleStore:
         }
 
     def backfill_plans(self, coins: Sequence[str], intervals: Sequence[str],
-                       now_ms: Optional[int] = None) -> List[Dict[str, Any]]:
+                       now_ms: Optional[int] = None,
+                       empty_cooldown_ms: int = 0) -> List[Dict[str, Any]]:
         """Fetch windows <= MAX_BARS_PER_FETCH, newest-first per (coin, iv).
 
         Older ends of long gaps are silently truncated past the 5000-bar cap,
         so a gap wider than the cap splits into multiple windows.
+        ``empty_cooldown_ms``: a (coin,iv) whose last backfill fetch returned
+        [] (delisted / pre-listing) is NOT re-planned until the cooldown has
+        passed — guaranteed-[] responses must not burn weight budget forever.
         """
         now_ms = int(time.time() * 1000) if now_ms is None else now_ms
         plans: List[Dict[str, Any]] = []
         for coin in coins:
             for iv in intervals:
                 dur = MS_PER_INTERVAL.get(iv, 300_000)
+                if empty_cooldown_ms and not self.empty_cooled(
+                        coin, iv, now_ms, empty_cooldown_ms):
+                    continue
                 g = self.gap_plan(coin, iv, now_ms=now_ms)
                 if g["backfillable_ms"] <= 0:
                     continue
@@ -321,6 +352,26 @@ class CandleStore:
                                   "start_ms": int(start), "end_ms": int(hi)})
                     hi = start
         return plans
+
+    # ── empty-history bookkeeping (delisted / pre-listing coins) ───────
+
+    def mark_empty(self, coin: str, interval: str,
+                   now_ms: Optional[int] = None) -> None:
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO empty_marks VALUES (?,?,?)",
+                (coin, interval, now_ms))
+            self._con.commit()
+
+    def empty_cooled(self, coin: str, interval: str, now_ms: int,
+                     cooldown_ms: int) -> bool:
+        """True when a backfill fetch for (coin,iv) is worth doing now."""
+        with self._lock:
+            row = self._con.execute(
+                "SELECT marked_at FROM empty_marks WHERE coin=? AND interval=?",
+                (coin, interval)).fetchone()
+        return row is None or (now_ms - row[0]) >= cooldown_ms
 
     # ── pruning (deliberate: history is unrecoverable) ─────────────────
 
@@ -350,13 +401,18 @@ class CandleStore:
         removed = 0
         with self._lock:
             for tier in PRUNE_ORDER:
-                if removed >= batch_rows:
+                # Re-check per tier (reviewer): stop as soon as the cap is
+                # satisfied — deleting a full batch when a few hundred rows
+                # would do destroys unrecoverable history for nothing.
+                if self.est_bytes() <= max_bytes:
                     break
                 cur = self._con.execute(
                     "DELETE FROM bars WHERE interval=? AND rowid IN "
                     "(SELECT rowid FROM bars WHERE interval=? ORDER BY t "
                     "LIMIT ?)", (tier, tier, batch_rows - removed))
                 removed += cur.rowcount
+                if removed >= batch_rows:
+                    break
             self._con.commit()
         if removed:
             logger.info(f"[candlestore] pruned {removed} rows "
@@ -371,9 +427,11 @@ class CandleStore:
         Uses the freelist so DELETEs (which park pages on the freelist) count
         as reclaimed without forcing an immediate VACUUM.
         """
-        pc = self._con.execute("PRAGMA page_count").fetchone()[0]
-        fl = self._con.execute("PRAGMA freelist_count").fetchone()[0]
-        ps = self._con.execute("PRAGMA page_size").fetchone()[0]
+        pc = fl = ps = 0
+        with self._lock:
+            pc = self._con.execute("PRAGMA page_count").fetchone()[0]
+            fl = self._con.execute("PRAGMA freelist_count").fetchone()[0]
+            ps = self._con.execute("PRAGMA page_size").fetchone()[0]
         return max(0, pc - fl) * ps
 
 
@@ -497,6 +555,7 @@ def backfill_once(store: CandleStore, plans: Sequence[Dict[str, Any]],
         stats["fetched"] += 1
         if not raw:
             stats["empty"] += 1
+            store.mark_empty(p["coin"], p["interval"], now_ms=now_ms)
             continue
         stats["stored"] += store.upsert_bars(
             p["coin"], p["interval"], raw, now_ms=now_ms)
@@ -553,9 +612,11 @@ def run_backfill_cycle(fetch_fn=None,
     hard = store.prune_hard_caps(
         now_ms=now_ms, prune_max_days=cfg.get("prune_max_days") or {})
     coin_list = list(coins) if coins is not None else target_coins(cfg)
+    cooldown_ms = int(float(cfg.get("backfill_empty_cooldown_days", 14))
+                      * DAY_MS)
     plans = store.backfill_plans(
         coin_list, cfg.get("intervals") or list(MS_PER_INTERVAL),
-        now_ms=now_ms)
+        now_ms=now_ms, empty_cooldown_ms=cooldown_ms)
     # Sustained-rate bound: weight/min * cycle-minutes / 20 weight per fetch.
     max_fetches = int(float(cfg.get("backfill_max_weight_per_min", 200))
                       * float(cfg.get("backfill_interval_min", 10)) / 20.0)
@@ -593,7 +654,10 @@ def start_backfill_thread() -> Optional[threading.Thread]:
     def _loop():
         wait = 90.0
         while not stop.wait(wait):
-            wait = float(_cfg().get("backfill_interval_min", 10)) * 60.0
+            try:
+                wait = float(_cfg().get("backfill_interval_min", 10)) * 60.0
+            except (TypeError, ValueError):
+                wait = 600.0  # non-numeric config must not kill the thread
             try:
                 run_backfill_cycle()
             except Exception as e:
@@ -609,5 +673,8 @@ def start_backfill_thread() -> Optional[threading.Thread]:
 
 def stop_backfill_thread(timeout: float = 2.0) -> None:
     st = _thread_state.get("stop")
+    th = _thread_state.get("thread")
     if st is not None:
         st.set()
+    if th is not None and th.is_alive():
+        th.join(timeout)  # honored: tests/ops need deterministic quiesce

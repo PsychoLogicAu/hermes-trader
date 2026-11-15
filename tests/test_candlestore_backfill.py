@@ -214,3 +214,22 @@ def test_thread_not_started_when_disabled(monkeypatch):
     monkeypatch.delenv("HERMES_CANDLESTORE_DIR", raising=False)
     cs.reset_store()
     assert cs.start_backfill_thread() is None
+
+# ── empty-history cooldown (reviewer t_18e7517a 2026-11-15) ─────────────
+
+def test_empty_cooldown_suppresses_replan(store):
+    """A (coin,iv) that returns [] (delisted/pre-listing) must not be
+    re-fetched forever: backfill_once marks it; planner skips it until the
+    cooldown passes — guaranteed-[] responses burn weight budget."""
+    now = T0 + 30 * DAY
+    plans = store.backfill_plans(["DEAD"], ["5m"], now_ms=now)
+    assert plans
+    stats = cs.backfill_once(store, plans,
+                             fetch_fn=lambda c, i, s, e: [], now_ms=now)
+    assert stats["empty"] >= 1 and store.count_bars() == 0
+    # same instant: inside cooldown -> not planned again
+    assert store.backfill_plans(["DEAD"], ["5m"], now_ms=now,
+                                empty_cooldown_ms=14 * DAY) == []
+    # cooldown expired -> planned again (it may relist / HL may differ)
+    assert store.backfill_plans(["DEAD"], ["5m"], now_ms=now + 15 * DAY,
+                                empty_cooldown_ms=14 * DAY)
