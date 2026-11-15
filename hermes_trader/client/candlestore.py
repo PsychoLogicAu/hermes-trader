@@ -33,6 +33,7 @@ Reader API (window semantics match the old scratch/candlestore/candles.py):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -112,6 +113,16 @@ def _cfg() -> Dict[str, Any]:
 
 def store_dir() -> Optional[str]:
     return os.environ.get("HERMES_CANDLESTORE_DIR") or None
+
+
+DAY_MS = 86_400_000
+
+
+def horizon_days(interval: str) -> float:
+    """Retention horizon for an interval (config-overridable)."""
+    cfg = _cfg()
+    return float((cfg.get("retention_days") or {}).get(
+        interval, RETENTION_DAYS.get(interval, 17)))
 
 
 def enabled() -> bool:
@@ -236,13 +247,117 @@ class CandleStore:
             args.append(interval)
         return self._con.execute(q, args).fetchone()[0]
 
+    # ── gap planner (retention-honest) ─────────────────────────────────
+
+    def gap_plan(self, coin: str, interval: str,
+                 now_ms: Optional[int] = None) -> Dict[str, Any]:
+        """Gap bookkeeping for one (coin, interval) at ``now_ms``.
+
+        Never plan a fetch whose start sits inside the dead window past the
+        interval horizon — candleSnapshot silently returns [] there. The part
+        of the gap older than the horizon is reported ``unrecoverable``; only
+        ``[max(gap_start, now-horizon), now)`` is backfillable. An empty store
+        has no known gap start: its whole horizon window is the seed plan.
+        """
+        dur = MS_PER_INTERVAL.get(interval, 300_000)
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        horizon_ms = horizon_days(interval) * DAY_MS
+        row = self._con.execute(
+            "SELECT MAX(t) FROM bars WHERE coin=? AND interval=?",
+            (coin, interval)).fetchone()
+        last_t = row[0]
+        if last_t is None:
+            gap_start = now_ms - horizon_ms
+            unrecoverable = 0  # pre-store span; seed covers the horizon
+        else:
+            gap_start = last_t + dur
+            unrecoverable = max(0, (now_ms - horizon_ms) - gap_start)
+        gap_ms = max(0, now_ms - gap_start)
+        lo = max(gap_start, now_ms - horizon_ms)
+        return {
+            "coin": coin, "interval": interval, "last_t": last_t,
+            "gap_ms": gap_ms,
+            "unrecoverable_ms": unrecoverable,
+            "backfillable_ms": max(0, now_ms - lo),
+        }
+
+    def backfill_plans(self, coins: Sequence[str], intervals: Sequence[str],
+                       now_ms: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Fetch windows <= MAX_BARS_PER_FETCH, newest-first per (coin, iv).
+
+        Older ends of long gaps are silently truncated past the 5000-bar cap,
+        so a gap wider than the cap splits into multiple windows.
+        """
+        now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+        plans: List[Dict[str, Any]] = []
+        for coin in coins:
+            for iv in intervals:
+                dur = MS_PER_INTERVAL.get(iv, 300_000)
+                g = self.gap_plan(coin, iv, now_ms=now_ms)
+                if g["backfillable_ms"] <= 0:
+                    continue
+                lo = now_ms - g["backfillable_ms"]
+                hi = now_ms
+                while hi > lo:
+                    start = max(lo, hi - MAX_BARS_PER_FETCH * dur)
+                    plans.append({"coin": coin, "interval": iv,
+                                  "start_ms": int(start), "end_ms": int(hi)})
+                    hi = start
+        return plans
+
+    # ── pruning (deliberate: history is unrecoverable) ─────────────────
+
+    def prune_hard_caps(self, now_ms: int,
+                        prune_max_days: Dict[str, float]) -> int:
+        """Hard per-interval day caps (e.g. 1m@7d) — runs every cycle."""
+        removed = 0
+        with self._lock:
+            for iv, days in (prune_max_days or {}).items():
+                cur = self._con.execute(
+                    "DELETE FROM bars WHERE interval=? AND t < ?",
+                    (iv, now_ms - float(days) * DAY_MS))
+                removed += cur.rowcount
+            self._con.commit()
+        return removed
+
+    def prune_to_size(self, max_bytes: float, batch_rows: int = 50_000,
+                      now_ms: Optional[int] = None) -> int:
+        """Enforce the soft size cap: VALUE-ORDER tiers, oldest-first.
+
+        Lowest-value tier's oldest bars go first (1m -> 15m -> 5m -> 1h/4h/1d);
+        one tier before spilling into the next, <= batch_rows deleted per
+        call (the trickle re-enters next cycle if still over).
+        """
+        if self.est_bytes() <= max_bytes:
+            return 0
+        removed = 0
+        with self._lock:
+            for tier in PRUNE_ORDER:
+                if removed >= batch_rows:
+                    break
+                cur = self._con.execute(
+                    "DELETE FROM bars WHERE interval=? AND rowid IN "
+                    "(SELECT rowid FROM bars WHERE interval=? ORDER BY t "
+                    "LIMIT ?)", (tier, tier, batch_rows - removed))
+                removed += cur.rowcount
+            self._con.commit()
+        if removed:
+            logger.info(f"[candlestore] pruned {removed} rows "
+                        f"to stay under max_store_mb")
+        return removed
+
     # ── size accounting ─────────────────────────────────────────────────
 
     def est_bytes(self) -> int:
-        """On-disk db size incl. free pages (page_count*page_size)."""
+        """Effective db bytes: (page_count - freelist_count) * page_size.
+
+        Uses the freelist so DELETEs (which park pages on the freelist) count
+        as reclaimed without forcing an immediate VACUUM.
+        """
         pc = self._con.execute("PRAGMA page_count").fetchone()[0]
+        fl = self._con.execute("PRAGMA freelist_count").fetchone()[0]
         ps = self._con.execute("PRAGMA page_size").fetchone()[0]
-        return pc * ps
+        return max(0, pc - fl) * ps
 
 
 # ── module-level store handle ───────────────────────────────────────────
@@ -325,3 +440,157 @@ def coverage(coin: str, interval: str) -> List[tuple]:
 def coins() -> List[str]:
     store = get_store()
     return store.coins() if store else []
+
+
+# ── backfill runner (paced; shares the live HL rate limiter) ────────────
+
+def _default_fetch(coin: str, interval: str,
+                   start_ms: int, end_ms: int) -> Optional[list]:
+    """Raw candleSnapshot via hl_client._http_post — SAME limiter/session as
+    the live loop (per-IP budget). Returns list (possibly empty) or None on
+    rate-budget exhaustion / transient failure."""
+    from hermes_trader.client import hl_client
+    payload = {"type": "candleSnapshot",
+               "req": {"coin": coin, "interval": interval,
+                       "startTime": int(start_ms), "endTime": int(end_ms)}}
+    return hl_client._http_post("/info", payload)
+
+
+def backfill_once(store: CandleStore, plans: Sequence[Dict[str, Any]],
+                  fetch_fn=None, now_ms: Optional[int] = None,
+                  max_fetches: Optional[int] = None) -> Dict[str, Any]:
+    """Execute planned windows; NOTHING is written for []/None responses.
+
+    None (rate budget / transient) = skip, retried next cycle. [] = legitimate
+    no-history (delisted / pre-listing) — counted, nothing stored. The
+    confirmed-bar guard inside upsert_bars protects the newest window edge.
+    """
+    fetch_fn = fetch_fn or _default_fetch
+    stats = {"fetches_used": 0, "fetched": 0, "stored": 0,
+             "empty": 0, "failed": 0, "deferred": 0}
+    for i, p in enumerate(plans):
+        if max_fetches is not None and stats["fetches_used"] >= max_fetches:
+            stats["deferred"] = len(plans) - i
+            break
+        stats["fetches_used"] += 1
+        raw = fetch_fn(p["coin"], p["interval"], p["start_ms"], p["end_ms"])
+        if not isinstance(raw, list):
+            stats["failed"] += 1
+            continue
+        stats["fetched"] += 1
+        if not raw:
+            stats["empty"] += 1
+            continue
+        stats["stored"] += store.upsert_bars(
+            p["coin"], p["interval"], raw, now_ms=now_ms)
+    return stats
+
+
+def target_coins(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Decision A (owner 2026-11-15): BTC + every coin ever in the ledger +
+    the live scan universe (top-N by 24h volume, HIP-3 included). Not all HL
+    perps — cold coins accrue via harvest only if some consumer reads them.
+    """
+    out: List[str] = ["BTC"]
+    seen = {"BTC"}
+    try:
+        from hermes_trader.ledger import LEDGER_FILE
+        with open(LEDGER_FILE) as f:
+            for ln in f:
+                try:
+                    c = json.loads(ln).get("coin")
+                except Exception:
+                    continue
+                if c and c not in seen:
+                    seen.add(c)
+                    out.append(c)
+    except Exception:
+        pass  # no ledger yet (fresh install)
+    try:
+        from hermes_trader.client.universe import get_universe
+        limit = int(os.environ.get("HERMES_MAX_MARKETS", "60"))
+        for m in get_universe(include_hip3=True)[:limit]:
+            c = m.get("coin")
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    except Exception:
+        pass  # universe fetch failed; ledger set still useful
+    return out
+
+
+def run_backfill_cycle(fetch_fn=None,
+                       coins: Optional[Sequence[str]] = None) -> Optional[Dict[str, Any]]:
+    """One maintenance pass: hard day caps -> gap backfill (paced) -> size cap.
+
+    Returns stats, or None when posture is off (master switch / no mount).
+    ``fetch_fn``/``coins`` injectable for tests and one-shot seed runs.
+    """
+    cfg = _cfg()
+    if not enabled() or not cfg.get("backfill", True):
+        return None
+    store = get_store()
+    if store is None:
+        return None
+    now_ms = int(time.time() * 1000)
+    hard = store.prune_hard_caps(
+        now_ms=now_ms, prune_max_days=cfg.get("prune_max_days") or {})
+    coin_list = list(coins) if coins is not None else target_coins(cfg)
+    plans = store.backfill_plans(
+        coin_list, cfg.get("intervals") or list(MS_PER_INTERVAL),
+        now_ms=now_ms)
+    # Sustained-rate bound: weight/min * cycle-minutes / 20 weight per fetch.
+    max_fetches = int(float(cfg.get("backfill_max_weight_per_min", 200))
+                      * float(cfg.get("backfill_interval_min", 10)) / 20.0)
+    stats = backfill_once(store, plans, fetch_fn=fetch_fn,
+                          now_ms=now_ms, max_fetches=max_fetches)
+    pruned = 0
+    max_bytes = float(cfg.get("max_store_mb", 1024)) * 1_000_000
+    if store.est_bytes() > max_bytes:
+        pruned = store.prune_to_size(max_bytes=max_bytes,
+                                     batch_rows=50_000, now_ms=now_ms)
+    stats.update(plans=len(plans), coins=len(coin_list),
+                 hard_pruned=hard, pruned=pruned,
+                 est_mb=round(store.est_bytes() / 1e6, 1))
+    logger.info(
+        f"[candlestore] cycle: coins={stats['coins']} "
+        f"plans={stats['plans']} fetched={stats['fetched']} "
+        f"stored={stats['stored']} empty={stats['empty']} "
+        f"failed={stats['failed']} deferred={stats['deferred']} "
+        f"hard_pruned={hard} pruned={pruned} est_mb={stats['est_mb']}")
+    return stats
+
+
+_thread_state: Dict[str, Any] = {"thread": None, "stop": None}
+
+
+def start_backfill_thread() -> Optional[threading.Thread]:
+    """Daemon thread: first cycle after ~90 s (post startup-grace), then every
+    backfill_interval_min. Returns None (no thread) when posture is off."""
+    if store_dir() is None or not enabled():
+        return None
+    if _thread_state["thread"] is not None and _thread_state["thread"].is_alive():
+        return _thread_state["thread"]
+    stop = threading.Event()
+
+    def _loop():
+        wait = 90.0
+        while not stop.wait(wait):
+            wait = float(_cfg().get("backfill_interval_min", 10)) * 60.0
+            try:
+                run_backfill_cycle()
+            except Exception as e:
+                logger.warning(f"[candlestore] backfill cycle failed "
+                               f"(non-fatal, retried next cycle): {e}")
+
+    th = threading.Thread(target=_loop, name="candlestore-backfill",
+                          daemon=True)
+    _thread_state.update(thread=th, stop=stop)
+    th.start()
+    return th
+
+
+def stop_backfill_thread(timeout: float = 2.0) -> None:
+    st = _thread_state.get("stop")
+    if st is not None:
+        st.set()
