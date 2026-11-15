@@ -132,6 +132,9 @@ duel-logs/
 # Desktop-voice / dv runtime logs
 dv-logs/
 
+# Persistent candle cache (SQLite store harvested by the bot)
+candlestore/
+
 # HuggingFace model cache (mounted into container; binary, re-downloadable)
 hf-cache/
 

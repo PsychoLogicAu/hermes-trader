@@ -25,6 +25,13 @@ services:
       # below) — same directory-mount pattern as duel-logs: the shadow
       # accrual must survive rebuilds/recreates or the offline join has no data.
       - ./dv-logs:/app/dv-logs:rw
+      # Persistent candle cache (candlestore.py, t_18e7517a): harvested bars
+      # must survive rebuilds — HL retention (5m ~17d) makes history past it
+      # unrecoverable, so a recreate without this mount = permanent loss.
+      # Directory mount per the dir-preflight rules; created by scripts/build.sh.
+      # Posture is the hot candle_store.enabled block in .agent-config.json
+      # (deploy ships it off); the mount/env alone never activate the store.
+      - ./candlestore:/app/candlestore:rw
       # Persistent HF model cache so Chronos-2 loads from disk (no re-download
       # on rebuild/restart). Seeded from the container on first use.
       - ./hf-cache:/home/trader/.cache/huggingface:rw
@@ -48,6 +55,11 @@ services:
       # Decision-voice shadow log — same reason (clef-gate accrual join reads
       # this after recreates).
       - HERMES_DV_FILE=/app/dv-logs/hermes-trader-dv.jsonl
+      # Candle store mount point (t_18e7517a). Presence of this env is the
+      # mount, NOT the posture: harvest/backfill only run when the
+      # candle_store.enabled block is true in .agent-config.json (config
+      # repo deploy flips it hot).
+      - HERMES_CANDLESTORE_DIR=/app/candlestore
       # Eager-torch guard (2026-10-21): the image has no C++ compiler, so any
       # torch.compile attempt dies with InvalidCxxCompiler. tirex2's in-proc
       # torch._dynamo.config.disable assignment is NOT reliable on worker

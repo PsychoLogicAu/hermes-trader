@@ -27,7 +27,7 @@ echo "[build] container user will be ${USER_ID}:${GROUP_ID} (host user: $(id -un
 # If a dir is missing, Docker auto-creates it as root:root on `up` and the
 # container crash-loops with PermissionError. Fix that up front.
 BAD=0
-for dir in trader-logs hf-cache agent-state duel-logs dv-logs; do
+for dir in trader-logs hf-cache agent-state duel-logs dv-logs candlestore; do
   if [ ! -d "$dir" ]; then
     echo "[build] creating $dir"
     mkdir -p "$dir"
