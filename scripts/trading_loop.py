@@ -486,6 +486,21 @@ if _startup_grace_s > 0:
     logger.info(f"[startup] grace delay {_startup_grace_s:.0f}s — letting HL rate budget refill before the first cold scan")
     time.sleep(_startup_grace_s)
 
+# ── Persistent candle cache (t_18e7517a) ────────────────────────────────
+# Harvest rides every fetch inside hl_client.fetch_hl_candles (zero extra
+# weight, no thread needed); this daemon thread only does paced gap-backfill
+# + hard caps + the soft size cap. Posture is hot: candle_store.enabled in
+# .agent-config.json + HERMES_CANDLESTORE_DIR mount; off => no thread, no
+# store file. The thread's first cycle waits ~90s (past the grace + first
+# cold-scan burst), then every backfill_interval_min.
+try:
+    from hermes_trader.client import candlestore as _candlestore
+    if _candlestore.start_backfill_thread() is not None:
+        logger.info("[candlestore] backfill thread armed "
+                    f"(dir={_candlestore.store_dir()})")
+except Exception as e:
+    logger.warning(f"[candlestore] backfill thread not started (non-fatal): {e}")
+
 # Scan cadence: env-overridable, default 60s. Keep it above the candle cache
 # TTL (config.scan.cacheTtlMs) so every scan reads a fresh candle snapshot.
 scan_interval = int(os.environ.get('HERMES_SCAN_INTERVAL', '60'))

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import requests
 
 from hermes_trader.client.rate_limit import HL_LIMITER as _HL_LIMITER, endpoint_weight as _endpoint_weight
+from hermes_trader.client import candlestore
 from hermes_trader.models.types import Candle
 
 if TYPE_CHECKING:
@@ -304,6 +305,11 @@ def fetch_hl_candles(
                     or (now - prev[0]) >= ttl
                     or len(stored) >= len(prev[1])):
                 _CANDLE_WINDOWS[window_key] = (now, stored)
+    # Persistent candle cache (t_18e7517a): persist confirmed bars from every
+    # successful fetch — ZERO extra rate weight, decision path untouched
+    # (harvest never raises and never alters the returned list; posture-gated,
+    # master-off short-circuits before touching the store).
+    candlestore.harvest(coin, interval, candles)
     # The fetch may have been longer than requested (window kept warm) — hand
     # the caller exactly the last `count` bars it asked for.
     return candles[-count:] if len(candles) > count else candles

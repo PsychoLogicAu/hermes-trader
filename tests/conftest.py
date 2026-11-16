@@ -34,6 +34,11 @@ os.environ["HERMES_DUEL_FILE"] = os.path.join(_tmp, ".hermes-trader-duel.jsonl")
 # read at import time and research() calls the hook, so an unset var would
 # let a test write rows into the live ~/.hermes-trader-dv.jsonl.
 os.environ["HERMES_DV_FILE"] = os.path.join(_tmp, ".hermes-trader-dv.jsonl")
+# 2026-11-15: the persistent candle store (candlestore.py, harvested by
+# hl_client.fetch_hl_candles) — isolation by ABSENCE: the mount env unset
+# guarantees no test can write into the live ./candlestore/ dir even if the
+# dev shell exports it. Candlestore tests set their own tmp dir explicitly.
+os.environ.pop("HERMES_CANDLESTORE_DIR", None)
 # 2026-10-03: the prompt/response archive (prompt_log.py) gets the same
 # treatment — HERMES_PROMPT_LOG_DIR is read per call (default /app/log/
 # prompt-log, bind-mounted rw), so an unset var would let a test that calls
