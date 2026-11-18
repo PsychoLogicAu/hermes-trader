@@ -3423,6 +3423,11 @@ def aligned_short_lane_live_admit(
         onset_flip_max_min = float(live.get("onset_flip_max_min", 60))
     except (TypeError, ValueError):
         onset_flip_max_min = 60.0
+    if onset_flip_max_min != onset_flip_max_min:
+        # NaN parses through float() and `age > NaN` is always False, which
+        # would bypass the freshness gate (reviewer probe 2026-11-18).
+        # NaN only enters via non-standard JSON, but fail closed anyway.
+        onset_flip_max_min = 60.0
     if not (confirmed or fast or onset_armed):
         _on = ("" if not bool(live.get("onset_arm", False)) else
                f" — onset arm: burstcnt={'-' if _burst is None else _burst} "

@@ -1474,3 +1474,50 @@ class TestLiveAdmitOnsetArm:
                                               "onset_burst_min": 3,
                                               "onset_flip_max_min": 120}))
         assert len(got) == 1 and got[0]["arm"] == "onset"
+
+    # ── Reviewer-pass pins (independent review 2026-11-18, sa-0-03300c76):
+    # the probe-verified behaviours its coverage audit named as unpinned. ──
+
+    def test_nan_flip_max_fails_closed_to_default(self, monkeypatch, caplog):
+        # `age > NaN` is always False — unguarded this bypasses the freshness
+        # gate and a 90-min stale flip ADMITS (reviewer probe). Must not.
+        self._tracker(monkeypatch, burst=12, flip_s=90 * 60)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True,
+                                              "onset_flip_max_min": float("nan")}))
+        assert got == []
+
+    def test_garbage_burst_min_fails_closed(self, monkeypatch, caplog):
+        for bad in ("abc", {}, None, float("nan")):
+            self._tracker(monkeypatch, burst=12, flip_s=60.0)
+            got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                              cfg=_live_cfg(live={"onset_arm": True,
+                                                  "onset_burst_min": bad}))
+            assert got == [], bad
+
+    def test_flip_fn_raises_per_candidate_fails_closed(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=12)
+        from hermes_trader.agents import perception as _p
+
+        def _boom(coin, now=None):
+            raise RuntimeError("tracker rot")
+        monkeypatch.setattr(_p, "dn_flip_age_s", _boom)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert got == []
+
+    def test_band_gates_all_apply_on_onset_path(self, monkeypatch, caplog):
+        # Onset arms the TAPE; it exempts nothing per candidate.
+        self._tracker(monkeypatch, burst=12, flip_s=60.0)
+        cfg = _live_cfg(live={"onset_arm": True})
+        assert _live_admit(monkeypatch, caplog, tape_drift=+0.5, cfg=cfg,
+                           cands=[_cand("A", bucket="nearx")]) == []
+        assert _live_admit(monkeypatch, caplog, tape_drift=+0.5, cfg=cfg,
+                           cands=[_cand("A", mom=-4.0)]) == []
+        assert _live_admit(monkeypatch, caplog, tape_drift=+0.5, cfg=cfg,
+                           open_coins=frozenset({"APT"})) == []
+        now = int(time.time() * 1000)
+        assert _live_admit(monkeypatch, caplog, tape_drift=+0.5, cfg=cfg,
+                           last_ts={"APT": now - 60_000}) == []
+        # ...while the identical setup with nothing in the way admits.
+        assert len(_live_admit(monkeypatch, caplog, tape_drift=+0.5, cfg=cfg)) == 1
