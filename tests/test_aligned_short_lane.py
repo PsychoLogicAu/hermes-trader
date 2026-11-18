@@ -1363,3 +1363,114 @@ class TestLaneTapeStateStamp:
         got = _live_admit(monkeypatch, caplog, tape_drift=-4.2, tape_vol=3.1,
                           cfg=_live_cfg(live={"tape_state": {}}))
         assert len(got) == 1 and got[0]["tape_state"] == "no-history"
+
+
+# ── ONSET arm (live.onset_arm) — t_d8b728bb follow-through / t_6fb2c227 ─────
+# Native-tag full read 2026-11-18 (scratch/_whipsaw_live_key_read_20261118.py):
+# entries taken while a DN breadth thrust was firing won 3W/3 +$20.74 with
+# med MFE6 -7.16% (vs -3.31% without) — but ONLY as a shallow-side arm. As a
+# depth-ceiling override the same cohort is 7W/12 net -$45.14 (the 11-14
+# 23:37 burst=51 cluster = 4x -$15.86 squeeze stops). These pins encode that
+# design: key default OFF = byte-identical; ceiling + bounce guard + own-flip
+# freshness all still gate it; tracker failure never arms.
+
+
+class TestLiveAdmitOnsetArm:
+    def _tracker(self, monkeypatch, burst=12, flip_s=300.0,
+                 flip_missing=False, boom=False):
+        from hermes_trader.agents import perception as _p
+
+        def _bc(window_s=1800.0, now=None):
+            if boom:
+                raise RuntimeError("tracker down")
+            return burst
+
+        def _fa(coin, now=None):
+            return None if flip_missing else flip_s
+
+        monkeypatch.setattr(_p, "dn_burst_count", _bc)
+        monkeypatch.setattr(_p, "dn_flip_age_s", _fa)
+
+    def test_key_absent_idle_line_byte_identical(self, monkeypatch, caplog):
+        # Band unarmed (drift +0.5), key OFF: the idle line is the old text,
+        # no onset suffix, and the tracker is never consulted.
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5)
+        assert got == []
+        m = _msgs(caplog)[0]
+        assert "tape is not a dump" in m and "onset" not in m
+
+    def test_onset_arms_outside_the_band(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=12, flip_s=300.0)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert len(got) == 1
+        s = got[0]
+        assert s["arm"] == "onset" and s["onset_burstcnt"] == 12
+        assert s["onset_flip_age_m"] == 5.0
+        assert any("arm=onset onset_burstcnt=12 onset_flip_age_m=5" in m
+                   for m in _msgs(caplog))
+
+    def test_burst_below_min_stays_idle(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=3, flip_s=60.0)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert got == []
+        assert "onset arm: burstcnt=3" in _msgs(caplog)[0]
+
+    def test_stale_own_flip_skips_candidate(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=12, flip_s=90 * 60)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert got == []
+        assert any("onset arm" in m and "flip_age_m <= 60" in m
+                   for m in _msgs(caplog))
+
+    def test_untracked_coin_fails_closed(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=12, flip_missing=True)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert got == []
+        assert any("untracked" in m for m in _msgs(caplog))
+
+    def test_tracker_down_fails_closed(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, boom=True)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert got == []
+        assert "onset arm: burstcnt=-" in _msgs(caplog)[0]
+
+    def test_depth_ceiling_gates_onset_too(self, monkeypatch, caplog):
+        # The -$45.14 deep-onset cohort: burst fires but the tape sits UNDER
+        # the ceiling -> the ceiling idle wins, onset is never consulted.
+        self._tracker(monkeypatch, burst=51, flip_s=12 * 60)
+        got = _live_admit(monkeypatch, caplog, tape_drift=-5.0,
+                          cfg=_live_cfg(live={"onset_arm": True,
+                                              "btc24_min_pct": -4.5}))
+        assert got == []
+        assert "tape deeper than btc24_min_pct" in _msgs(caplog)[0]
+
+    def test_bounce_guard_still_applies_on_onset(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=12, flip_s=60.0)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          tape_extra={"btc1h": +0.8, "drift_min12": -3.0},
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert got == []
+        assert any("whip_bounce" in m for m in _msgs(caplog))
+
+    def test_band_armed_path_untouched_by_key(self, monkeypatch, caplog):
+        # Confirmed dump arms the band: arm label and spec fields identical
+        # to key-off behaviour even while a thrust fires.
+        self._tracker(monkeypatch, burst=12, flip_s=60.0)
+        got = _live_admit(monkeypatch, caplog, tape_drift=-4.2,
+                          cfg=_live_cfg(live={"onset_arm": True}))
+        assert len(got) == 1
+        assert got[0]["arm"] == "confirmed"
+        assert "onset_burstcnt" not in got[0]
+
+    def test_custom_thresholds_honoured(self, monkeypatch, caplog):
+        self._tracker(monkeypatch, burst=4, flip_s=90 * 60)
+        got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
+                          cfg=_live_cfg(live={"onset_arm": True,
+                                              "onset_burst_min": 3,
+                                              "onset_flip_max_min": 120}))
+        assert len(got) == 1 and got[0]["arm"] == "onset"
