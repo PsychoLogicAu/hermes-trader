@@ -3288,6 +3288,12 @@ def aligned_short_lane_live_admit(
     whip_guard_tags() SKIP the candidate; whip_extreme is admitted with a
     whip_tags= annotation (it is true for every armed entry — blocking it
     empties the book; see the constants block).
+    ONSET arm (live.onset_arm, default false): when the tape band does NOT
+    arm but a DN breadth thrust is firing (dn_burst_count >= onset_burst_min)
+    the lane may arm, per candidate gated on a fresh own DN flip
+    (flip_age_m <= onset_flip_max_min) — the leg's front. The depth ceiling
+    and the whip_bounce guard gate this arm too; evidence + design notes in
+    the block. Absent/false key = byte-identical.
     """
     live = (lane_cfg or {}).get("live")
     if not isinstance(live, dict) or not bool(live.get("enabled", False)):
@@ -3384,16 +3390,59 @@ def aligned_short_lane_live_admit(
             f"net6h {net6h_s} (a deep 24h drift means the dump is already "
             f"old; the squeeze stops measured sat at −4.78/−4.94/−5.02)")
         return []
-    if not (confirmed or fast):
+    # ONSET arm (t_d8b728bb follow-through, t_6fb2c227 full-read 2026-11-18,
+    # scratch/_whipsaw_live_key_read_20261118.py): arm on a breadth THRUST
+    # instead of the tape band — dn_burst_count() (DN momentum flips
+    # universe-wide, trailing 30min) >= onset_burst_min (default 8), with
+    # the candidate's OWN DN flip fresh (dn_flip_age_s <=
+    # onset_flip_max_min, default 60min): the front of the leg. Native-tag
+    # read over n=442 WOULD ADMIT lines (11-12..11-18): band book 15 fills
+    # +$46.23; fills entered WITH onset firing 3W/3 +$20.74, med MFE6
+    # -7.16% vs -3.31% for fills without — reproducing the offline cohort
+    # (8W/9, +$18.87) ONLY as a SHALLOW-side arm (band not armed yet). As a
+    # depth-CEILING override it dies: onset x drift<-4.5 n=12 7W net
+    # -45.14 — the 11-14 23:37 burst=51/flip-12min cluster is 4x -$15.86
+    # squeeze stops (tape exhaustion, not onset). The ceiling block above
+    # therefore gates this arm too: it returns before onset is ever
+    # consulted, and the whip_bounce guard keeps applying. live.onset_arm
+    # absent/false = byte-identical to the band-only arm; a dead tracker or
+    # an untracked coin never arms and never admits (fail closed).
+    onset_armed = False
+    _burst = None
+    _flip_age_fn = None
+    if not (confirmed or fast) and bool(live.get("onset_arm", False)):
+        try:
+            from hermes_trader.agents.perception import (dn_burst_count,
+                                                         dn_flip_age_s)
+            _burst = dn_burst_count()
+            _flip_age_fn = dn_flip_age_s
+            onset_armed = _burst >= float(live.get("onset_burst_min", 8))
+        except Exception:
+            onset_armed = False
+    try:
+        onset_flip_max_min = float(live.get("onset_flip_max_min", 60))
+    except (TypeError, ValueError):
+        onset_flip_max_min = 60.0
+    if onset_flip_max_min != onset_flip_max_min:
+        # NaN parses through float() and `age > NaN` is always False, which
+        # would bypass the freshness gate (reviewer probe 2026-11-18).
+        # NaN only enters via non-standard JSON, but fail closed anyway.
+        onset_flip_max_min = 60.0
+    if not (confirmed or fast or onset_armed):
+        _on = ("" if not bool(live.get("onset_arm", False)) else
+               f" — onset arm: burstcnt={'-' if _burst is None else _burst} "
+               f"< onset_burst_min {live.get('onset_burst_min', 8)}")
         logger.info(
             f"[aligned-short-lane][LIVE] idle: tape is not a dump — "
             f"drift {drift:+.2f}% vs btc24_max_pct "
             f"{_fmt(arm_cfg.get('btc24_max_pct'))}, vol {vol_s} vs vol_min_pct "
             f"{_fmt(arm_cfg.get('vol_min_pct'))}, net6h {net6h_s} vs "
-            f"net6h_max_pct {_fmt(arm_cfg.get('net6h_max_pct'))}")
+            f"net6h_max_pct {_fmt(arm_cfg.get('net6h_max_pct'))}{_on}")
         return []
     arm = ("confirmed+fast" if (confirmed and fast)
            else "confirmed" if confirmed else "fast")
+    if onset_armed:
+        arm = "onset"
 
     # Tape-state stamp (t_860f95f8 vocabulary) — LOG-ONLY phase label, so the
     # lane's own accrual cross-reads with the state_admission short clause's
@@ -3471,6 +3520,22 @@ def aligned_short_lane_live_admit(
                 f"drift {drift:+.2f}% vs 12h min "
                 f"{_fmt((tape or {}).get('drift_min12'))}")
             continue
+        # ONSET arm per-candidate gate: the thrust is universe-wide, but the
+        # coin must be at the FRONT of its own leg — own DN flip fresh.
+        # Untracked coin / dead tracker = skip (fail closed).
+        _flip_m = None
+        if arm == "onset":
+            try:
+                _age_s = _flip_age_fn(coin) if _flip_age_fn else None
+            except Exception:
+                _age_s = None
+            if _age_s is None or _age_s > onset_flip_max_min * 60.0:
+                logger.info(
+                    f"[aligned-short-lane][LIVE] {coin} skip: onset arm "
+                    f"needs own flip_age_m <= {onset_flip_max_min:.0f} — "
+                    f"{'untracked' if _age_s is None else f'{_age_s / 60.0:.0f}'}")
+                continue
+            _flip_m = _age_s / 60.0
         if coin in (open_coins or set()):
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: position open")
             continue
@@ -3503,6 +3568,10 @@ def aligned_short_lane_live_admit(
             "btc_tape_vol": _vol_raw,
             "btc_net6h": _n6_raw,
             "arm": arm,
+            **({"onset_burstcnt": _burst,
+                "onset_flip_age_m": (round(_flip_m, 1)
+                                     if _flip_m is not None else None)}
+               if arm == "onset" else {}),
             "whip_tags": ",".join(_whips) or "-",
             **({"tape_state": stamp} if stamp else {}),
             "cohort_tag": tag,
@@ -3513,7 +3582,9 @@ def aligned_short_lane_live_admit(
             f"ts={now_ms} mid={cand.get('mid')} comp={cand.get('comp')} "
             f"mom6h_net={mom:+.1f}% ema4h={cand.get('ema4h_pair')} "
             f"btc_tape_drift={drift:+.2f}% btc_tape_vol={vol_s} "
-            f"btc_net6h={net6h_s} arm={arm}{_stamp_txt} "
+            f"btc_net6h={net6h_s} arm={arm}"
+            f"{f' onset_burstcnt={_burst} onset_flip_age_m={_flip_m:.0f}' if arm == 'onset' else ''}"
+            f"{_stamp_txt} "
             f"ema4h_dist={float(cand.get('ema4h_dist_pct', 0) or 0):+.3f}% "
             f"ema4h_dist_bucket={cand.get('ema4h_bucket') or 'n/a'} "
             f"lane={cand.get('lane')} variant={','.join(cand.get('variant') or []) or '-'} "
