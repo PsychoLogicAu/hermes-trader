@@ -1683,6 +1683,25 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             f"{analysis.get('composite_score', 0):.1f}): {_mtlv.get('reason')} — "
             f"NOT blocking (shadow mode)")
 
+    # Signed over-extension accrual (t_f0c07370, 2026-11-20): the entry is
+    # already >=10% along in trade direction and the primary's own conviction
+    # is above the bar — the mirror's most negative cell (-37.03 BN2, 51 stops)
+    # and the one place the seat is provably over-confident (conf rises with
+    # extension). SHADOW ONLY: the cohort is regime-split (-50 / +30..+45 by
+    # half) and the live book has 0 stop-outs since the seat flip, so the
+    # executed-cohort P/L decides the flip, not one window. The reason string
+    # carries the signed move and the crowdedness flag so the join separates
+    # this from crowded_mover_gate's contrary evidence (>10% THIN movers are
+    # its best cell) without re-running the gate.
+    _ox = gate_output["results"].get("overextension") or {}
+    if _ox.get("shadow_would_block"):
+        logger.warning(
+            f"[gate][OVEREXTENSION][SHADOW] WOULD HAVE BLOCKED "
+            f"{analysis['coin']} {trade_side.upper()} "
+            f"(conf {analysis['confidence']:.2f}, composite "
+            f"{analysis.get('composite_score', 0):.1f}): {_ox.get('reason')} — "
+            f"NOT blocking (shadow mode)")
+
     # Second-voice ABSTENTION veto (t_848eb1c4): the duelist declined to
     # endorse the entry and was unsure of its own shrug. Same would-block
     # accrual pattern; the duelist's own conf — the key of this gate, absent

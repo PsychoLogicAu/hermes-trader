@@ -2052,6 +2052,99 @@ def mild_tape_long_veto_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> Gate
     return {"pass": False, "reason": reason}
 
 
+def overextension_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
+    """Signed over-extension WOULD-VETO accrual (board t_f0c07370, 2026-11-20).
+
+    Trips when the 24h move is already >= `ext_pct` **in the trade direction**
+    AND the primary's own confidence sits above `conf_min`. The seat's conviction
+    rises with extension (rho(conf, signed daily move) = +0.41; conf terciles
+    invert — 0.66-0.81 band carries 24.1% of stops and -36.36), so the bar is
+    deliberately conf-conditioned, not categorical.
+
+    Evidence (flip mirror, 2026-10-30..11-12 cohort, live floors long 0.50 /
+    short 0.60, trap veto 0.55 applied identically; n=884 priced conf-eligible,
+    BN2 total +$13.91, 106 stops — scratch/_abx_detgate_20261120.log):
+      ext>=8%                 n=413  -27.21 BN2 / -48.53 BN1
+      ext>=10%                n=307  -29.67 / -44.23
+      ext>=10 & conf>0.62     n=221  -37.03 / -48.20   <- the cell (51 stops)
+      ext>=10 & conf<=0.62    n=86    +7.36 /  +3.96   <- NOT a gate here
+      ext>=8 & stop<1.5 ATR1h n=109  -25.30 (36% stop rate)
+    The ATR leg is NOT in the rule on purpose: `stop_atr1<1.0 OR atr1>=5%`
+    alone measures +17.55 — ATR width is a modifier on extension, never a gate
+    of its own. And the seat cannot see its own bracket: the state carries no
+    stop key at all, which is what the 2026-11-20 prompt-arm replay proved
+    against this same cohort — arm A (state `risk_shape` + a 473-char penalty
+    clause) netted -22.71 with 87% of flow lost, arm B (composite_score
+    stripped) -14.86, AB -29.79. The fix therefore has to sit post-verdict in
+    the gate stack, not in the prompt.
+
+    mode (config `overextension_gate.mode`): "off" (default, inert) / "shadow"
+    (pass + would-block marker) / "live" (block). **Ship and keep SHADOW**: the
+    cohort is regime-split — every extension cell runs about -50 in the 11-01..05
+    half and +30..+45 in 11-06..12 — so no single window justifies the flip, and
+    the live book since the mammoth flip has 0 stop-outs, i.e. the mirror's stop
+    anatomy is not yet reproduced live. Shadow accrual also has to settle the
+    conflict with `crowded_mover_gate`'s evidence (>10% THIN movers are the best
+    cell in its window, n=32, 91% WR), which a raw extension bar would sweep up.
+    If this is ever armed LIVE, the runner-gate twin check is mandatory
+    (crowded_mover / mild_tape_long precedent): bypass-fed entries early-return
+    from the runner gate, so the classic gate alone would be bypassed.
+
+    Join vars ride in gate_results (hence the `Trade result:` line) on EVERY
+    decision while mode != off — `signed_ext_pct`, `ext_pct`, `conf_min`,
+    `daily_mover_fired`, `entry_class`, `overextension_trip` — so the
+    threshold/conf sweep and the crowded-vs-thin and lane-class splits price
+    offline off one accrual instead of needing a re-trip per variant.
+    Fail-safe: a missing/malformed `daily_move_pct` (data gap) passes in BOTH
+    modes; a data gap must never block.
+    """
+    mode = str(gate_cfg.get("mode", "off")).strip().lower()
+    if mode not in ("shadow", "live"):
+        return {"pass": True, "reason": "overextension: disabled"}
+    try:
+        _mv = getattr(ctx, "daily_move_pct", None)
+        _mv = None if _mv is None else float(_mv)
+        if _mv is not None and _mv != _mv:
+            _mv = None  # NaN is a data gap, not a 0% move
+    except (TypeError, ValueError):
+        _mv = None  # malformed producer -> inert, never a block
+    try:
+        _thr = float(gate_cfg.get("ext_pct", 10.0))
+        _cmin = float(gate_cfg.get("conf_min", 0.62))
+    except (TypeError, ValueError):
+        _thr, _cmin = 10.0, 0.62  # malformed knob -> defaults, never a crash
+    # Signed in TRADE direction: a +12% mover trips a LONG, a -12% mover trips
+    # a SHORT. Unsigned magnitude would mis-trad the counter-trend side.
+    _signed = None if _mv is None else (_mv if ctx.trade_side == "long" else -_mv)
+    _conf = float(ctx.confidence or 0.0)
+    _trip = _signed is not None and _signed >= _thr and _conf > _cmin
+    _jv = {
+        "signed_ext_pct": _signed,
+        "ext_pct": _thr,
+        "conf_min": _cmin,
+        "daily_mover_fired": bool(getattr(ctx, "daily_mover_fired", False)),
+        "entry_class": getattr(ctx, "entry_class", None),
+        "overextension_trip": _trip,
+    }
+    if _signed is None:
+        return {"pass": True,
+                "reason": "overextension: no 24h-move read (inert)", **_jv}
+    if not _trip:
+        return {"pass": True,
+                "reason": (f"overextension: signed {_signed:+.1f}% / conf "
+                           f"{_conf:.2f} below bar {_thr:.1f}% & conf "
+                           f"{_cmin:.2f}"), **_jv}
+    reason = (f"overextension: {str(ctx.trade_side).upper()} already moved "
+              f"{_signed:+.1f}% in trade direction (bar {_thr:.1f}%) with "
+              f"conf {_conf:.2f} > {_cmin:.2f}, score "
+              f"{ctx.composite_score:.0f}, mover_fired="
+              f"{str(bool(getattr(ctx, 'daily_mover_fired', False))).lower()}, "
+              f"class={getattr(ctx, 'entry_class', None) or '-'}")
+    if mode == "shadow":
+        return {"pass": True, "reason": reason, "shadow_would_block": True, **_jv}
+    return {"pass": False, "reason": reason, **_jv}
+
+
 def band_counter_breach_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult:
     """Band counter-trend breach conviction gate (SHADOW by default).
 
@@ -2869,6 +2962,13 @@ def eval_all_gates(
     # their only accrual surface at shadow.
     results["mild_tape_long"] = mild_tape_long_veto_gate(
         ctx, effective_config.get("mild_tape_long_veto_gate") or {})
+    # Signed over-extension WOULD-VETO accrual (t_f0c07370, 2026-11-20): the
+    # seat's conviction RISES with extension and the mirror prices the
+    # ext>=10% & conf>0.62 cell at -37.03 BN2, while both prompt fixes failed
+    # (-22.71 / -14.86) — so this accrues post-verdict, SHADOW only, with
+    # per-decision join vars for the threshold/conf/crowdedness sweeps.
+    results["overextension"] = overextension_gate(
+        ctx, effective_config.get("overextension_gate") or {})
     # Duelist veto: the A/B duelist's OPPOSITE-SIDE call on the primary's
     # directional entry (re-keyed 2026-09-03 to explicit VETO; the explicit-
     # VETO trigger retired 2026-10-19 with the chat-era VETO verdict —
