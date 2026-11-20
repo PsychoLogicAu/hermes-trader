@@ -140,6 +140,24 @@ def test_malformed_knobs_fall_back_to_defaults():
     assert r["ext_pct"] == 10.0 and r["conf_min"] == pytest.approx(0.62)
 
 
+def test_nan_bars_fail_closed_to_defaults():
+    # float("NaN") parses cleanly and every comparison against it is False, so
+    # without the guard a NaN ext_pct would make the gate silently never trip.
+    nan = float("nan")
+    r = overextension_gate(_ctx(daily_move_pct=12.0, confidence=0.72),
+                           {"mode": "live", "ext_pct": nan, "conf_min": nan})
+    assert r["pass"] is False, "NaN bars must fall back to the documented bars"
+    assert r["ext_pct"] == 10.0 and r["conf_min"] == pytest.approx(0.62)
+    assert r["overextension_trip"] is True
+
+
+def test_nan_confidence_never_fabricates_a_block():
+    # Accrual loses one row; it must not manufacture a veto.
+    r = overextension_gate(_ctx(daily_move_pct=12.0, confidence=float("nan")),
+                           CFG_LIVE)
+    assert r["pass"] is True and r["overextension_trip"] is False
+
+
 # ── (i) registered in the classic pipeline, inert without a config block ------
 def test_eval_all_gates_carries_the_key():
     out = eval_all_gates(_ctx(daily_move_pct=3.0), {})

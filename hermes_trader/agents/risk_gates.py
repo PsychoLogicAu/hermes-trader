@@ -2095,8 +2095,10 @@ def overextension_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult
     `daily_mover_fired`, `entry_class`, `overextension_trip` — so the
     threshold/conf sweep and the crowded-vs-thin and lane-class splits price
     offline off one accrual instead of needing a re-trip per variant.
-    Fail-safe: a missing/malformed `daily_move_pct` (data gap) passes in BOTH
-    modes; a data gap must never block.
+    Fail-safe: a missing/malformed/NaN `daily_move_pct` (data gap) passes in
+    BOTH modes — a data gap must never block. A NaN/malformed BAR falls back to
+    the documented default (a NaN bar would otherwise silently never trip), and
+    a NaN confidence never trips rather than inventing a veto.
     """
     mode = str(gate_cfg.get("mode", "off")).strip().lower()
     if mode not in ("shadow", "live"):
@@ -2113,6 +2115,15 @@ def overextension_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult
         _cmin = float(gate_cfg.get("conf_min", 0.62))
     except (TypeError, ValueError):
         _thr, _cmin = 10.0, 0.62  # malformed knob -> defaults, never a crash
+    # NaN guards on the BARS, not just the input: `float("NaN")` parses without
+    # error and every comparison against NaN is False, so a NaN `ext_pct` would
+    # make this gate silently never trip (json.loads accepts bare NaN/Infinity
+    # in a hand-edited config). Same lesson as the lane-branch review pass
+    # (t_d8b728bb) — new code fails closed to the documented default.
+    if _thr != _thr:
+        _thr = 10.0
+    if _cmin != _cmin:
+        _cmin = 0.62
     # Signed in TRADE direction: a +12% mover trips a LONG, a -12% mover trips
     # a SHORT. Unsigned magnitude would mis-trad the counter-trend side.
     _signed = None if _mv is None else (_mv if ctx.trade_side == "long" else -_mv)
