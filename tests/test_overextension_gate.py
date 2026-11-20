@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Any, Dict, cast
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -151,11 +151,56 @@ def test_nan_bars_fail_closed_to_defaults():
     assert r["overextension_trip"] is True
 
 
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), "Infinity",
+                                 "inf", "-Infinity"])
+def test_infinite_bars_fail_closed_to_defaults(bad):
+    # Reviewer finding L1 (2026-11-20): the NaN-only guard left this open —
+    # float("Infinity") parses, `inf != inf` is False, and EVERY comparison
+    # against Infinity is False, so an Infinity bar silently never trips, even
+    # at mode=live. json.loads also accepts a bare Infinity literal.
+    r = overextension_gate(_ctx(daily_move_pct=999.0, confidence=0.99),
+                           {"mode": "live", "ext_pct": bad, "conf_min": bad})
+    assert r["pass"] is False, f"bar {bad!r} must not silently disarm the gate"
+    assert r["ext_pct"] == 10.0 and r["conf_min"] == pytest.approx(0.62)
+    assert r["overextension_trip"] is True
+
+
+def test_infinite_move_is_a_data_gap():
+    for cfg in (CFG_SHADOW, CFG_LIVE):
+        r = overextension_gate(_ctx(daily_move_pct=float("inf")), cfg)
+        assert r["pass"] is True and r["signed_ext_pct"] is None
+
+
 def test_nan_confidence_never_fabricates_a_block():
     # Accrual loses one row; it must not manufacture a veto.
     r = overextension_gate(_ctx(daily_move_pct=12.0, confidence=float("nan")),
                            CFG_LIVE)
     assert r["pass"] is True and r["overextension_trip"] is False
+
+
+@pytest.mark.parametrize("bad_conf", ["high", None, [], float("nan")])
+def test_conf_confusion_never_raises_out_of_the_gate(bad_conf):
+    # S1: eval_all_gates has NO per-gate try/except, so a raise here would drop
+    # the whole decision in trading_loop — blocking, while in shadow mode.
+    r = overextension_gate(_ctx(daily_move_pct=12.0, confidence=bad_conf),
+                           CFG_SHADOW)
+    assert r["pass"] is True and r.get("shadow_would_block") is None
+
+
+def test_missing_composite_score_does_not_break_the_trip_reason():
+    # S2: the reason string formats the score on the TRIP path only.
+    ctx = _ctx(daily_move_pct=12.0, confidence=0.72)
+    ctx.composite_score = cast(float, None)  # deliberately malformed producer
+    r = overextension_gate(ctx, CFG_SHADOW)
+    assert r["shadow_would_block"] is True and "score 0," in r["reason"]
+
+
+def test_non_dict_config_block_is_inert_not_fatal():
+    # S3: a config typo (`"overextension_gate": "shadow"`) must not raise.
+    for bad in ("shadow", 5, None, []):
+        r = overextension_gate(_ctx(daily_move_pct=12.0),
+                               cast("Dict[str, Any]", bad))
+        assert r["pass"] is True and r["reason"] == "overextension: disabled"
 
 
 # ── (i) registered in the classic pipeline, inert without a config block ------

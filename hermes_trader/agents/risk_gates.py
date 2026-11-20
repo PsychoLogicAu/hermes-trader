@@ -6,6 +6,7 @@ All gates are evaluated; results are collected for telemetry (no short-circuit).
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -2095,19 +2096,26 @@ def overextension_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult
     `daily_mover_fired`, `entry_class`, `overextension_trip` — so the
     threshold/conf sweep and the crowded-vs-thin and lane-class splits price
     offline off one accrual instead of needing a re-trip per variant.
-    Fail-safe: a missing/malformed/NaN `daily_move_pct` (data gap) passes in
-    BOTH modes — a data gap must never block. A NaN/malformed BAR falls back to
-    the documented default (a NaN bar would otherwise silently never trip), and
-    a NaN confidence never trips rather than inventing a veto.
+    Fail-safe (all three pinned by tests after the 2026-11-20 independent
+    review): a missing/malformed/non-finite `daily_move_pct` is a DATA GAP and
+    passes in BOTH modes — a data gap must never block. A non-finite or
+    malformed BAR (NaN **or Infinity** — both parse cleanly and every
+    comparison against them is False) falls back to the documented default, so
+    a bad bar can never silently disarm the gate. A non-finite/malformed conf
+    or composite_score degrades to 0.0 and can never fabricate a veto or raise
+    out of the gate — `eval_all_gates` has no per-gate try/except, so a raise
+    here would drop the whole decision, i.e. block while shadow.
     """
+    if not isinstance(gate_cfg, dict):
+        gate_cfg = {}  # config typo (a bare string/number) must not crash the eval
     mode = str(gate_cfg.get("mode", "off")).strip().lower()
     if mode not in ("shadow", "live"):
         return {"pass": True, "reason": "overextension: disabled"}
     try:
         _mv = getattr(ctx, "daily_move_pct", None)
         _mv = None if _mv is None else float(_mv)
-        if _mv is not None and _mv != _mv:
-            _mv = None  # NaN is a data gap, not a 0% move
+        if _mv is not None and not math.isfinite(_mv):
+            _mv = None  # NaN/inf from a garbage producer is a data gap, not a move
     except (TypeError, ValueError):
         _mv = None  # malformed producer -> inert, never a block
     try:
@@ -2115,19 +2123,27 @@ def overextension_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult
         _cmin = float(gate_cfg.get("conf_min", 0.62))
     except (TypeError, ValueError):
         _thr, _cmin = 10.0, 0.62  # malformed knob -> defaults, never a crash
-    # NaN guards on the BARS, not just the input: `float("NaN")` parses without
-    # error and every comparison against NaN is False, so a NaN `ext_pct` would
-    # make this gate silently never trip (json.loads accepts bare NaN/Infinity
-    # in a hand-edited config). Same lesson as the lane-branch review pass
-    # (t_d8b728bb) — new code fails closed to the documented default.
-    if _thr != _thr:
+    # Finiteness guards on the BARS, not just the input: `float("NaN")` and
+    # `float("Infinity")` both parse without error, and EVERY comparison against
+    # NaN or Infinity is False — so a non-finite `ext_pct`/`conf_min` would make
+    # this gate silently never trip, in either mode (json.loads accepts bare
+    # NaN/Infinity tokens in a hand-edited config, and float() accepts
+    # "inf"/"Infinity"/"-Infinity"). Same fail direction the lane-branch review
+    # pass caught (t_d8b728bb, NaN onset_flip_max_min); new code fails closed to
+    # the documented default. Reviewer L1, 2026-11-20.
+    if not math.isfinite(_thr):
         _thr = 10.0
-    if _cmin != _cmin:
+    if not math.isfinite(_cmin):
         _cmin = 0.62
     # Signed in TRADE direction: a +12% mover trips a LONG, a -12% mover trips
     # a SHORT. Unsigned magnitude would mis-trad the counter-trend side.
     _signed = None if _mv is None else (_mv if ctx.trade_side == "long" else -_mv)
-    _conf = float(ctx.confidence or 0.0)
+    try:
+        _conf = float(ctx.confidence or 0.0)
+    except (TypeError, ValueError):
+        _conf = 0.0  # never raise out of a gate (no per-gate try/except upstream)
+    if not math.isfinite(_conf):
+        _conf = 0.0  # a NaN conf loses one accrual row; it must not invent a veto
     _trip = _signed is not None and _signed >= _thr and _conf > _cmin
     _jv = {
         "signed_ext_pct": _signed,
@@ -2145,10 +2161,16 @@ def overextension_gate(ctx: GateContext, gate_cfg: Dict[str, Any]) -> GateResult
                 "reason": (f"overextension: signed {_signed:+.1f}% / conf "
                            f"{_conf:.2f} below bar {_thr:.1f}% & conf "
                            f"{_cmin:.2f}"), **_jv}
+    try:
+        _score = float(ctx.composite_score or 0.0)
+    except (TypeError, ValueError):
+        _score = 0.0  # the reason string must never raise on the trip path (S2)
+    if not math.isfinite(_score):
+        _score = 0.0
     reason = (f"overextension: {str(ctx.trade_side).upper()} already moved "
               f"{_signed:+.1f}% in trade direction (bar {_thr:.1f}%) with "
               f"conf {_conf:.2f} > {_cmin:.2f}, score "
-              f"{ctx.composite_score:.0f}, mover_fired="
+              f"{_score:.0f}, mover_fired="
               f"{str(bool(getattr(ctx, 'daily_mover_fired', False))).lower()}, "
               f"class={getattr(ctx, 'entry_class', None) or '-'}")
     if mode == "shadow":
