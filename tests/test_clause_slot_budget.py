@@ -99,12 +99,37 @@ def test_helper_non_dict_inert():
     assert risk_gates.clause_slot_budget("max_clause_slots", 3) is None
 
 
-def test_helper_malformed_is_floor_or_inert():
-    # With a floor supplied a malformed value stays armed at the floor
-    # (conservative); without one it is inert — never a looser budget.
+def test_helper_malformed_never_inert_when_key_present():
+    # A typo in an ARMED budget must never degrade to inert (inert = looser
+    # than the owner wrote = over-admit). Floor present -> armed at floor;
+    # floor absent -> fail-CLOSED at 0, still armed + malformed marker.
     b = risk_gates.clause_slot_budget({"max_clause_slots": "lots"}, 0, floor=5)
-    assert b is not None and b["limit"] == 5 and b["allow"]
-    assert risk_gates.clause_slot_budget({"max_clause_slots": "lots"}, 0) is None
+    assert b is not None and b["limit"] == 5 and b["malformed"] and b["allow"]
+    b = risk_gates.clause_slot_budget({"max_clause_slots": "lots"}, 0)
+    assert b is not None and b["limit"] == 0 and b["malformed"]
+    # Log-only default never blocks, but the binding (shadow:false) posture
+    # fails CLOSED at 0 rather than going inert.
+    assert b["allow"] and b["shadow_would_skip"]
+    b = risk_gates.clause_slot_budget(
+        {"max_clause_slots": "lots", "max_clause_slots_shadow": False}, 0)
+    assert not b["allow"] and not b["shadow_would_skip"]
+    assert "malformed slots value" in b["reason"]
+
+
+def test_helper_non_finite_slots_cannot_raise_and_never_loosens():
+    # `float("inf")`/`"Infinity"`/`"1e999"` parse fine and int() on them raises
+    # OverflowError — the exact Infinity-bar class this repo fixed twice
+    # (3c15e35d, 258284fc). Here they land in the malformed path, armed.
+    for v in (float("inf"), float("-inf"), "Infinity", "-Infinity", "inf",
+              1e999, "1e999", float("nan")):
+        b = risk_gates.clause_slot_budget(
+            {"max_clause_slots": v, "max_clause_slots_shadow": False}, 0,
+            floor=5)
+        assert b is not None and b["malformed"] and b["limit"] == 5, repr(v)
+        assert b["allow"], repr(v)          # armed at the floor, not unlimited
+        b = risk_gates.clause_slot_budget(
+            {"max_clause_slots": v, "max_clause_slots_shadow": False}, 0)
+        assert b is not None and b["limit"] == 0 and not b["allow"], repr(v)
 
 
 def test_helper_allow_and_block_boundaries():
@@ -157,13 +182,58 @@ def test_helper_clamps_cap_up_to_contention_floor():
     assert not b["allow"]
 
 
-def test_contention_floor_pinned_verbatim_or_ratio_scaled():
-    # Explicit dsl_exit key pins the floor verbatim.
+def test_helper_zero_or_negative_is_never_clamped_up_to_the_floor():
+    # Reviewer LE2 (2026-11-21): the original code clamped BEFORE the zero
+    # check, so an owner writing 0 ("refuse all clause admits") got a live
+    # 5-slot book. Fail-closed must win over the sizing clamp.
+    for bad in (0, -3):
+        cfg = {"max_clause_slots": bad, "max_clause_slots_shadow": False}
+        b = risk_gates.clause_slot_budget(cfg, 0, floor=5)
+        assert b["limit"] == bad and not b["allow"], bad
+        assert not b["shadow_would_skip"] and b["malformed"] is False
+        assert "clause admits refused" in b["reason"]
+        # Log-only default still never blocks, but accrues the refusal.
+        b = risk_gates.clause_slot_budget({"max_clause_slots": bad}, 0, floor=5)
+        assert b["allow"] and b["shadow_would_skip"]
+
+
+def test_contention_floor_non_finite_or_zero_pin():
+    # A non-finite pin falls back to the ratio (never 0, never a raise); an
+    # explicit 0 is a legitimate "no floor" and must survive verbatim.
     assert risk_gates.contention_floor(
-        {"max_concurrent": 10, "dsl_exit": {"stale_flat_min_positions": 4}}) == 4
-    # Absent -> 60% of max_concurrent (the load-bearing ratio; 3 at cap 5).
-    assert risk_gates.contention_floor({"max_concurrent": 5}) == 3
-    assert risk_gates.contention_floor({"max_concurrent": 10}) == 6
+        {"max_concurrent": 10,
+         "dsl_exit": {"stale_flat_min_positions": float("inf")}}) == 6
+    assert risk_gates.contention_floor(
+        {"max_concurrent": 10,
+         "dsl_exit": {"stale_flat_min_positions": "banana"}}) == 6
+    assert risk_gates.contention_floor(
+        {"max_concurrent": 10,
+         "dsl_exit": {"stale_flat_min_positions": 0}}) == 0
+    assert risk_gates.contention_floor(
+        {"max_concurrent": 10,
+         "dsl_exit": {"stale_flat_min_positions": "5"}}) == 5
+    assert risk_gates.contention_floor(
+        {"max_concurrent": float("nan")}) == 3   # ratio default of cap 5
+
+
+def test_wrapper_unreadable_occupancy_is_full_not_inert(monkeypatch, caplog):
+    # A raising ledger read (or import failure) must NOT turn a restrictive
+    # knob off — it reads as FULL.
+    caplog.set_level(logging.WARNING, logger="hermes_trader.agents.risk_gates")
+
+    def _raise(tag):
+        raise RuntimeError("ledger unreadable")
+
+    monkeypatch.setattr(ledger, "count_open_with_lane", _raise)
+    b = risk_gates.clause_slot_budget_check(
+        _clause(max_clause_slots=5, max_clause_slots_shadow=False), "short",
+        _cfg())
+    assert b is not None and not b["allow"] and b["used"] == b["limit"] == 5
+    assert "occupancy UNREADABLE" in caplog.text
+    # And in shadow mode the same unreadable occupancy accrues, never blocks.
+    b = risk_gates.clause_slot_budget_check(_clause(max_clause_slots=5),
+                                            "short", _cfg())
+    assert b["allow"] and b["shadow_would_skip"]
 
 
 def test_helper_key_names_are_configurable_for_future_lanes():
@@ -265,6 +335,26 @@ def test_gate_configured_cap_below_floor_clamped_up(monkeypatch):
         _analysis(), _gate()) == "runner_gate_blocked (clause slot budget 5/5)"
 
 
+def test_gate_never_clobbers_another_lanes_ledger_tag(monkeypatch):
+    # Reviewer (2026-11-21): a clause admit inside an aligned-lane analysis
+    # must NOT retag that row — the aligned lane's own max_lane_slots
+    # occupancy is a LIVE gate and would under-count (that lane over-admits).
+    clause = _clause(max_clause_slots=5, max_clause_slots_shadow=False)
+    a, reason = _run(monkeypatch, clause, 0, _lane_tag="aligned_short_lane")
+    assert reason == ""                              # clause still admits
+    assert a["_lane_tag"] == "aligned_short_lane"    # tag NOT stolen
+
+
+def test_gate_redecides_its_own_tag_on_every_attempt(monkeypatch):
+    # Rotation retry / manual re-run reuses the analysis dict: a stale clause
+    # tag from a previous attempt must not survive a decision that declines.
+    clause = _clause(max_clause_slots=5, max_clause_slots_shadow=False)
+    a, reason = _run(monkeypatch, clause, 0, btc_drift_24h=1.5,
+                     _lane_tag="state_admission")   # tape out of band
+    assert reason != ""
+    assert "_lane_tag" not in a
+
+
 # ── classic gate call site (risk_gates) ──────────────────────────────────
 
 def _ctx(**over):
@@ -312,4 +402,6 @@ def test_classic_absent_budget_key_is_byte_identical_and_zero_reads(monkeypatch)
     res = risk_gates._state_conf_admission(
         ctx, _cfg(), risk_gates.confidence_gate(ctx, 0.65), 0.65)
     assert res.get("pass") and res.get("via") == "state_admission"
-    assert res.get("clause_lane_tag") is None
+    # Strictly no new key at all (the tag key only rides an ARMED budget, so
+    # the serialized 'Trade result:' payload and execute response stay as-is).
+    assert "clause_lane_tag" not in res

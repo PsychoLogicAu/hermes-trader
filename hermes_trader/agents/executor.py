@@ -3525,6 +3525,14 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             _pm = str(analysis.get("primary_model") or "").strip()
             if _pm:
                 _clause = (read_model_profile_for_model(_pm) or {}).get("state_admission")
+                if analysis.get("_lane_tag") == "state_admission":
+                    # Re-decide the clause tag on EVERY attempt: a rotation
+                    # retry / manual re-run reuses this analysis dict, and a
+                    # stale tag from a previous attempt would over-count the
+                    # clause book (skews the pricing cohort even though the
+                    # direction is safe). Only OUR tag is cleared — another
+                    # lane's tag (e.g. aligned_short_lane) is never touched.
+                    analysis.pop("_lane_tag", None)
                 # Tape keys need the BTC trail-24h read (same TTL-cached sensor
                 # the quiet_tape gate consumes; cold path only, so the read is
                 # cheap here). Callers inject; missing read = inert clause.
@@ -3586,7 +3594,15 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                             # Tag the ledger OPEN row so the clause cohort is
                             # separable AND countable — ledger.count_open_with_
                             # lane() reads this as the budget's occupancy input.
-                            analysis["_lane_tag"] = "state_admission"
+                            # NEVER clobber a tag another lane already owns
+                            # (reviewer, 2026-11-21: a clause admit inside an
+                            # aligned-lane analysis would retag that row and
+                            # the lane's own max_lane_slots occupancy would
+                            # under-count -> THAT lane over-admits, a live
+                            # gate). Our budget loses precision in that overlap;
+                            # the lane's enforcement keeps its truth.
+                            if not analysis.get("_lane_tag"):
+                                analysis["_lane_tag"] = "state_admission"
                         return ""
                 elif isinstance(_clause, dict):
                     # Clause active but declined this candidate: log the reason
