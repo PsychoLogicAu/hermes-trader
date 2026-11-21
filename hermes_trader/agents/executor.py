@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 import os
 import re
 import threading
@@ -3002,6 +3003,35 @@ def _tape_history_read():
         return None
 
 
+def _sd_finite(raw: Any) -> Optional[float]:
+    """Config/tape scalar -> float, NON-FINITE values rejected as unusable.
+
+    `float("inf")` and `"Infinity"`/`"1e999"` parse without error, every
+    comparison against NaN/Infinity is False (or always true for `<=`), a
+    huge int raises **OverflowError** which a bare `(TypeError, ValueError)`
+    handler misses, and `json.loads` accepts bare NaN/Infinity tokens in a
+    hand-edited config — so an unguarded cast either mis-arms a live veto or
+    raises out of the runner gate (no per-gate try upstream). Same guard as
+    `risk_gates._as_count`; one helper instead of a fourth recurrence.
+    """
+    try:
+        val = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(val):
+        return None
+    return val
+
+
+# The documented cell, identical to the shipped `short_tape_stale_depth_gate`.
+# A PRESENT-BUT-MALFORMED config leg falls back HERE, not to inert: a typo in
+# a live restrictive knob must never silently disable the veto (the arm it
+# guards already fails closed on malformed config).
+_SD_DEEP_PCT_DEFAULT = -8.0
+_SD_NET6H_MAX_DEFAULT = -4.0
+_SD_AGE_MIN_DEFAULT = 30.0
+
+
 def _stale_depth_squeeze(tape: Any, block: Any) -> Optional[Tuple[float, float, float]]:
     """Is this tape-armed short admit already too late to be follow-through?
 
@@ -3014,6 +3044,13 @@ def _stale_depth_squeeze(tape: Any, block: Any) -> Optional[Tuple[float, float, 
     says the tape has no fresh supply left to harvest, so what the arm would
     feed is the squeeze.
 
+    Fail directions are asymmetric on purpose. A missing/non-finite TAPE
+    scalar is a data gap: no opinion, never a veto and never an admit
+    (mirrors the arm's own pinned fail-safe). A missing/malformed CONFIG leg
+    is a typo in a restrictive knob: the documented cell above is used and a
+    WARNING names it, so the veto cannot be silently disarmed. Nothing here
+    can raise into the scan loop.
+
     Evidence (2026-11-21 cohort accounting, -63.3% WR): the nine 05:13-06:14
     knife entries sat at drift -8.4/-9.9, 6h leg -4.7/-5.5 and local-low age
     60-120 min; the seven profitable pre-dawn entries sat at age 0-10 min.
@@ -3022,20 +3059,34 @@ def _stale_depth_squeeze(tape: Any, block: Any) -> Optional[Tuple[float, float, 
     cohorts entirely (11-14: deep at fresh lows; 11-20: stale but never
     deeper than -7.1 drift). n=4 — unproven, so tri-state and log-heavy.
     """
-    if not isinstance(block, dict) or not isinstance(tape, dict):
+    if not isinstance(tape, dict):
         return None
-    try:
-        deep = float(block["btc24_deep_pct"])
-        leg_max = float(block["net6h_max_pct"])
-        age_min = float(block["low_age_min_min"])
-        drift = float(tape["drift"])
-        leg = float(tape["net6h"])
-        age = tape.get("low4h_age_min")
-    except (TypeError, ValueError, KeyError):
-        return None  # malformed keys or a data gap -> inert, never a veto
-    if age is None:
-        return None  # the front clock is the one scalar a short window lacks
-    age = float(age)
+    if not isinstance(block, dict):
+        block = {}
+    deep = _sd_finite(block.get("btc24_deep_pct"))
+    leg_max = _sd_finite(block.get("net6h_max_pct"))
+    age_min = _sd_finite(block.get("low_age_min_min"))
+    if deep is None or leg_max is None or age_min is None:
+        logger.warning(
+            "[gate][SHORT-TAPE-STRUCTURE][STALE-DEPTH] "
+            "`short_tape_stale_depth_gate` is absent or malformed "
+            f"(deep={block.get('btc24_deep_pct')!r} "
+            f"leg={block.get('net6h_max_pct')!r} "
+            f"age={block.get('low_age_min_min')!r}) — falling back to the "
+            f"documented cell ({_SD_DEEP_PCT_DEFAULT:+.1f}% / "
+            f"{_SD_NET6H_MAX_DEFAULT:+.1f}% / {_SD_AGE_MIN_DEFAULT:.0f} min); "
+            "a bad value must not silently disarm a live veto")
+        if deep is None:
+            deep = _SD_DEEP_PCT_DEFAULT
+        if leg_max is None:
+            leg_max = _SD_NET6H_MAX_DEFAULT
+        if age_min is None:
+            age_min = _SD_AGE_MIN_DEFAULT
+    drift = _sd_finite(tape.get("drift"))
+    leg = _sd_finite(tape.get("net6h"))
+    age = _sd_finite(tape.get("low4h_age_min"))
+    if drift is None or leg is None or age is None:
+        return None  # a data gap is no opinion: it may never veto
     if drift <= deep and leg <= leg_max and age >= age_min:
         return (drift, leg, age)
     return None
@@ -3764,7 +3815,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                                     f"{_ts_drift:+.2f}% in [{_ts_mn:+.1f}, "
                                     f"{_ts_mx:+.1f})% with ACTIVE arm — crash "
                                     f"follow-through tape "
-                                    f"[tape_state {tape_state_stamp(_ts_hist, _ts_tcfg, band_max=_ts_mx)}]")
+                                    f"[{tape_state_stamp(_ts_hist, _ts_tcfg, band_max=_ts_mx)}]")
                                 if _ts_mode == "live":
                                     logger.info(
                                         f"[gate][SHORT-TAPE-STRUCTURE] ADMIT {_ts_detail}")

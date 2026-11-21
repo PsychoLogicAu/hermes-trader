@@ -207,20 +207,39 @@ def test_tape_gap_still_blocks_structure_only(monkeypatch):
     assert _reason(stale_mode="live") == STRUCT_BLOCK
 
 
-def test_malformed_block_inert(monkeypatch):
+def test_malformed_config_falls_back_to_documented_cell(monkeypatch, caplog):
+    # A typo in a LIVE restrictive knob must not silently disarm the veto:
+    # the documented cell (-8/-4/30) is used and the WARNING names the key.
+    # Here the harness tape (drift -1.8) is shallower than the documented
+    # depth leg, so the admit stands — but loudly, and the veto is proven
+    # still armed at the documented cell below.
     _stubs(monkeypatch)
     cfg = _config(stale_mode="live")
     cfg["short_tape_stale_depth_gate"] = {"btc24_deep_pct": "deep",
                                           "net6h_max_pct": -4.0,
                                           "low_age_min_min": 30}
-    assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    with caplog.at_level("WARNING"):
+        assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    assert "short_tape_stale_depth_gate" in caplog.text
+    assert "absent or malformed" in caplog.text
+    # same malformed config, a tape inside the documented cell -> still vetoed
+    assert _stale_depth_squeeze({"drift": -9.4, "net6h": -5.1,
+                                 "low4h_age_min": 95},
+                                cfg["short_tape_stale_depth_gate"]) == (
+        -9.4, -5.1, 95.0)
 
 
-def test_block_absent_inert(monkeypatch):
+def test_block_absent_uses_documented_cell_with_warning(monkeypatch, caplog):
+    # veto explicitly live but the params block is missing: the shipped cell
+    # applies (never inert), and the gap is logged, not swallowed
     _stubs(monkeypatch)
     cfg = _config(stale_mode="live")
     del cfg["short_tape_stale_depth_gate"]
-    assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    with caplog.at_level("WARNING"):
+        assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    assert "absent or malformed" in caplog.text
+    assert _stale_depth_squeeze({"drift": -9.4, "net6h": -5.1,
+                                 "low4h_age_min": 95}, None) == (-9.4, -5.1, 95.0)
 
 
 # ── blast radius: the general clause stays open (owner ruling) ─────────────
@@ -269,10 +288,48 @@ def test_helper_inert_on_gaps_and_junk():
     assert _stale_depth_squeeze({"drift": None, "net6h": -5.1,
                                  "low4h_age_min": 95}, PROD_CELL) is None
     assert _stale_depth_squeeze(None, PROD_CELL) is None
+    assert _stale_depth_squeeze("tape gap", PROD_CELL) is None
+
+
+def test_helper_junk_tape_scalars_never_veto_never_raise():
+    # the tape read is a sensor: a non-numeric, huge or non-finite scalar is a
+    # gap (no opinion). It may not arm a veto and may not raise out of the
+    # runner gate (no per-gate try/except upstream).
+    junk = ["abc", "None", None, 10 ** 400, float("nan"), float("inf"),
+            float("-inf"), "Infinity", ""]
+    for val in junk:
+        for key in ("drift", "net6h", "low4h_age_min"):
+            tape = {"drift": -9.4, "net6h": -5.1, "low4h_age_min": 95}
+            tape[key] = val
+            assert _stale_depth_squeeze(tape, PROD_CELL) is None, (key, val)
+
+
+def test_helper_infinity_config_never_misarms_the_cell():
+    # `float("Infinity")` parses, and `drift <= inf` is true for ANY tape: an
+    # unguarded cast would veto shallow entries the owner never meant to
+    # touch. Non-finite config falls back to the documented leg instead.
+    for bad in ("Infinity", float("inf"), "-Infinity", float("nan"), "1e999",
+                10 ** 400):
+        block = {"btc24_deep_pct": bad, "net6h_max_pct": -4.0,
+                 "low_age_min_min": 30}
+        assert _stale_depth_squeeze({"drift": -1.8, "net6h": -5.1,
+                                     "low4h_age_min": 95}, block) is None, bad
+        assert _stale_depth_squeeze({"drift": -9.4, "net6h": -5.1,
+                                     "low4h_age_min": 95}, block) == (
+            -9.4, -5.1, 95.0), bad
+    # and the same for the other two legs: an -inf leg ceiling would never
+    # veto anything, an inf age floor would veto everything — both fall back
+    # to the documented leg, so the knife is still refused
     assert _stale_depth_squeeze({"drift": -9.4, "net6h": -5.1,
-                                 "low4h_age_min": 95}, None) is None
+                                 "low4h_age_min": 95},
+                                {"btc24_deep_pct": -8.0, "net6h_max_pct": -4.0,
+                                 "low_age_min_min": float("inf")}) == (
+        -9.4, -5.1, 95.0)
     assert _stale_depth_squeeze({"drift": -9.4, "net6h": -5.1,
-                                 "low4h_age_min": 95}, {"btc24_deep_pct": -8}) is None
+                                 "low4h_age_min": 95},
+                                {"btc24_deep_pct": -8.0,
+                                 "net6h_max_pct": float("-inf"),
+                                 "low_age_min_min": 30}) == (-9.4, -5.1, 95.0)
 
 
 # ── the new scalar: one fetch, the LOW series, the 4h window ───────────────
@@ -306,9 +363,13 @@ def test_low_age_counts_bars_since_the_local_low(monkeypatch):
 
 def test_low_age_window_is_four_hours_not_the_whole_fetch(monkeypatch):
     # the only sub-100 low sits 60 bars back: outside the 4h window, so the
-    # reading is bounded by the window (max 235 min), never 300
-    got = _tape(monkeypatch, _bars(60))["low4h_age_min"]
-    assert got is not None and got <= 235.0
+    # reading is bounded by the window (max 235 min), never 300. Pinned
+    # EXACTLY at both ends of the window: a quietly-shortened window (say 40
+    # bars, max 195 min) must fail here, not pass a one-sided bound.
+    assert _tape(monkeypatch, _bars(47))["low4h_age_min"] == 235.0
+    assert _tape(monkeypatch, _bars(60))["low4h_age_min"] == 235.0
+    assert _tape(monkeypatch, _bars(300))["low4h_age_min"] == 235.0
+    assert _tape(monkeypatch, _bars(48))["low4h_age_min"] == 235.0
 
 
 def test_low_age_survives_a_zero_close_hole(monkeypatch):
