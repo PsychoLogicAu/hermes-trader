@@ -1047,7 +1047,8 @@ class TestTapeNet6h:
 
     def test_vol_and_drift_keys_unchanged(self, monkeypatch):
         tape = self._tape(monkeypatch, [100.0 + (i % 3) for i in range(290)])
-        assert set(tape) == {"vol", "drift", "net6h", "btc1h", "drift_min12"}
+        assert set(tape) == {"vol", "drift", "net6h", "btc1h", "drift_min12",
+                             "low4h_age_min"}
         # first close 100.0, last (i=289, 289%3==1) 101.0 -> +1.0% over 24h
         assert tape["vol"] > 0 and tape["drift"] == pytest.approx(1.0)
         assert tape["net6h"] == pytest.approx(0.0)   # 72 bars = 24 cycles, net 0
