@@ -3720,7 +3720,58 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             or (score >= short_min_score and (slow_count >= 1 or fresh_impulse))
             or (fresh_impulse and score >= min_score)
         )
-        if not structured_short:
+        # Which seat disjunct carried this admit (log + scope control below).
+        _seat_door = ("downtrend_momentum" if downtrend else
+                      "score+impulse/slow-burn"
+                      if (score >= short_min_score
+                          and (slow_count >= 1 or fresh_impulse)) else
+                      "impulse+score" if (fresh_impulse and score >= min_score)
+                      else "")
+        _ss_refused = False
+        if structured_short:
+            # STALE-DEPTH veto on the SEAT structure doors (2026-11-22 owner
+            # GO, t_93a37ec6): the 2026-11-21 flood's damage rode these doors
+            # (11 fills / -$14.97 through `downtrend_momentum`, 4 more through
+            # score+impulse/slow-burn), not the tape arm the same cell was
+            # first wired to. Same three legs, same params block
+            # (`short_tape_stale_depth_gate`) so the two vetoes can never
+            # disagree about the tape. Counterfactual on that cohort: this
+            # scope refuses 9 of 19 (8 losers, -$21.31) and keeps 10 at +$5.85;
+            # across 133 closed shorts Sep 1 - Nov 20 the cell fires ZERO
+            # times, so there is no recorded false positive to pay for.
+            # `short_structure_stale_depth_scope`: `all` (default when the
+            # veto is armed) or `downtrend_only`. Absent mode key = inert and
+            # zero extra tape reads.
+            _ss_mode = lane_mode(gate, "short_structure_stale_depth_veto")
+            if _ss_mode in ("shadow", "live"):
+                _ss_scope = str(gate.get("short_structure_stale_depth_scope",
+                                         "all") or "all").strip().lower()
+                _ss_in_scope = (_ss_scope != "downtrend_only"
+                                or _seat_door == "downtrend_momentum")
+                if _ss_in_scope:
+                    _ss_veto = _stale_depth_squeeze(
+                        _late_chase_tape_read(),
+                        config.get("short_tape_stale_depth_gate"))
+                    if _ss_veto is not None:
+                        _ss_drift, _ss_leg, _ss_age = _ss_veto
+                        logger.warning(
+                            f"[gate][SHORT-STRUCTURE][STALE-DEPTH]"
+                            f"{'' if _ss_mode == 'live' else '[SHADOW]'} "
+                            f"{'SKIP' if _ss_mode == 'live' else 'WOULD SKIP'} "
+                            f"{coin} SHORT via {_seat_door or 'structure'}: BTC "
+                            f"trail-24h drift {_ss_drift:+.2f}%, 6h leg "
+                            f"{_ss_leg:+.2f}% already realized, local 4h low "
+                            f"{_ss_age:.0f} min old — squeeze, not follow-through"
+                            + ("" if _ss_mode == "live"
+                               else " — admit still granted (shadow lever)"))
+                        if _ss_mode == "live":
+                            # A refused candidate does NOT fall through to the
+                            # tape-armed admit below: that branch would re-admit
+                            # it off the same tape the veto just refused. The
+                            # standard structure-block reason is returned.
+                            structured_short = False
+                            _ss_refused = True
+        if not structured_short and not _ss_refused:
             # TAPE-ARMED follow-through admit (t_104c00f2, 2026-11-14): the
             # structure disjuncts above all demand VOL-SPIKE evidence
             # (60-min rolling impulse triggers, slow-burn, breakout/burst).

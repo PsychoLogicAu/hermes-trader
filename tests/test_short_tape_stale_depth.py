@@ -2,10 +2,17 @@
 
 The `short_tape_structure` arm admits a SHORT on tape alone (ACTIVE arm =
 fresh venture through the band floor). That says the decline is
-mechanically structured; it does not say the decline still has room. This
-veto rides that ADMIT only — never a seat-driven entry, and the general
-structure clause above it is untouched (owner ruling 2026-11-21: 'wire
-that up as live do skip, and let's leave the general clause open').
+mechanically structured; it does not say the decline still has room.
+This veto rides the tape-armed ADMIT (never a seat-driven entry) — until
+2026-11-22, when the owner widened the SAME cell to the seat structure
+doors under its own key (`short_structure_stale_depth_veto`, scope key
+`short_structure_stale_depth_scope` = `all` | `downtrend_only`), because
+the 11-21 attribution showed 11 of 19 fills (-$14.97) rode the seat's
+downtrend-momentum disjunct and only 4 rode the arm. Both vetoes read one
+params block (`short_tape_stale_depth_gate`) so they cannot disagree about
+the tape. Earlier same-day ruling ('leave the general clause open') was
+reversed on those numbers; the two log families stay separable
+([SHORT-TAPE-STRUCTURE] vs [SHORT-STRUCTURE]).
 
 Cell (three legs, all required, from ONE btc_tape_activity read):
   drift <= btc24_deep_pct (deep) AND net6h <= net6h_max_pct (the 6h leg is
@@ -78,12 +85,16 @@ FRESH = _series(N, [(N - 8, -2.4), (N - 3, -1.8)])
 HIST = _hist(FRESH)
 
 
-def _config(stale_mode=None, cell=None, arm="live"):
+def _config(stale_mode=None, cell=None, arm="live", seat_mode=None, scope=None):
     gate = {"enabled": True, "min_confidence": 0.65, "min_composite": 30.0,
             "allow_shorts": True, "min_short_confidence": 0.60,
             "min_short_composite": 25.0, "short_tape_structure": arm}
     if stale_mode is not None:
         gate["short_tape_stale_depth_veto"] = stale_mode
+    if seat_mode is not None:
+        gate["short_structure_stale_depth_veto"] = seat_mode
+    if scope is not None:
+        gate["short_structure_stale_depth_scope"] = scope
     cfg = {"runner_entry_gate": gate,
            "tape_recovery_short_veto_gate": {
                "mode": "off", "btc24_min_pct": -2.0, "btc24_max_pct": 0.0,
@@ -400,3 +411,131 @@ def test_unreadable_low_column_costs_only_the_new_key(monkeypatch):
     assert tape["low4h_age_min"] is None
     assert tape["drift"] == pytest.approx(1.0)
     assert tape["vol"] > 0 and tape["net6h"] == pytest.approx(0.0)
+
+
+# ── the SAME cell on the seat structure doors (owner GO 2026-11-22) ────────
+
+def test_seat_veto_live_refuses_downtrend_door(monkeypatch, caplog):
+    _stubs(monkeypatch)
+    with caplog.at_level("INFO"):
+        got = _runner_entry_block_reason(
+            _analysis(downtrend_momentum_fired=True),
+            _config(stale_mode="live", seat_mode="live"))
+    assert got == STRUCT_BLOCK
+    line = [r.getMessage() for r in caplog.records
+            if "SHORT-STRUCTURE][STALE-DEPTH" in r.getMessage()]
+    assert len(line) == 1 and "SKIP" in line[0]
+    assert "via downtrend_momentum" in line[0]
+
+
+def test_seat_veto_live_refuses_slow_burn_door(monkeypatch, caplog):
+    _stubs(monkeypatch)
+    with caplog.at_level("INFO"):
+        got = _runner_entry_block_reason(
+            _analysis(slow_burn_count=1, composite_score=40.0),
+            _config(stale_mode="live", seat_mode="live"))
+    # the standard block string carries this candidate's score/slow values
+    assert got.startswith(STRUCT_BLOCK.split(";")[0])
+    assert "via score+impulse/slow-burn" in caplog.text
+
+
+def test_seat_veto_live_refuses_impulse_score_door(monkeypatch, caplog):
+    # the third disjunct only exists when the SHORT bar sits ABOVE the general
+    # bar (otherwise score+impulse/slow-burn claims the candidate first)
+    _stubs(monkeypatch)
+    cfg = _config(stale_mode="live", seat_mode="live")
+    cfg["runner_entry_gate"]["min_short_composite"] = 40.0
+    with caplog.at_level("INFO"):
+        got = _runner_entry_block_reason(
+            _analysis(composite_score=35.0, volume_spike_fired=True,
+                      breakout_fired=True), cfg)
+    assert got.startswith(STRUCT_BLOCK.split(";")[0])
+    assert "via impulse+score" in caplog.text
+
+
+def test_seat_veto_shadow_admits(monkeypatch, caplog):
+    _stubs(monkeypatch)
+    with caplog.at_level("INFO"):
+        got = _runner_entry_block_reason(
+            _analysis(downtrend_momentum_fired=True),
+            _config(stale_mode="live", seat_mode="shadow"))
+    assert got == ""
+    assert "[SHADOW] WOULD SKIP" in caplog.text
+    assert "admit still granted (shadow lever)" in caplog.text
+
+
+def test_seat_veto_off_leaves_no_surface(monkeypatch, caplog):
+    _stubs(monkeypatch)
+    with caplog.at_level("INFO"):
+        got = _runner_entry_block_reason(
+            _analysis(downtrend_momentum_fired=True),
+            _config(stale_mode="live", seat_mode="off"))
+    assert got == "" and "SHORT-STRUCTURE][STALE-DEPTH" not in caplog.text
+
+
+def test_seat_veto_absent_key_costs_no_tape_read(monkeypatch):
+    # absent key = byte-identical path: the short path must not touch the
+    # tape cache at all (arm also off here, so nothing else reads it)
+    calls = {"n": 0}
+    def _tape():
+        calls["n"] += 1
+        return {"vol": 1.0, "drift": -1.8, "net6h": -5.1, "low4h_age_min": 95}
+    monkeypatch.setattr(executor, "_late_chase_tape_read", _tape)
+    monkeypatch.setattr(executor, "_tape_history_read", lambda: HIST)
+    assert _runner_entry_block_reason(
+        _analysis(downtrend_momentum_fired=True), _config(arm="off")) == ""
+    assert calls["n"] == 0
+    assert _runner_entry_block_reason(
+        _analysis(downtrend_momentum_fired=True),
+        _config(arm="off", seat_mode="live")) == STRUCT_BLOCK
+    assert calls["n"] == 1
+
+
+def test_seat_veto_scope_downtrend_only_spares_other_doors(monkeypatch, caplog):
+    _stubs(monkeypatch)
+    with caplog.at_level("INFO"):
+        slow = _runner_entry_block_reason(
+            _analysis(slow_burn_count=1, composite_score=40.0),
+            _config(stale_mode="live", seat_mode="live",
+                    scope="downtrend_only"))
+        dtm = _runner_entry_block_reason(
+            _analysis(downtrend_momentum_fired=True),
+            _config(stale_mode="live", seat_mode="live",
+                    scope="downtrend_only"))
+    assert slow == "" and dtm == STRUCT_BLOCK
+    assert caplog.text.count("SHORT-STRUCTURE][STALE-DEPTH") == 1
+
+
+def test_seat_veto_refusal_does_not_reenter_through_the_arm(monkeypatch, caplog):
+    # the refused candidate must NOT be re-admitted by the tape-armed branch
+    # below it (same tape, same cell) — and exactly one veto line is logged
+    _stubs(monkeypatch)
+    with caplog.at_level("INFO"):
+        got = _runner_entry_block_reason(
+            _analysis(downtrend_momentum_fired=True),
+            _config(stale_mode="live", seat_mode="live"))
+    assert got == STRUCT_BLOCK
+    assert "SHORT-TAPE-STRUCTURE] ADMIT" not in caplog.text
+    assert len([r for r in caplog.records
+                if "STALE-DEPTH] SKIP" in r.getMessage()]) == 1
+
+
+def test_seat_veto_tape_gap_admits(monkeypatch):
+    # a data gap is no opinion: the seat door stands (the arm branch stays
+    # blocked by its own pinned fail-safe, which is a different path)
+    _stubs(monkeypatch, net6h=None, low_age=None)
+    assert _runner_entry_block_reason(
+        _analysis(downtrend_momentum_fired=True),
+        _config(stale_mode="live", seat_mode="live")) == ""
+
+
+def test_seat_veto_malformed_cell_warns_and_stays_armed(monkeypatch, caplog):
+    # params block gone while BOTH vetoes are live: the documented cell
+    # (-8/-4/30) applies and the WARNING names the key — never silent inert
+    _stubs(monkeypatch)
+    cfg = _config(stale_mode="live", seat_mode="live")
+    del cfg["short_tape_stale_depth_gate"]
+    with caplog.at_level("WARNING"):
+        assert _runner_entry_block_reason(
+            _analysis(downtrend_momentum_fired=True), cfg) == ""
+    assert "absent or malformed" in caplog.text
