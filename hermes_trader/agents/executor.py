@@ -36,7 +36,7 @@ from hermes_trader.agents.dsl_exit import (
 )
 from hermes_trader.agents.memory import memory
 from hermes_trader.ledger import record_open, record_close
-from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality, lane_mode, tape_state_arms, tape_state_stamp
+from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality, lane_mode, tape_state_arms, tape_state_stamp, clause_slot_budget_check
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
     cancel_open_orders_for_coin,
@@ -1570,6 +1570,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
     )
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
+
+    # Clause-cohort ledger tag (t_38fa6d3a): when the dedicated clause slot
+    # budget is ARMED for the clause that admitted this entry at the CLASSIC
+    # gate, tag the OPEN row so ledger.count_open_with_lane() can prove the
+    # clause's own occupancy (the runner-gate admit tags the analysis itself).
+    # Absent budget key = no marker = byte-identical snapshot.
+    try:
+        _cgres = (gate_output.get("results") or {}).get("confidence") or {}
+        _cl_tag = _cgres.get("clause_lane_tag")
+        if _cl_tag and not analysis.get("_lane_tag"):
+            analysis["_lane_tag"] = str(_cl_tag)
+    except Exception:
+        pass
 
     # The mismatch gate runs shadow by default: it passes, but carries a
     # shadow_would_block marker when a counter-forecast entry would have been
@@ -3512,6 +3525,14 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
             _pm = str(analysis.get("primary_model") or "").strip()
             if _pm:
                 _clause = (read_model_profile_for_model(_pm) or {}).get("state_admission")
+                if analysis.get("_lane_tag") == "state_admission":
+                    # Re-decide the clause tag on EVERY attempt: a rotation
+                    # retry / manual re-run reuses this analysis dict, and a
+                    # stale tag from a previous attempt would over-count the
+                    # clause book (skews the pricing cohort even though the
+                    # direction is safe). Only OUR tag is cleared — another
+                    # lane's tag (e.g. aligned_short_lane) is never touched.
+                    analysis.pop("_lane_tag", None)
                 # Tape keys need the BTC trail-24h read (same TTL-cached sensor
                 # the quiet_tape gate consumes; cold path only, so the read is
                 # cheap here). Callers inject; missing read = inert clause.
@@ -3547,7 +3568,41 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                             f"[gate][STATE-ADMIT][SHADOW] WOULD ADMIT {_detail} — "
                             f"NOT admitting (shadow mode; kill-switch lever)")
                     else:
+                        # Dedicated clause slot budget (t_38fa6d3a, generic
+                        # clause_slot_budget helper): absent key = zero ledger
+                        # reads, byte-identical path. shadow (default true) =
+                        # log-only accrual; only an explicit false binds. A
+                        # configured cap under the contention floor is clamped
+                        # UP (supervision goes blind below it).
+                        _budget = clause_slot_budget_check(_clause, side, config)
+                        if (_budget is not None
+                                and _budget.get("shadow_would_skip")):
+                            logger.warning(
+                                f"[gate][CLAUSE-SLOTS][SHADOW] WOULD SKIP "
+                                f"{coin} {side.upper()}: {_budget['reason']} — "
+                                f"NOT skipping (shadow mode; log-only accrual)")
+                        elif (_budget is not None
+                              and not _budget.get("allow")):
+                            logger.warning(
+                                f"[gate][CLAUSE-SLOTS] SKIP {coin} "
+                                f"{side.upper()}: {_budget['reason']} — clause "
+                                f"admit refused (dedicated slot budget)")
+                            return (f"runner_gate_blocked (clause slot budget "
+                                    f"{_budget['used']}/{_budget['limit']})")
                         logger.warning(f"[gate][STATE-ADMIT] ADMIT {_detail}")
+                        if _budget is not None:
+                            # Tag the ledger OPEN row so the clause cohort is
+                            # separable AND countable — ledger.count_open_with_
+                            # lane() reads this as the budget's occupancy input.
+                            # NEVER clobber a tag another lane already owns
+                            # (reviewer, 2026-11-21: a clause admit inside an
+                            # aligned-lane analysis would retag that row and
+                            # the lane's own max_lane_slots occupancy would
+                            # under-count -> THAT lane over-admits, a live
+                            # gate). Our budget loses precision in that overlap;
+                            # the lane's enforcement keeps its truth.
+                            if not analysis.get("_lane_tag"):
+                                analysis["_lane_tag"] = "state_admission"
                         return ""
                 elif isinstance(_clause, dict):
                     # Clause active but declined this candidate: log the reason
