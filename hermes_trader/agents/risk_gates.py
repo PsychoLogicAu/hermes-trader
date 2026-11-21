@@ -427,6 +427,157 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
         return "malformed"
 
 
+# ---------------------------------------------------------------------------
+# GENERIC DEDICATED SLOT BUDGET for admission clauses / lanes (t_38fa6d3a,
+# 2026-11-20). First consumer: state_admission.short.max_clause_slots — the
+# [-2.0, 0.0) tape-band clause's own slot budget, shadow-first.
+#
+# Why generic: the clause-slot-cap asymmetry (2026-11-03 measurement) is that
+# the aligned-short lane has its own `max_lane_slots` budget while the
+# state_admission clause has none (it eats the shared max_concurrent pool).
+# The pricing study behind this helper (2026-11-20, dedicated clause book over
+# the 11-07..20 shadow accrual, n=414): net scales ~linearly with the budget
+# (+$36.28 @ N=10 / alpha +$24.31 vs +$9.63 fighting the shared book at real
+# intervals, matched $69.87 sizing); below the contention floor supervision
+# goes blind, so configured caps under the floor are corrected UP, not honored.
+# ---------------------------------------------------------------------------
+
+def contention_floor(config: Dict[str, Any]) -> int:
+    """Slot-count floor below which slot-freeing supervision is OFF.
+
+    Mirrors the resolver used by `ai_close_slot_defer` / `dsl_exit` (owner
+    call 2026-10-18): an EXPLICIT `dsl_exit.stale_flat_min_positions` pins
+    the floor verbatim; absent/malformed = 60% of `max_concurrent` (3 at cap
+    5, 6 at cap 10). The RATIO, not the number, is the load-bearing choice —
+    below this floor the deterministic stale-flat timeout and the LLM
+    close-defer guard both switch off for exactly the clause population
+    (t_38fa6d3a sizing rule: a clause budget below the floor gives a book of
+    never-armed bags whose only exit is the hard ATR stop).
+    """
+    cfg = config if isinstance(config, dict) else {}
+    dsl = cfg.get("dsl_exit")
+    dsl = dsl if isinstance(dsl, dict) else {}
+    raw = dsl.get("stale_flat_min_positions")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            raw = None
+    try:
+        cap = int(cfg.get("max_concurrent", 5) or 5)
+    except (TypeError, ValueError):
+        cap = 5
+    cap = max(1, cap)
+    return max(1, int(round(cap * 0.6)))
+
+
+def clause_slot_budget(
+    sub_cfg: Any,
+    lane_open: int,
+    *,
+    slots_key: str = "max_clause_slots",
+    shadow_key: str = "max_clause_slots_shadow",
+    floor: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """Dedicated n-slot budget for ONE admission clause/lane (t_38fa6d3a).
+
+    GENERIC by design: the budget lives in the consumer's own config sub-block
+    and the consumer supplies its own occupancy count (for this repo:
+    ``ledger.count_open_with_lane(<tag>)`` over OPEN rows tagged
+    ``config_snapshot.lane == <tag>``). First consumer: the ANSWERING seat's
+    profile `state_admission.short.{max_clause_slots,max_clause_slots_shadow}`.
+    Any future lane can carry its own keys (e.g. `max_lane_slots`) and call
+    this helper with its own tag/count — no new gate plumbing.
+
+    Contract:
+      * key ABSENT (or sub_cfg not a dict) -> None = inert, byte-identical;
+        callers must NOT read the ledger on this path (zero-cost absent key).
+      * `shadow_key` absent/True -> LOG-ONLY: `allow` stays True and
+        `shadow_would_skip` carries the would-block for accrual; only an
+        explicit false binds the budget.
+      * limit <= 0 -> fail-CLOSED: a cap is a restrictive knob; 0 can never
+        mean "unlimited".
+      * malformed value -> `floor` when a floor is supplied (still armed,
+        conservative), else inert — a typo must never arm a looser budget.
+      * `floor` clamps a configured limit UP when it sits below the contention
+        floor (the sizing rule above). 0 = no clamp.
+      * unprovable occupancy (lane_open < 0, unreadable ledger) -> treated as
+        FULL (fail-closed; the ledger's own -1 contract).
+
+    Returns None (inert) or dict(armed=True, limit=int, used=int, shadow=bool,
+    allow=bool, shadow_would_skip=bool, reason=str).
+    """
+    if not isinstance(sub_cfg, dict):
+        return None
+    if slots_key not in sub_cfg:
+        return None
+    shadow = _as_shadow(sub_cfg.get(shadow_key, True))
+    raw = sub_cfg.get(slots_key)
+    try:
+        limit = int(float(raw))
+    except (TypeError, ValueError):
+        if floor > 0:
+            limit = int(floor)
+        else:
+            return None
+    floor = int(floor or 0)
+    if floor > 0 and limit < floor:
+        limit = floor
+    try:
+        used = int(lane_open)
+    except (TypeError, ValueError):
+        used = -1
+    if used < 0:  # unprovable occupancy -> full (fail-closed)
+        used = max(limit, 1)
+    if limit <= 0:
+        full = True
+        reason = f"clause slot budget {limit} (zero/negative budget — clause admits refused)"
+    else:
+        full = used >= limit
+        reason = (f"clause slot budget full ({used}/{limit})" if full else "")
+    return {
+        "armed": True, "limit": limit, "used": used, "shadow": shadow,
+        "allow": (not full) or shadow,
+        "shadow_would_skip": bool(full and shadow),
+        "reason": reason,
+    }
+
+
+def clause_slot_budget_check(
+    clause_cfg: Any,
+    side: str,
+    config: Dict[str, Any],
+    *,
+    tag: str = "state_admission",
+    slots_key: str = "max_clause_slots",
+    shadow_key: str = "max_clause_slots_shadow",
+) -> Optional[Dict[str, Any]]:
+    """Ledger-reading wrapper around `clause_slot_budget` for a SIDE clause
+    (state_admission.{long,short} convention; any clause with side sub-blocks
+    reuses it by passing its own tags/keys).
+
+    Zero reads when the budget key is absent: the caller passes the clause
+    dict it already read, and the ledger count happens ONLY when
+    ``slots_key`` exists in that side's sub-block (absent key = byte-identical
+    path, no I/O). The occupancy tag is written onto the OPEN row by the
+    executor's `build_open_config_snapshot(lane=...)` — a per-lane book is
+    separable AND restart-safe, the same discipline as the aligned lane.
+    """
+    if not isinstance(clause_cfg, dict):
+        return None
+    sub = clause_cfg.get(str(side or "").strip().lower())
+    if not isinstance(sub, dict) or slots_key not in sub:
+        return None
+    try:
+        from hermes_trader.ledger import count_open_with_lane
+    except Exception:
+        return None
+    used = count_open_with_lane(tag)
+    return clause_slot_budget(sub, used, slots_key=slots_key,
+                              shadow_key=shadow_key,
+                              floor=contention_floor(config))
+
+
 def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
                     allow_shorts: bool):
     """Model-profile state-admission clause (kanban t_1999904f, 2026-10-17;
@@ -771,11 +922,33 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
                 f"[gate][STATE-ADMIT][SHADOW] WOULD ADMIT (classic conf gate) "
                 f"{_tag}: {why} — NOT admitting (shadow mode; kill-switch lever)")
             return res
+        # Dedicated clause slot budget (t_38fa6d3a): the runner-gate clone, so
+        # the two layers can never disagree on the clause's own occupancy.
+        # Absent budget key = zero ledger reads, byte-identical. Shadow budget
+        # (default true) = log-only accrual; only an explicit false binds.
+        _budget = clause_slot_budget_check(
+            clause, str(getattr(ctx, "trade_side", "") or ""), cfg)
+        if _budget is not None and _budget.get("shadow_would_skip"):
+            logger.warning(
+                f"[gate][CLAUSE-SLOTS][SHADOW] WOULD SKIP (classic conf gate) "
+                f"{_tag}: {_budget['reason']} — NOT skipping (shadow mode; "
+                f"log-only accrual)")
+        elif _budget is not None and not _budget.get("allow"):
+            logger.warning(
+                f"[gate][CLAUSE-SLOTS] SKIP (classic conf gate) {_tag}: "
+                f"{_budget['reason']} — clause admit refused (dedicated slot "
+                f"budget)")
+            _out = dict(res)
+            _out["reason"] = (f"clause slot budget "
+                              f"{_budget['used']}/{_budget['limit']}")
+            return _out
         logger.warning(
             f"[gate][STATE-ADMIT] ADMIT (classic conf gate) {_tag}: {why} — "
             f"classic floor {min_conf:.2f} exempted by profile clause; all "
             f"other classic gates still apply")
-        return {"pass": True, "via": "state_admission", "clause_why": why}
+        return {"pass": True, "via": "state_admission", "clause_why": why,
+                "clause_lane_tag": ("state_admission" if _budget is not None
+                                    else None)}
     logger.info(f"[gate][STATE-ADMIT][SKIP] (classic conf gate) {_tag}: {why}")
     return res
 
