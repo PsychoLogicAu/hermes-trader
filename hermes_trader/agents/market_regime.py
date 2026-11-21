@@ -252,6 +252,7 @@ _TAPE_NET6H_BARS = 72  # 6h of 5m bars — the lane fast-arm window (t_2e23804b)
 _TAPE_WINDOW_BARS = 290  # ~24h of 5m bars — the drift/vol window (289 steps)
 _TAPE_WHIP_LOOKBACK_BARS = 144  # 12h — trail window of the drift_min12 min (t_59ab9009)
 _TAPE_B1H_STEPS = 12  # 12 × 5m bars = 1h — the bounce view (t_59ab9009)
+_TAPE_LOW_LOOKBACK_BARS = 48  # 4h of 5m bars — window of the local-low clock
 _TAPE_FETCH_BARS = _TAPE_WINDOW_BARS + _TAPE_WHIP_LOOKBACK_BARS  # 434 = 36h
 _tape_cache: Tuple[Optional[Dict[str, Any]], float] = (None, 0.0)
 
@@ -474,7 +475,7 @@ def _detect_cached(proxy: str) -> Optional[str]:
 
 def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
     """Trailing-24h BTC broad-tape activity: {"vol", "drift", "net6h",
-    "btc1h", "drift_min12"} (%, None where noted).
+    "btc1h", "drift_min12", "low4h_age_min"} (%, None where noted).
 
     vol    = pstdev of 5m log-returns × sqrt(288) × 100 (dailyized %),
     drift  = (last close / first close − 1) × 100 (% over the ~24h window),
@@ -493,8 +494,14 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
              drift sits well above it, the drop is a day old and grinding.
              None if history is shorter than the 36h needed to trail it —
              every pre-existing consumer reads vol/drift (net6h/btc1h/
-             drift_min12 are inert extras), and consumers of the new keys
+             drift_min12/low4h_age_min are inert extras), and consumers of the new keys
              must treat None as no-opinion, never as a signal.
+
+    low4h_age_min = minutes since the lowest 5m LOW inside the trailing 4h
+             (48 bars) — the FRONT clock of a decline. 0 = printing a new
+             local low now (the drop is still advancing); large = the front
+             passed hours ago. Consumer: the stale-depth guard on the
+             tape-armed short admit (executor). None on a short window.
 
     All lookback-only (no lookahead beyond the still-forming last 5m bar's
     close, which is the live price). Returns None on a data gap (fetch
@@ -532,8 +539,26 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
         drift_min12 = min(
             (closes[k] / closes[k - steps] - 1) * 100
             for k in range(len(closes) - _TAPE_WHIP_LOOKBACK_BARS, len(closes)))
+    # Minutes since the lowest 5m LOW of the trailing 4h: the FRONT clock of
+    # the decline. 0 = a new local low is printing now; large = nothing has
+    # made a new low for hours, so what is left to short is the rebound, not
+    # the follow-through. Measured on the 2026-11-21 cohort: the seven
+    # pre-dawn shorts entered at low-age 0-10 (all profitable); the nine
+    # 05:13-06:14 knives entered at 60-120. Stale+deep+6h-already-realized
+    # carries the damage; shallow+stale (the grind) does not — hence this is
+    # one input to a three-scalar cell, never a verdict on its own.
+    low4h_age_min = None
+    try:
+        seg = [float(c.l) for c in candles[-_TAPE_LOW_LOOKBACK_BARS:]
+               if float(c.c) > 0]
+        if len(seg) == _TAPE_LOW_LOOKBACK_BARS:
+            k = min(range(len(seg)), key=lambda j: seg[j])
+            low4h_age_min = float((len(seg) - 1 - k) * 5)
+    except (AttributeError, TypeError, ValueError):
+        low4h_age_min = None  # an unreadable LOW column costs this key only
     _tape_cache = ({"vol": vol, "drift": drift, "net6h": net6h,
-                    "btc1h": btc1h, "drift_min12": drift_min12}, now)
+                    "btc1h": btc1h, "drift_min12": drift_min12,
+                    "low4h_age_min": low4h_age_min}, now)
     return _tape_cache[0]
 
 

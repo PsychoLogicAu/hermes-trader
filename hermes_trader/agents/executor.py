@@ -2980,7 +2980,8 @@ def _late_chase_tape_read():
     Module-level indirection over market_regime.btc_tape_activity (the SAME
     cached 5m-candle read the quiet_tape gate consumes, 300s TTL) so tests
     can monkeypatch it exactly like get_chronos_signal_sync. Returns
-    {"vol": %, "drift": %, "net6h": %|None} or None on a data gap.
+    {"vol": %, "drift": %, "net6h": %|None, "btc1h": %|None,
+    "drift_min12": %|None, "low4h_age_min": min|None} or None on a data gap.
     """
     from hermes_trader.agents.market_regime import btc_tape_activity
     try:
@@ -2999,6 +3000,45 @@ def _tape_history_read():
         return btc_tape_history()
     except Exception:
         return None
+
+
+def _stale_depth_squeeze(tape: Any, block: Any) -> Optional[Tuple[float, float, float]]:
+    """Is this tape-armed short admit already too late to be follow-through?
+
+    Returns (drift, net6h, low_age_min) when all three legs of the cell hold
+    — BTC trail-24h drift at or below `btc24_deep_pct` (deep), the 6h leg at
+    or below `net6h_max_pct` (already realized), and the local 4h low at
+    least `low_age_min_min` minutes old (the decline's front passed) — else
+    None, which means no opinion and never a veto. The cell reads the FRONT
+    of a decline, not the bounce: an aged local low plus a realized 6h leg
+    says the tape has no fresh supply left to harvest, so what the arm would
+    feed is the squeeze.
+
+    Evidence (2026-11-21 cohort accounting, -63.3% WR): the nine 05:13-06:14
+    knife entries sat at drift -8.4/-9.9, 6h leg -4.7/-5.5 and local-low age
+    60-120 min; the seven profitable pre-dawn entries sat at age 0-10 min.
+    Out of sample the same cell fires 4 times in 81 days and those trades
+    netted -$1.08 (so it is cheap), and it spares both profitable deep-tape
+    cohorts entirely (11-14: deep at fresh lows; 11-20: stale but never
+    deeper than -7.1 drift). n=4 — unproven, so tri-state and log-heavy.
+    """
+    if not isinstance(block, dict) or not isinstance(tape, dict):
+        return None
+    try:
+        deep = float(block["btc24_deep_pct"])
+        leg_max = float(block["net6h_max_pct"])
+        age_min = float(block["low_age_min_min"])
+        drift = float(tape["drift"])
+        leg = float(tape["net6h"])
+        age = tape.get("low4h_age_min")
+    except (TypeError, ValueError, KeyError):
+        return None  # malformed keys or a data gap -> inert, never a veto
+    if age is None:
+        return None  # the front clock is the one scalar a short window lacks
+    age = float(age)
+    if drift <= deep and leg <= leg_max and age >= age_min:
+        return (drift, leg, age)
+    return None
 
 
 def _late_chase_tape_gate(gate: Dict[str, Any], coin: str, side: str,
@@ -3657,6 +3697,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 _tsv = config.get("tape_recovery_short_veto_gate") or {}
                 _ts_mn, _ts_mx = _tsv.get("btc24_min_pct"), _tsv.get("btc24_max_pct")
                 if _ts_mn is not None and _ts_mx is not None:
+                    _ts_tt = None
                     try:
                         _ts_mn, _ts_mx = float(_ts_mn), float(_ts_mx)
                         _ts_tt = _late_chase_tape_read()
@@ -3675,22 +3716,64 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                         if isinstance(_ts_arms, dict) and any(
                                 isinstance(a, dict) and a.get("active")
                                 for a in _ts_arms.values()):
-                            _ts_detail = (
-                                f"{coin} SHORT score={score:.0f}, "
-                                f"slow={slow_count}: BTC trail-24h drift "
-                                f"{_ts_drift:+.2f}% in [{_ts_mn:+.1f}, "
-                                f"{_ts_mx:+.1f})% with ACTIVE arm — crash "
-                                f"follow-through tape "
-                                f"[{tape_state_stamp(_ts_hist, _ts_tcfg, band_max=_ts_mx)}]")
-                            if _ts_mode == "live":
-                                logger.info(
-                                    f"[gate][SHORT-TAPE-STRUCTURE] ADMIT {_ts_detail}")
-                                structured_short = True
-                            else:
-                                logger.info(
-                                    f"[gate][SHORT-TAPE-STRUCTURE][SHADOW] "
-                                    f"WOULD ADMIT {_ts_detail} — structure "
-                                    f"bar still applied (shadow lane)")
+                            # STALE-DEPTH guard on the admit (2026-11-21
+                            # flood, t_59ab9009 cohort accounting): an ACTIVE
+                            # arm says the decline is mechanically
+                            # structured, but not that it still has room.
+                            # Once BTC is deeply down on the 24h trail, has
+                            # not printed a new 4h local low for a while AND
+                            # the 6h leg is already realized, the shorts this
+                            # arm still feeds are the squeeze, not the
+                            # follow-through. Measured on 133 closed shorts
+                            # (Sep 1 - Nov 20): this cell fires ZERO times
+                            # out of the +$7.64 book (11-15's three stale-deep
+                            # instances sat at net6h -1.0/-3.2 and were
+                            # losers; 11-20's 33-trade grind never went
+                            # deeper than -7.1 drift; 11-14's 8-trade founder
+                            # cohort was deep at fresh lows). Measured on the
+                            # flood: 10 of 19 admits refused — all nine
+                            # losers plus one +$0.46 scalp — while the seven
+                            # pre-dawn admits and every 11-14/11-20 admit
+                            # pass. n=4 out of sample: cheap on history,
+                            # unproven, hence tri-state and log-heavy.
+                            # Tri-state `short_tape_stale_depth_veto`: off
+                            # (default, admit as before) / shadow (WOULD-SKIP
+                            # accrual, admit stands) / live (SKIP = no admit;
+                            # every other gate still runs around it).
+                            _sd_mode = lane_mode(gate, "short_tape_stale_depth_veto")
+                            _sd_veto = None
+                            if _sd_mode in ("shadow", "live"):
+                                _sd_veto = _stale_depth_squeeze(
+                                    _ts_tt, config.get("short_tape_stale_depth_gate"))
+                            if _sd_veto is not None:
+                                _sd_drift, _sd_leg, _sd_age = _sd_veto
+                                logger.warning(
+                                    f"[gate][SHORT-TAPE-STRUCTURE][STALE-DEPTH]"
+                                    f"{'' if _sd_mode == 'live' else '[SHADOW]'} "
+                                    f"{'SKIP' if _sd_mode == 'live' else 'WOULD SKIP'} "
+                                    f"{coin} SHORT score={score:.0f}: BTC trail-24h "
+                                    f"drift {_sd_drift:+.2f}%, 6h leg {_sd_leg:+.2f}% "
+                                    f"already realized, local 4h low {_sd_age:.0f} "
+                                    f"min old — squeeze, not follow-through"
+                                    + ("" if _sd_mode == "live"
+                                       else " — admit still granted (shadow lever)"))
+                            if not (_sd_veto is not None and _sd_mode == "live"):
+                                _ts_detail = (
+                                    f"{coin} SHORT score={score:.0f}, "
+                                    f"slow={slow_count}: BTC trail-24h drift "
+                                    f"{_ts_drift:+.2f}% in [{_ts_mn:+.1f}, "
+                                    f"{_ts_mx:+.1f})% with ACTIVE arm — crash "
+                                    f"follow-through tape "
+                                    f"[tape_state {tape_state_stamp(_ts_hist, _ts_tcfg, band_max=_ts_mx)}]")
+                                if _ts_mode == "live":
+                                    logger.info(
+                                        f"[gate][SHORT-TAPE-STRUCTURE] ADMIT {_ts_detail}")
+                                    structured_short = True
+                                else:
+                                    logger.info(
+                                        f"[gate][SHORT-TAPE-STRUCTURE][SHADOW] "
+                                        f"WOULD ADMIT {_ts_detail} — structure "
+                                        f"bar still applied (shadow lane)")
         if not structured_short:
             return (f"runner_gate_blocked (short needs downtrend momentum or "
                     f"fresh impulse+structure; score={score:.0f}, slow={slow_count})")
