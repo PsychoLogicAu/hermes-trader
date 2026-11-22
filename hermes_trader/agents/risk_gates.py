@@ -3673,7 +3673,25 @@ def aligned_short_lane_live_admit(
         mom_max = float(live.get("mom_max_pct", -6.0))
     except (TypeError, ValueError):
         mom_max = -6.0
+    # REQUIRE_BUCKET: a probe bucket name ("deep"/"nearx") admits only that
+    # bucket; "any" (or "") is the documented WILDCARD — no bucket constraint.
+    # Literal equality against "any" was the t_42e148eb root cause: the live
+    # config has said require_bucket="any" since the 11-13 LIVE re-arm
+    # (dcf1f37) while this line compared it with == against the candidate's
+    # bucket, so EVERY band candidate died on a DEBUG-level bucket skip —
+    # zero ADMITs across nine days (11-13..11-22) while the shadow book
+    # priced +$48.85/22 fills in the same window. Era-1 ran require_bucket=
+    # "deep" (377b9ff) and traded normally (XPL 11-04), which is exactly why
+    # the blindness stayed invisible until an armed cycle was replayed.
     require_bucket = str(live.get("require_bucket", "deep")).strip().lower()
+    _bucket_wild = require_bucket in ("", "any")
+    if not _bucket_wild and require_bucket not in ("deep", "nearx"):
+        # A typo'd literal reproduces the same silent-zero shape as the root
+        # cause — make that shape loud at the only point it can be seen.
+        logger.warning(
+            f"[aligned-short-lane][LIVE] require_bucket={require_bucket!r} is "
+            "neither 'any' nor a probe bucket (deep/nearx) — every candidate "
+            "will skip on the bucket cell (the t_42e148eb failure shape)")
     # ARM = which TAPE STATE the lane is allowed to fire in. The 8.2-day
     # accrual measured these as the winner (scratch/_lane_arm_rules.py):
     # "confirmed dump" (24h drift deep AND dailyized vol expanded) OR the
@@ -3847,7 +3865,8 @@ def aligned_short_lane_live_admit(
                 str(cand.get("side") or "").lower() != "short" or \
                 "aligned_dn4h" not in (cand.get("variant") or []):
             continue
-        if str(cand.get("ema4h_bucket") or "").lower() != require_bucket:
+        if not _bucket_wild and \
+                str(cand.get("ema4h_bucket") or "").lower() != require_bucket:
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: bucket "
                          f"{cand.get('ema4h_bucket')} != {require_bucket}")
             continue
