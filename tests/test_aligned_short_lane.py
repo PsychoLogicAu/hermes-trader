@@ -820,6 +820,40 @@ class TestLiveAdmit:
         c.pop("mom6h_net")
         assert _live_admit(monkeypatch, caplog, cands=[c]) == []
 
+    def test_require_bucket_any_is_wildcard_t42e148eb(self, monkeypatch,
+                                                      caplog):
+        # The exact production shape (dcf1f37, 11-13: require_bucket="any").
+        # Both probe buckets must admit. Pre-fix this returned []: the cell
+        # compared "any" with == against the candidate bucket, so EVERY band
+        # candidate died on a DEBUG-level bucket skip — the LIVE lane
+        # admitted nothing for nine days (11-13..11-22) while the shadow
+        # book priced +$48.85/22 fills in the same window. Repro proving the
+        # era-blindness: scratch/_lane_live_admit_replay.py on the real
+        # 2026-11-20 12:16 cycle (USELESS deep, mom -8.3, tape -3.72/vol3.46).
+        cfg = _live_cfg(live={"require_bucket": "any"})
+        got = _live_admit(monkeypatch, caplog,
+                          cands=[_cand("A", bucket="deep"),
+                                 _cand("B", bucket="nearx")], cfg=cfg)
+        assert [s["coin"] for s in got] == ["A", "B"]
+        assert not any("skip: bucket" in m for m in _msgs(caplog))
+
+    def test_require_bucket_literal_still_exact(self, monkeypatch, caplog):
+        # The wildcard ADDS "any"; it does not weaken the literal cell
+        # (era-1 semantics, 377b9ff: deep-only admitted XPL 11-04).
+        got = _live_admit(monkeypatch, caplog,
+                          cands=[_cand("A", bucket="deep"),
+                                 _cand("B", bucket="nearx")])  # deep cfg
+        assert [s["coin"] for s in got] == ["A"]
+
+    def test_require_bucket_typo_is_loud_not_silent(self, monkeypatch, caplog):
+        # A typo'd literal is the same silent-zero shape as the root cause.
+        # Still admits nothing (fail closed) but the WARNING makes the book
+        # blindness visible at the only place it can be seen.
+        cfg = _live_cfg(live={"require_bucket": "deeep"})
+        assert _live_admit(monkeypatch, caplog, cfg=cfg) == []
+        assert any("neither 'any' nor a probe bucket" in m
+                   for m in _msgs(caplog))
+
 
 class TestLiveWhipBlock:
     """t_9b3276ab (pre-arm 2b) RESCOPE of t_d442381f: only whip_bounce
