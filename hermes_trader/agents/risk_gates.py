@@ -3430,6 +3430,20 @@ def whip_guard_tags(lane: Optional[str],
     return tags
 
 
+def _as_finite_float(raw: Any) -> Optional[float]:
+    """Config/tape scalar -> finite float, anything else -> None.
+
+    Same rejection semantics as _as_count: ``"Infinity"``/``"1e999"`` parse
+    cleanly through float() and poison comparisons, so the guard is
+    math.isfinite AFTER the cast, never a truthiness or ``is None`` check.
+    """
+    try:
+        v = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return v if math.isfinite(v) else None
+
+
 def aligned_short_lane_emit(
     candidates: List[Dict[str, Any]],
     lane_cfg: Dict[str, Any],
@@ -3451,7 +3465,10 @@ def aligned_short_lane_emit(
     this cycle's ordering (rank is among ALL candidates, so skipped lines
     leave gaps — honest book order). BTC tape is a LOG field only —
     recorded, never a block in shadow v1. conf rides the line only if the
-    seat was actually asked this cycle (conf-if-asked).
+    seat was actually asked this cycle (conf-if-asked). LONG lines carry a
+    native upgate= tag (t_982bccdd): the proposed up-tape gate for the
+    early_long door evaluated on the live tape read — record-only, never a
+    block, see the in-code note at the emit site.
 
     Anti-rules are RECORDED in anti=, never blocking: nearx (the near-cross
     bucket), tapeup_only (an aligned early-long with NO struct support while
@@ -3562,6 +3579,29 @@ def aligned_short_lane_emit(
         ema1d_s = ("n/a" if side == "SHORT" else
                    f"{cand.get('ema1d_pair')}"
                    f":{_f1:.6g}{'>' if _f1 > _s1 else '<'}{_s1:.6g}")
+        # Up-gate native TAG (t_982bccdd, record-only, hot-rollback key
+        # aligned_short_lane.upgate_tag=false — the key gates the TAG only).
+        # The early_long door's counterfactual (scratch/_early_long_lane_cf.py,
+        # 2026-11-23, n=193 priced WOULD-ADMIT decisions) is REGIME-GATED, not
+        # conf-gated: up-tape bounce +$0.83/tr WR90% (n=30, alpha +$10.6, zero
+        # max_loss) vs down/chop -$0.42..-0.80/tr where alpha ~0 — it is just
+        # long-beta into a falling market. This tag evaluates the PROPOSED gate
+        # (btc 24h drift > upgate_drift_min, default 0.0, hot-tunable) against
+        # the same live tape read the gate would face, so the gated-door cohort
+        # accrues via `grep upgate=allow` with no offline drift recompute.
+        # LONG side only — SHORT lines stay byte-identical. Missing/non-finite
+        # drift or bar degrades to '-', never to an opinion, never a raise.
+        upgate_s = ""
+        if side == "LONG" and bool(lane_cfg.get("upgate_tag", True)):
+            _bar = _as_finite_float(lane_cfg.get("upgate_drift_min", 0.0))
+            if _bar is None:
+                _bar = 0.0
+            _d = _as_finite_float(tape.get("drift")) if tape else None
+            if _d is not None:
+                upgate_s = (f"upgate={'allow' if _d > _bar else 'deny'}"
+                            f"(drift{_d:+.2f}%)")
+            else:
+                upgate_s = "upgate=-"
         logger.warning(
             f"[aligned-short-lane][SHADOW] WOULD ADMIT {coin} {side} "
             f"ts={cand.get('ts')} mid={cand.get('mid')} comp={cand.get('comp')} "
@@ -3575,7 +3615,8 @@ def aligned_short_lane_emit(
             f"ema1d={ema1d_s} struct_flags={','.join(struct) or '-'} "
             f"btc_tape_drift={drift_s} anti={','.join(antis) or '-'} "
             f"lane_priority={mode}#{rank} "
-            + (f"{breadth_s} " if breadth_s else "") +
+            + (f"{breadth_s} " if breadth_s else "")
+            + (f"{upgate_s} " if upgate_s else "") +
             f"— NOT admitting (shadow v1; exit mirror max_loss 5 / protect 1 / "
             f"retrace .25 / breach 2 / stale 720m priced off-line)")
         _as_lane_last_emit[coin] = now_ms
