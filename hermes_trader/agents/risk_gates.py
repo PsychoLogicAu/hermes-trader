@@ -3098,6 +3098,70 @@ def quiet_tape_gate(
     return out
 
 
+def _apply_lane_gate_policy(ctx: GateContext, effective_config: Dict[str, Any],
+                            results: Dict[str, Any]) -> Dict[str, Any]:
+    """Lane-scoped gate allow/disallow.
+
+    Config `lane_gate_policy`: {lane_key: {gate_name: bool}}. The lane_key
+    matches the admission identity the lane already carries on GateContext:
+    `ctx.cohort_tag` (e.g. "mechanical/aligned_short_live") or `ctx.entry_class`
+    (e.g. "late_chase"). Value false = DISALLOW that execute-stage gate for
+    admits that came through that lane: a FAIL verdict is overridden to a pass
+    with via="lane_gate_policy" and a loud `[gate][LANE-EXEMPT]` WARNING so the
+    exempted cohort stays greppable for counterfactual review (same accrual
+    discipline as every other clause). true = explicitly allowed (gate on, the
+    default). Anything malformed (unknown gate name, non-bool value) fails
+    SAFE: the gate stays on.
+
+    Rationale (owner decision 2026-11-24, board t_42e148eb): the counter-trend
+    gate re-reads BTC's 100x1h EMA trend at execute time and overrode the
+    aligned-short lane's own tape adjudication (fast arm net6h) on a strictly
+    staler window — for the mechanical cohort conf is 0.00 by construction and
+    the composite escape is closed (C.6), so the gate was a hard wall, not a
+    bar: 0 conversions since lane re-arm. Counterfactual on the class
+    (scratch/_42e148eb_regime_wall_cf.py, gate-read replica): 17 wall-blocked
+    admits, the only two that clear the short-liquidity floor (ZEC/LIT 11-23)
+    were blocked by this gate ALONE and are green. The short-liquidity floor
+    stays ON for every lane (owner: "the liquidity floor is fine").
+    """
+    try:
+        policy = effective_config.get("lane_gate_policy") or {}
+        if not isinstance(policy, dict):
+            return results
+        pol_norm = {str(k).strip().lower(): v for k, v in policy.items()
+                    if isinstance(v, dict)}
+        policy = pol_norm
+        cohort = getattr(ctx, "cohort_tag", None)
+        model = getattr(ctx, "primary_model", None)
+        lane_keys = []
+        if cohort and model:
+            lane_keys.append(f"{str(model).strip().lower()}/{str(cohort).strip().lower()}")
+        if cohort:
+            lane_keys.append(str(cohort).strip().lower())
+        if getattr(ctx, "entry_class", None):
+            lane_keys.append(str(ctx.entry_class).strip().lower())
+        for lane in lane_keys:
+            lane_pol = policy.get(lane)
+            if not isinstance(lane_pol, dict):
+                continue
+            for gate_name, allowed in lane_pol.items():
+                if allowed is not False:
+                    continue  # true/unknown = gate stays on (fail-safe)
+                prior = results.get(gate_name)
+                if not isinstance(prior, dict) or prior.get("pass"):
+                    continue
+                logger.warning(
+                    f"[gate][LANE-EXEMPT] {ctx.coin} {ctx.trade_side.upper()}: "
+                    f"gate={gate_name} DISALLOWED for lane={lane} — releasing. "
+                    f"prior verdict: {prior.get('reason', gate_name)}")
+                results[gate_name] = {"pass": True, "via": "lane_gate_policy",
+                                      "lane_exempt": lane, "gate": gate_name,
+                                      "prior": prior}
+    except Exception:
+        pass  # fail-safe: policy machinery must never block or open anything
+    return results
+
+
 def eval_all_gates(
     ctx: GateContext,
     config: Optional[Dict[str, Any]] = None,
@@ -3312,6 +3376,12 @@ def eval_all_gates(
         ctx, effective_config.get("quiet_tape_gate") or {},
         coin_blocklist=_cfg(effective_config, "coin_blocklist", []),
     )
+    # Lane-scoped allow/disallow (config `lane_gate_policy`): a lane's admit
+    # identity (cohort_tag/entry_class) may DISALLOW specific gates that were
+    # built for the LLM-scan population and structurally can't be satisfied by
+    # mechanical lane cohorts. Must run AFTER every gate is evaluated and
+    # BEFORE the blocked/block_reasons aggregation below.
+    results = _apply_lane_gate_policy(ctx, effective_config, results)
 
     block_reasons = []
     blocked = False
