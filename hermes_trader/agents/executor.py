@@ -609,7 +609,8 @@ def _attach_llm_context_to_result(result: Dict[str, Any], analysis: Dict[str, An
 
 def build_open_config_snapshot(regime: str, exit_policy_label: str,
                                sl_atr_mult: float, tp_atr_mult: float,
-                               lane: str | None = None) -> Dict[str, Any]:
+                               lane: str | None = None,
+                               path: Dict[str, str] | None = None) -> Dict[str, Any]:
     """Build the OPEN-row config snapshot for the append-only ledger.
 
     Cooldown windows are read FRESH from .agent-config.json (not a cached
@@ -634,7 +635,34 @@ def build_open_config_snapshot(regime: str, exit_policy_label: str,
     }
     if lane:
         snap["lane"] = str(lane)
+    if path:
+        snap["path"] = dict(path)
     return snap
+
+
+def open_path_markers(analysis: Dict[str, Any]) -> Dict[str, str] | None:
+    """Which machinery opened this trade — the entry PATH for the OPEN row.
+
+    Written ONLY when at least one marker is set: an absent key keeps the
+    snapshot byte-identical to every pre-existing row (same convention as
+    `lane`, see build_open_config_snapshot). Model is the decision source
+    (seat model name, or "mechanical" for lane-built analyses); cohort is
+    the cohort_admissions key that cleared the conf floors, if any;
+    entry_class is the executor's own entry taxonomy. This is what makes a
+    Telegram/ledger "who opened it" claim verifiable instead of inferred
+    from log-line archaeology.
+    """
+    p: Dict[str, str] = {}
+    m = str(analysis.get("primary_model") or "").strip()
+    if m:
+        p["model"] = m
+    c = str(analysis.get("cohort_tag") or "").strip()
+    if c:
+        p["cohort"] = c
+    e = str(analysis.get("_entry_class") or "").strip()
+    if e:
+        p["entry_class"] = e
+    return p or None
 
 
 @_serialized
@@ -2153,7 +2181,8 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
             perception_id=analysis.get("perception_id"),
             config_snapshot=build_open_config_snapshot(
                 _regime, _ex_label, _sl_mult, TP_ATR_MULT,
-                lane=str(analysis.get("_lane_tag") or "") or None),
+                lane=str(analysis.get("_lane_tag") or "") or None,
+                path=open_path_markers(analysis)),
         )
     except Exception as _le:
         logger.debug(f"[executor] ledger record_open failed (non-fatal): {_le}")

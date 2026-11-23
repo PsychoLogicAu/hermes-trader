@@ -106,6 +106,33 @@ def test_build_open_config_snapshot_reads_live_config(ledger_file, monkeypatch):
     assert snap3["cooldown_min"] is None and snap3["loss_cooldown_min"] is None
 
 
+def test_open_config_snapshot_path_markers(ledger_file, monkeypatch):
+    # Entry-PATH markers (t_42e148eb follow-on, 2026-11-23): which machinery
+    # opened a trade, verifiable from the ledger instead of log archaeology.
+    # Additive-only contract: no markers -> helper None -> key ABSENT ->
+    # snapshot byte-identical (the exact-equality test above pins that shape).
+    from hermes_trader.agents import executor as ex
+    monkeypatch.setattr(ex, "read_agent_config", lambda: {})
+
+    assert ex.open_path_markers({"coin": "X"}) is None
+
+    an = {"primary_model": "mechanical",
+          "cohort_tag": "mechanical/aligned_short_live",
+          "_entry_class": "momentum"}
+    markers = ex.open_path_markers(an)
+    assert markers == {"model": "mechanical",
+                       "cohort": "mechanical/aligned_short_live",
+                       "entry_class": "momentum"}
+    snap = ex.build_open_config_snapshot("down", "scalp", 1.5, 1.0,
+                                         lane="aligned_short_live",
+                                         path=markers)
+    assert snap["lane"] == "aligned_short_live" and snap["path"] == markers
+
+    # Seat entry: model only, no cohort -> partial dict, never empty strings
+    assert ex.open_path_markers({"primary_model": "mammoth-1"}) == \
+        {"model": "mammoth-1"}
+
+
 def test_close_row_carries_perception_id(ledger_file):
     ledger.record_close(
         coin="SOL", side="long", entry_px=101.6, exit_px=103.1,
