@@ -3104,14 +3104,22 @@ def _apply_lane_gate_policy(ctx: GateContext, effective_config: Dict[str, Any],
 
     Config `lane_gate_policy`: {lane_key: {gate_name: bool}}. The lane_key
     matches the admission identity the lane already carries on GateContext:
-    `ctx.cohort_tag` (e.g. "mechanical/aligned_short_live") or `ctx.entry_class`
-    (e.g. "late_chase"). Value false = DISALLOW that execute-stage gate for
-    admits that came through that lane: a FAIL verdict is overridden to a pass
-    with via="lane_gate_policy" and a loud `[gate][LANE-EXEMPT]` WARNING so the
-    exempted cohort stays greppable for counterfactual review (same accrual
-    discipline as every other clause). true = explicitly allowed (gate on, the
-    default). Anything malformed (unknown gate name, non-bool value) fails
-    SAFE: the gate stays on.
+    `ctx.cohort_tag` (e.g. "aligned_short_live"), its synthesized compound
+    "<primary_model>/<cohort_tag>" (e.g. "mechanical/aligned_short_live"), or
+    `ctx.entry_class` (e.g. "late_chase"). Value false = DISALLOW that
+    execute-stage gate for admits that came through that lane: a FAIL verdict
+    is overridden to a pass with via="lane_gate_policy" and a loud
+    `[gate][LANE-EXEMPT]` WARNING so the exempted cohort stays greppable for
+    counterfactual review (same accrual discipline as every other clause).
+    The released result CARRIES the original verdict's annotation keys
+    (regime/funding/counter_trend/divergence) at top level — live consumers
+    (divergent_sizing_shadow — LIVE-enabled; C.16 Trade-result annotations)
+    read them there; replacing the dict wholesale blinded them for exactly
+    the released cohort (independent review 2026-11-24). A gate_name that is
+    not among the evaluated results (config typo) emits a loud
+    `[gate][LANE-POLICY]` warning instead of failing silently. true =
+    explicitly allowed (gate on, the default). Anything malformed (non-bool
+    value, junk lane block) fails SAFE: the gate stays on.
 
     Rationale (owner decision 2026-11-24, board t_42e148eb): the counter-trend
     gate re-reads BTC's 100x1h EMA trend at execute time and overrode the
@@ -3148,17 +3156,34 @@ def _apply_lane_gate_policy(ctx: GateContext, effective_config: Dict[str, Any],
                 if allowed is not False:
                     continue  # true/unknown = gate stays on (fail-safe)
                 prior = results.get(gate_name)
+                if prior is None:
+                    logger.warning(
+                        f"[gate][LANE-POLICY] lane={lane} gate={gate_name}: NOT "
+                        "an evaluated gate name — policy entry has NO effect "
+                        "(typo? names are the eval_all_gates result keys)")
+                    continue
                 if not isinstance(prior, dict) or prior.get("pass"):
                     continue
                 logger.warning(
                     f"[gate][LANE-EXEMPT] {ctx.coin} {ctx.trade_side.upper()}: "
                     f"gate={gate_name} DISALLOWED for lane={lane} — releasing. "
                     f"prior verdict: {prior.get('reason', gate_name)}")
-                results[gate_name] = {"pass": True, "via": "lane_gate_policy",
+                # Carry the prior verdict's annotation keys (regime/funding/
+                # counter_trend/divergence/...) at TOP LEVEL: live consumers —
+                # divergent_sizing_shadow (executor, LIVE-enabled) and the
+                # C.16 Trade-result annotations — read results[gate] there.
+                # Wholesale replacement blinded them for released lane entries
+                # (independent review 2026-11-24).
+                results[gate_name] = {**prior, "pass": True,
+                                      "via": "lane_gate_policy",
                                       "lane_exempt": lane, "gate": gate_name,
                                       "prior": prior}
     except Exception:
-        pass  # fail-safe: policy machinery must never block or open anything
+        # Fail-safe direction (gates stay ON), but NEVER silent: a swallowed
+        # raise mid-loop can leave a partially-applied policy — log it.
+        logger.warning("[gate][LANE-POLICY] lane_gate_policy apply raised; "
+                       "partial application possible (unapplied entries leave "
+                       "their gates ON)", exc_info=True)
     return results
 
 

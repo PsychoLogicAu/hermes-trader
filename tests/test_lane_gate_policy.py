@@ -119,6 +119,31 @@ def test_malformed_values_fail_safe():
         assert out["results"]["market_regime"]["pass"] is False, pol
 
 
+def test_released_result_carries_gate_annotations_top_level():
+    """Independent-review finding: divergent_sizing_shadow (LIVE) and the C.16
+    Trade-result annotations read results["market_regime"]["regime"/
+    "divergence"/...] at TOP LEVEL — the released dict must keep them."""
+    pol = {"mechanical/aligned_short_live": {"market_regime": False}}
+    out = eval_all_gates(_zec_shape(), _cfg({"lane_gate_policy": pol}))
+    mr = out["results"]["market_regime"]
+    assert mr["pass"] is True and mr["via"] == "lane_gate_policy"
+    assert mr["regime"] == "up"          # annotation survives
+    assert "funding" in mr and "counter_trend" in mr and "divergence" in mr
+    assert mr["prior"]["pass"] is False  # original verdict preserved
+
+
+def test_unmatched_gate_name_warns_loudly(caplog):
+    """A gate-name typo in the policy must NOT fail silently: loud
+    [gate][LANE-POLICY] line, gate untouched."""
+    pol = {"mechanical/aligned_short_live": {"market-regime": False}}
+    with caplog.at_level(logging.WARNING):
+        out = eval_all_gates(_zec_shape(), _cfg({"lane_gate_policy": pol}))
+    assert out["results"]["market_regime"]["pass"] is False  # still blocked
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("LANE-POLICY" in m and "NO effect" in m
+               and "gate=market-regime" in m for m in msgs)
+
+
 def test_liquidity_floor_never_exempted_by_this_policy_shape():
     """The thin-market short floor is NOT in the policy — a THIN lane admit
     is still blocked by short_liquidity even with market_regime disallowed."""
