@@ -37,6 +37,19 @@ the legacy shape (measured refusal `confidence 0.62 < 0.65`). The LONG side is
 invariant: conf 0.62 is refused at the 0.65 long floor on every shape, pinned
 by exact reason string (t_c002f54c handoff: "pin the long-block reason string
 'confidence 0.62 < 0.65'").
+
+SUPERSEDED NARRATIVE (2026-11-24 ~13:17 AEDT, config repo 3df6a13, owner
+instruction): the seat SHORT bar was raised back to 0.65, so the 'paired
+(LIVE...)' shape described below is the 63b6944 snapshot from 12:50 AEDT, NOT
+the current live file -- live today is classic 0.60, runner general 0.65,
+runner min_short_confidence 0.60, and seat bars 0.65 (long) / 0.65 (short).
+The word 'standing' below is therefore stale: the standing owner ruling is 0.65
+on BOTH sides. The fixtures here are self-contained config shapes, so the pins
+stay green and remain valid as shape-level evidence (the 0.60-0.64 band IS
+admissible when the three bars are paired at 0.60); only the claim about which
+shape is live has changed. Do not read this file as authorisation to retune the
+short floor to 0.60 -- that is an owner decision (t_40bcf04d priced the band at
++$15.43 BN2 over 9 days but -$6.03 excluding the single day 11-20).
 """
 
 import json
