@@ -10,8 +10,10 @@ identity (cohort_tag / "primary_model/cohort_tag" / entry_class) disallow a
 specific execute-stage gate. Fail-safe: unknown lane key, unknown gate name,
 non-False value, malformed block = gate stays ON.
 
-The short-liquidity floor stays ON for every lane (owner: "the liquidity
-floor is fine") — pinned below by NOT including it in any policy.
+The short-liquidity floor stays ON as a GATE for every lane (owner: "the
+liquidity floor is fine") — no policy below releases it. (Update 2026-11-25:
+the floor VALUE is separately lane-overridable via
+`lane_min_short_volume_usd`, see test_lane_min_short_volume.py.)
 """
 import logging
 
