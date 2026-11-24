@@ -1273,8 +1273,13 @@ def short_liquidity_floor(ctx: GateContext, min_short_volume: float) -> GateResu
 def _lane_identity_keys(ctx: GateContext) -> list:
     """The lane-admission identities a lane-scoped config key may match:
     "<primary_model>/<cohort_tag>", "<cohort_tag>", "<entry_class>".
-    Shared by lane_gate_policy and lane_min_short_volume_usd (t_42e148eb) so
-    both key lanes identically."""
+    Shared by lane_gate_policy and lane_min_short_volume_usd (t_42e148eb) for
+    key GENERATION; application semantics differ by design (policy merges all
+    matching blocks; the floor takes first match, most-specific first). NOTE:
+    these identities are not lane-provenance — seat entries can carry them
+    too (vwap-* cohort_tag, entry_class late_chase), so a cohort-only or
+    entry_class key intentionally loosens the gate for THAT cohort on the seat
+    path as well. The compound "<model>/<cohort>" key stays lane-exclusive."""
     keys = []
     cohort = getattr(ctx, "cohort_tag", None)
     model = getattr(ctx, "primary_model", None)
@@ -1316,17 +1321,26 @@ def lane_short_floor(ctx: GateContext, effective_config: Dict[str, Any],
         logger.warning("[gate][LANE-FLOOR] lane_min_short_volume_usd is not "
                        "an object - global floor retained")
         return global_floor
+    # Config keys normalized like lane_gate_policy's (pol_norm) so a
+    # differently-cased key still matches instead of silently never firing.
+    block = {str(k).strip().lower(): v for k, v in block.items()}
     for lane in _lane_identity_keys(ctx):
         if lane not in block:
             continue
         raw = block[lane]
         try:
+            # bool is a subclass of int: `false` would float() to 0.0 and
+            # SILENTLY disable the floor - the exact fail-open this guard
+            # exists to prevent (independent review 2026-11-25, S1). NaN/Inf
+            # are the repo's config-defect class (3c15e35d, 258284fc).
+            if isinstance(raw, bool):
+                raise ValueError("boolean is not a floor value")
             val = float(raw)
-            if val < 0:
-                raise ValueError("negative floor")
+            if val < 0 or not math.isfinite(val):
+                raise ValueError("floor must be a finite number >= 0")
         except (TypeError, ValueError):
             logger.warning(f"[gate][LANE-FLOOR] lane={lane} value {raw!r} is "
-                           "not a number >= 0 - global floor retained")
+                           "not a finite number >= 0 - global floor retained")
             return global_floor
         if val != global_floor and ctx.trade_side == "short":
             logger.info(

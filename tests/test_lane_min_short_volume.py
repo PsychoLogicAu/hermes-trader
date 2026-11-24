@@ -137,3 +137,33 @@ def test_non_object_block_keeps_global_floor(caplog):
         r = _sl(_lane_shape(6_000_000), cfg)
     assert r["pass"] is False
     assert any("LANE-FLOOR" in rec.message for rec in caplog.records)
+
+
+def test_boolean_value_never_disables_the_floor(caplog):
+    """JSON `false` floats to 0.0 and would silently kill the gate (bool is a
+    subclass of int) — the exact fail-open the guard exists for
+    (independent review 2026-11-25, S1)."""
+    for bad in (False, True):
+        cfg = _cfg({"lane_min_short_volume_usd":
+                    {"mechanical/aligned_short_live": bad}})
+        with caplog.at_level(logging.WARNING):
+            r = _sl(_lane_shape(6_000_000), cfg)
+        assert r["pass"] is False and "$20M" in r["reason"]
+    assert any("LANE-FLOOR" in rec.message and "finite number >= 0"
+               in rec.message for rec in caplog.records)
+
+
+def test_nan_and_inf_values_keep_global_floor():
+    for bad in (float("nan"), float("inf")):
+        cfg = _cfg({"lane_min_short_volume_usd":
+                    {"mechanical/aligned_short_live": bad}})
+        r = _sl(_lane_shape(6_000_000), cfg)
+        assert r["pass"] is False and "$20M" in r["reason"]
+
+
+def test_config_key_case_is_normalized_like_policy():
+    """'Mechanical/Aligned_Short_Live' must match, same normalization
+    lane_gate_policy applies (review S2)."""
+    cfg = _cfg({"lane_min_short_volume_usd":
+                {"  Mechanical/Aligned_Short_Live ": 2_000_000}})
+    assert _sl(_lane_shape(6_000_000), cfg)["pass"] is True
