@@ -208,13 +208,26 @@ def effective_conf_floor(
     extra log lines. Fail-open at every tier: unknown side, absent/unreadable
     profile, missing or malformed (non-numeric, out of (0, 1]) value = fall
     through to the next tier, so an unprofiled seat stays byte-identical.
+
+    ONE deliberate asymmetry at tier 3: the general bar keeps the tolerance the
+    pre-resolver call (`risk_gates._cfg`) had — a camelCase key is accepted and
+    **0.0 is a legitimate value meaning "this gate is off"**, the live way to
+    disable it. Rejecting 0.0 there would silently RAISE a deliberately-zero bar
+    to ``default_general``, i.e. fail closed in a direction nobody asked for.
+    Tiers 1-2 keep the (0, 1] guard: a side-specific bar of 0 is far more likely
+    a typo than an intent to switch the floor off, and "no extra floor for this
+    side" is expressed by deleting the key, not by setting 0.
     """
-    def _num(raw: Any) -> Any:
+    def _num(raw: Any, allow_zero: bool = False) -> Any:
         try:
             val = float(raw)
         except (TypeError, ValueError):
             return None
-        return val if 0.0 < val <= 1.0 else None
+        if val < 0.0 or val > 1.0:
+            return None
+        if val == 0.0 and not allow_zero:
+            return None
+        return val
 
     side_l = str(side or "").strip().lower()
 
@@ -230,10 +243,23 @@ def effective_conf_floor(
         if val is not None:
             return val, "config_side"
 
-    val = _num(config.get(general_key) if isinstance(config, dict) else None)
+    val = _num(_general_bar_raw(config, general_key), allow_zero=True)
     if val is not None:
         return val, "general"
     return float(default_general), "general"
+
+
+def _general_bar_raw(config: Any, general_key: str) -> Any:
+    """Read the general (side-agnostic) bar tolerating snake_case or camelCase,
+    mirroring ``risk_gates._cfg`` so the tier-3 lookup accepts exactly what the
+    pre-resolver call accepted (incl. an explicit 0.0 = gate off)."""
+    if not isinstance(config, dict):
+        return None
+    if general_key in config:
+        return config[general_key]
+    parts = general_key.split("_")
+    camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
+    return config.get(camel)
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}

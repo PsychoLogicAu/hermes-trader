@@ -18,9 +18,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_trader.agents.config_store import (
+    effective_conf_floor,
     read_agent_config,
     read_model_profile_for_model,
     seat_gate_cfg,
+)
+from hermes_trader.agents.config_store import (
+    _SEAT_SIDE_BAR_KEYS as SEAT_SIDE_BAR_KEYS,
 )
 from hermes_trader.agents.duel_store import effective_primary_model
 from hermes_trader.agents.chronos_signal import (
@@ -665,6 +669,21 @@ def open_path_markers(analysis: Dict[str, Any]) -> Dict[str, str] | None:
     return p or None
 
 
+def _override_conf_floor(config: Dict[str, Any], primary_model: str) -> Tuple[float, str]:
+    """Confidence floor for the structural/whale PASS override (LONG upgrade).
+
+    It is the SAME floor the classic ``confidence_gate`` will apply to this seat's
+    LONG side, resolved through ``effective_conf_floor`` (precedence ruling
+    2026-11-24: seat profile side bar > config side bar > general bar), so the
+    override can never be built to clear a bar the gate then refuses. Default
+    stays 0.70 for an unprofiled seat with no general bar configured.
+    """
+    floor, src = effective_conf_floor(
+        config, "long", primary_model,
+        general_key="min_ai_confidence", default_general=0.70)
+    return floor, src
+
+
 @_serialized
 def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Dict[str, Any]:
     """Execute an analysis through risk gates and into the market.
@@ -888,15 +907,19 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # Upgrade to the configured confidence floor (not a hardcoded 0.70) so a
         # structural/whale override still clears the confidence_gate after the bar
         # is raised. Otherwise raising min_ai_confidence would silently kill the
-        # whale overrides — empirically the one flat-positive bucket. Seat-profile
-        # gate_bars win over the config block (t_623a4dcf; unprofiled seat =
-        # byte-identical config value).
-        _conf_floor = float(seat_gate_cfg(
-            config, "min_ai_confidence",
-            str(analysis.get("primary_model") or ""), 0.70))
+        # whale overrides — empirically the one flat-positive bucket.
+        # Precedence ruling (2026-11-24, t_40bcf04d): this must be the SAME floor
+        # the classic gate will apply to this seat's LONG side — seat profile side
+        # bar first, config side bar next, general bar last. Reading only the
+        # general bar (the third `min_ai_confidence` consumer) would upgrade the
+        # override to e.g. 0.60 while the gate blocks at the profile's
+        # entry_min_confidence 0.65 — silently killing the bucket this protects.
+        _conf_floor, _conf_floor_src = _override_conf_floor(
+            config, str(analysis.get("primary_model") or ""))
         logger.info(
             f"[executor] Structural override on {analysis['coin']}: "
-            f"AI PASS but {trigger} → upgrading to LONG conf {_conf_floor:.2f}"
+            f"AI PASS but {trigger} → upgrading to LONG conf {_conf_floor:.2f} "
+            f"(floor source: {_conf_floor_src})"
         )
         analysis = dict(analysis)
         analysis["verdict"] = "LONG"
@@ -3613,9 +3636,11 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         # the state-admission clause below: between seat bar and general bar
         # the seat admits (SEAT-BAR log, other runner checks still apply);
         # below the seat bar the clause still gets its sub-floor rescue.
-        seat_bar = _seat_bar("entry_min_short_confidence") if side == "short" else None
+        seat_bar = _seat_bar(SEAT_SIDE_BAR_KEYS["short"]) if side == "short" else None
+        _bar_key = SEAT_SIDE_BAR_KEYS["short"]
         if seat_bar is None:
-            seat_bar = _seat_bar("entry_min_confidence")
+            seat_bar = _seat_bar(SEAT_SIDE_BAR_KEYS["long"])
+            _bar_key = SEAT_SIDE_BAR_KEYS["long"]
         _bar_src = "profile"
         if seat_bar is None and side in ("short", "long"):
             # Tier 2 of the conf-floor precedence ruling (2026-11-24,
@@ -3637,7 +3662,7 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                 logger.info(
                     f"[gate][SEAT-BAR] ADMIT {coin} {side.upper()}: profile "
                     f"'{str(analysis.get('primary_model') or '').strip().lower()}' "
-                    f"entry_min_confidence {seat_bar:.2f} — conf {conf:.2f} "
+                    f"{_bar_key} {seat_bar:.2f} — conf {conf:.2f} "
                     f"below general bar {min_conf:.2f} (other runner checks apply)"
                 )
             else:

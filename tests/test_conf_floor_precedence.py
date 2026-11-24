@@ -216,3 +216,45 @@ def test_classic_gate_longs_keep_the_general_bar(seat_dir, monkeypatch):
     except Exception:
         pass
     assert seen and seen[0] == 0.65
+
+
+# ── tier-3 tolerance (independent-audit fix, 2026-11-24) ─────────────────────
+# The pre-resolver call was `float(_cfg(effective_config, "min_ai_confidence",
+# 0.8))`, and risk_gates._cfg reads the key verbatim (snake OR camel case) — so
+# an explicit 0.0 meant "this gate is off". A resolver that rejects 0 would
+# silently RAISE a deliberately-zero bar to default_general (0.8): fail closed,
+# in a direction nobody asked for. The general tier therefore keeps that
+# tolerance; tiers 1-2 still treat 0 as unset (a side bar of 0 is more likely a
+# typo, and "no side floor" is expressed by deleting the key).
+
+def test_general_bar_zero_means_no_floor_not_default():
+    assert config_store.effective_conf_floor(_cfg(general=0.0), "short", "") == (0.0, "general")
+
+
+def test_general_bar_camel_case_still_binds():
+    assert (config_store.effective_conf_floor({"minAiConfidence": 0.55}, "long", "")
+            == (0.55, "general"))
+
+
+def test_seat_side_bar_zero_still_falls_through(seat_dir):
+    _write_profile(seat_dir, "seat-x.json", model="seat-x",
+                   entry_min_short_confidence=0.0)
+    assert (config_store.effective_conf_floor(_cfg(general=0.65), "short", "seat-x")
+            == (0.65, "general"))
+
+
+def test_structural_override_floor_uses_the_seat_long_bar(seat_dir):
+    """The whale/structural PASS override upgrades conf to a floor that the
+    classic confidence_gate then has to accept. It was the third
+    `min_ai_confidence` consumer and read only the general bar, so with the
+    live mammoth shape (profile entry_min_confidence 0.65, gate_bars
+    min_ai_confidence 0.60) it would upgrade to 0.60 and the gate would refuse
+    at 0.65 — killing the one flat-positive bucket this code exists to protect."""
+    _write_profile(seat_dir, "seat-x.json", model="seat-x",
+                   entry_min_confidence=0.65, gate_bars={"min_ai_confidence": 0.60})
+    cfg = {"min_ai_confidence": 0.60}
+    assert executor._override_conf_floor(cfg, "seat-x") == (0.65, "seat_profile")
+    # unprofiled seat: general bar (byte-identical to the old seat_gate_cfg path)
+    assert executor._override_conf_floor(cfg, "no-such-seat") == (0.60, "general")
+    # nothing configured at all: the old hardcoded default survives
+    assert executor._override_conf_floor({}, "no-such-seat") == (0.70, "general")
