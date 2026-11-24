@@ -855,18 +855,21 @@ class TestLiveAdmit:
                    for m in _msgs(caplog))
 
 
-class TestLiveWhipBlock:
-    """t_9b3276ab (pre-arm 2b) RESCOPE of t_d442381f: only whip_bounce
-    blocks live admission; whip_extreme is admitted WITH annotation.
+class TestLiveWhipTags:
+    """Whip tags are ANNOTATION-ONLY on live admission (t_9b3276ab rescope
+    then bounce-skip retire 2026-11-22, t_24cd25fd-B).
 
-    Why: under the tape gate, whip_extreme is TRUE for 100% of armed
-    entries (the gate arms while the tape sits at its own 12h min), so
-    blanket-blocking it empties the armed book — n=0/22d
-    (scratch/_lane_bucket_guard_20261113.py). Bounce-only armed book
-    +$80.52/n=21 beats unguarded +$71.15/n=25, and no age-scoped extreme
-    variant beats bounce-only (scratch/_lane_whip_rescope_20261113.py).
-    The shadow anti= tags keep recording both (TestEmit); both sides read
-    the _WHIP_*_PP constants through risk_gates.whip_guard_tags().
+    Why retired: under the -4.5 depth ceiling the cohort the bounce guard
+    protected (deep+bounce -$64.00) is unreachable — the ceiling gates it.
+    In-band the skip measured pure cost in two consecutive dump windows
+    (-$15.19 then -$23.17; removes 3 fills worth +$23.16, ZERO onset-arm
+    rows; live book +$124.77/29 skip-ON vs +$147.94/32 skip-OFF,
+    scratch/_bounce_scope_probe_20261122.py). whip_extreme was already
+    annotate-only: it is TRUE for 100% of armed entries (tape-gate
+    artifact), so blocking it empties the book — n=0/22d
+    (scratch/_lane_bucket_guard_20261113.py). The shadow anti= tags keep
+    recording both (TestEmit); both sides read the _WHIP_*_PP constants
+    through risk_gates.whip_guard_tags().
     """
 
     def test_whip_extreme_admits_and_annotates(self, monkeypatch, caplog):
@@ -879,18 +882,21 @@ class TestLiveWhipBlock:
         assert not any("skip: whip" in m for m in _msgs(caplog))
         assert any("whip_tags=whip_extreme" in m for m in _msgs(caplog))
 
-    def test_whip_bounce_skips_admission(self, monkeypatch, caplog):
-        assert _live_admit(monkeypatch, caplog,
-                           tape_extra={"drift_min12": -6.5,
-                                       "btc1h": 0.6}) == []
-        assert any("skip: whip whip_bounce" in m for m in _msgs(caplog))
+    def test_whip_bounce_admits_and_annotates(self, monkeypatch, caplog):
+        got = _live_admit(monkeypatch, caplog,
+                          tape_extra={"drift_min12": -6.5,
+                                      "btc1h": 0.6})
+        assert len(got) == 1 and got[0]["whip_tags"] == "whip_bounce"
+        assert not any("skip: whip" in m for m in _msgs(caplog))
+        assert any("whip_tags=whip_bounce" in m for m in _msgs(caplog))
 
-    def test_both_tags_bounce_wins_the_call(self, monkeypatch, caplog):
-        assert _live_admit(monkeypatch, caplog,
-                           tape_extra={"drift_min12": -4.15,
-                                       "btc1h": 0.6}) == []
-        skips = [m for m in _msgs(caplog) if "skip: whip" in m]
-        assert len(skips) == 1 and "whip_bounce" in skips[0]
+    def test_both_tags_admit_annotated(self, monkeypatch, caplog):
+        got = _live_admit(monkeypatch, caplog,
+                          tape_extra={"drift_min12": -4.15,
+                                      "btc1h": 0.6})
+        assert len(got) == 1
+        assert got[0]["whip_tags"] == "whip_extreme,whip_bounce"
+        assert not any("skip: whip" in m for m in _msgs(caplog))
 
     def test_stale_drop_is_not_a_whip(self, monkeypatch, caplog):
         # min -6.5 sits 12h below drift -4.2: a grind, admits untagged
@@ -908,32 +914,27 @@ class TestLiveWhipBlock:
         assert len(_live_admit(monkeypatch, caplog, tape_extra={
             "drift_min12": None, "btc1h": None})) == 1
 
-    def test_block_fires_iff_bounce_helper_tags(self, monkeypatch, caplog):
-        # Drift-proof pin: the live SKIP predicate is exactly the bounce
-        # half of the shadow tag sweep; the extreme half never skips and
-        # must appear in whip_tags instead. Swept at the module constants.
+    def test_tags_fire_at_helper_boundaries(self, monkeypatch, caplog):
+        # Drift-proof pin: live annotation is exactly the shadow tag
+        # sweep at the module constants; NOTHING skips since the bounce
+        # skip retire (2026-11-22) — every case admits, tagged or clean.
         rg = risk_gates
         d = -4.2
         cases = [
             # extreme: drift <= min + STEP (boundary inclusive = tagged)
-            ({"drift_min12": d - rg._WHIP_EXTREME_PP}, "extreme"),
-            ({"drift_min12": d - rg._WHIP_EXTREME_PP - 0.01}, None),
-            # bounce: btc1h >= B1H (boundary inclusive = SKIP)
-            ({"btc1h": rg._WHIP_BOUNCE_PP}, "bounce"),
-            ({"btc1h": rg._WHIP_BOUNCE_PP - 0.01}, None),
-            ({}, None),
+            ({"drift_min12": d - rg._WHIP_EXTREME_PP}, "whip_extreme"),
+            ({"drift_min12": d - rg._WHIP_EXTREME_PP - 0.01}, "-"),
+            # bounce: btc1h >= B1H (boundary inclusive = tagged)
+            ({"btc1h": rg._WHIP_BOUNCE_PP}, "whip_bounce"),
+            ({"btc1h": rg._WHIP_BOUNCE_PP - 0.01}, "-"),
+            ({}, "-"),
         ]
         for extra, expect in cases:
             tags = rg.whip_guard_tags("aligned_short", dict(drift=d, **extra))
-            assert (bool(tags) is bool(expect)), extra
+            assert (",".join(tags) or "-") == expect, extra
             got = _live_admit(monkeypatch, caplog, tape_drift=d,
                               tape_extra=extra)
-            if expect == "bounce":
-                assert got == [], extra
-            else:
-                assert len(got) == 1, extra
-                assert got[0]["whip_tags"] == (
-                    "whip_extreme" if expect == "extreme" else "-"), extra
+            assert len(got) == 1 and got[0]["whip_tags"] == expect, extra
 
     def test_helper_scope_and_degradation(self):
         rg = risk_gates
@@ -1484,13 +1485,15 @@ class TestLiveAdmitOnsetArm:
         assert got == []
         assert "tape deeper than btc24_min_pct" in _msgs(caplog)[0]
 
-    def test_bounce_guard_still_applies_on_onset(self, monkeypatch, caplog):
+    def test_bounce_tag_annotates_on_onset(self, monkeypatch, caplog):
+        # bounce tag never blocks (skip retired 2026-11-22) — an onset
+        # entry during a 1h bounce ADMITS with the tag on the audit line.
         self._tracker(monkeypatch, burst=12, flip_s=60.0)
         got = _live_admit(monkeypatch, caplog, tape_drift=+0.5,
                           tape_extra={"btc1h": +0.8, "drift_min12": -3.0},
                           cfg=_live_cfg(live={"onset_arm": True}))
-        assert got == []
-        assert any("whip_bounce" in m for m in _msgs(caplog))
+        assert len(got) == 1 and "whip_bounce" in got[0]["whip_tags"]
+        assert any("whip_tags=whip_bounce" in m for m in _msgs(caplog))
 
     def test_band_armed_path_untouched_by_key(self, monkeypatch, caplog):
         # Confirmed dump arms the band: arm label and spec fields identical
