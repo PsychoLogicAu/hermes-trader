@@ -485,7 +485,7 @@ def btc_tape_activity(force: bool = False) -> Optional[Dict[str, float]]:
              t_2e23804b): the 24h drift is a lagging confirmation that can sit
              9h behind a fresh dump, the 6h net is the onset trigger.
     btc1h  = (last close / close 12 bars back − 1) × 100 — the bounce view
-             (whip_bounce guard input, t_59ab9009).
+             (whip_bounce tag input, t_59ab9009).
     drift_min12 = min of the SAME 24h-drift reading over the last 12h of
              eval points (drift at k for k in the trailing 144 bars). When
              drift ≈ drift_min12 the tape is at the EXTREME of its own day —

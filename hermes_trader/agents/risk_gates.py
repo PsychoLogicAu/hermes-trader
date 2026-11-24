@@ -3565,19 +3565,19 @@ _as_lane_last_emit: Dict[str, float] = {}
 # 07:05-07:55 cluster, 8x max_loss, had btc24 == its 12h min at entry —
 # scratch/_whipsaw_scoping.py catches that cluster at every swept threshold).
 # whip_bounce — BTC 1h change at/above this, the V is already underway.
-# The SHADOW emit records them in anti= (never blocking — accrual keeps
-# measuring tag coverage); the LIVE picker skips ONLY whip_bounce
-# (rescoped, t_9b3276ab pre-arm 2b): under the tape gate whip_extreme is
-# TRUE for 100% of ARMED entries — the gate arms while the tape drops and
-# a dropping tape's 24h drift sits at its own 12h min — so blocking on
-# extreme empties the armed book (n=0/22d, scratch/_lane_bucket_guard_
-# 20261113.py). The 22d +$199 as-if price (scratch/_whipsaw_scoping.py,
-# STEP=0.10 B1H=0.50, 2026-11-13) was measured on the UNARMED book and
-# does not transfer; on the armed cell bounce-only is +$80.52/n=21 and no
-# age-scoped extreme variant beats it (scratch/_lane_whip_rescope_
-# 20261113.py). extreme is ANNOTATED on live admits (whip_tags=) so the
-# live book keeps the same audit trail. Both sides read these constants
-# through whip_guard_tags() below — tag and block cannot drift.
+# The SHADOW emit records them in anti= and the LIVE picker annotates
+# whip_tags= on admits — BOTH tags are ANNOTATION-ONLY since 2026-11-22
+# (bounce skip retired: under the -4.5 ceiling the protected deep cohort
+# is unreachable, and in-band the skip measured pure cost, two windows:
+# scratch/_bounce_scope_probe_20261122.py; history: blanket skip n=0/22d,
+# bounce-only +$80.52/21 pre-ceiling-flip 2026-11-13).
+# whip_extreme was ALREADY annotate-only from the t_9b3276ab rescope:
+# under the tape gate it is TRUE for 100% of ARMED entries (the gate arms
+# while the tape drops and a dropping tape's 24h drift sits at its own
+# 12h min) — blocking on it empties the armed book (n=0/22d,
+# scratch/_lane_bucket_guard_20261113.py). Both sides read these
+# constants through whip_guard_tags() below — tag and any future block
+# cannot drift.
 _WHIP_EXTREME_PP = 0.10
 _WHIP_BOUNCE_PP = 0.50
 
@@ -3590,8 +3590,9 @@ def whip_guard_tags(lane: Optional[str],
     degrade to untagged (no-opinion), never to a signal or a block. Scoped
     to the aligned_short lane (whip tags never reach early_long). The
     SHADOW emit extends anti= with the result (record-only); the LIVE
-    picker skips only whip_bounce and annotates whip_extreme
-    (t_9b3276ab rescope of the blanket skip, t_d442381f).
+    picker annotates both tags on admits and skips on neither
+    (t_9b3276ab rescope, then full skip retire 2026-11-22 — see the
+    constants block).
     """
     tags: List[str] = []
     if lane != "aligned_short" or not tape:
@@ -3863,16 +3864,15 @@ def aligned_short_lane_live_admit(
 
     Ordering mirrors the accrual's booking order (composite descending) so
     the live cohort is the same subset the slot-capped replay priced.
-    Whipsaw guard (rescoped, t_9b3276ab): whip_bounce tags from
-    whip_guard_tags() SKIP the candidate; whip_extreme is admitted with a
-    whip_tags= annotation (it is true for every armed entry — blocking it
-    empties the book; see the constants block).
+    Whipsaw tags (t_59ab9009 lineage): whip_guard_tags() results annotate
+    whip_tags= on admits and skip on NOTHING (bounce skip retired
+    2026-11-22 — see the constants block for the measured history).
     ONSET arm (live.onset_arm, default false): when the tape band does NOT
     arm but a DN breadth thrust is firing (dn_burst_count >= onset_burst_min)
     the lane may arm, per candidate gated on a fresh own DN flip
     (flip_age_m <= onset_flip_max_min) — the leg's front. The depth ceiling
-    and the whip_bounce guard gate this arm too; evidence + design notes in
-    the block. Absent/false key = byte-identical.
+    gates this arm too; evidence + design notes in the block.
+    Absent/false key = byte-identical.
     """
     live = (lane_cfg or {}).get("live")
     if not isinstance(live, dict) or not bool(live.get("enabled", False)):
@@ -4001,7 +4001,8 @@ def aligned_short_lane_live_admit(
     # -45.14 — the 11-14 23:37 burst=51/flip-12min cluster is 4x -$15.86
     # squeeze stops (tape exhaustion, not onset). The ceiling block above
     # therefore gates this arm too: it returns before onset is ever
-    # consulted, and the whip_bounce guard keeps applying. live.onset_arm
+    # consulted; whip tags here too are annotation-only (skip retired
+    # 2026-11-22). live.onset_arm
     # absent/false = byte-identical to the band-only arm; a dead tracker or
     # an untracked coin never arms and never admits (fail closed).
     onset_armed = False
@@ -4100,24 +4101,22 @@ def aligned_short_lane_live_admit(
             logger.debug(f"[aligned-short-lane][LIVE] {coin} skip: mom6h_net "
                          f"{mom:+.1f}% > {mom_max:+.1f}%")
             continue
-        # WHIP BLOCK — RESCOPED (t_9b3276ab pre-arm 2b; was blanket-any-tag
-        # in t_d442381f): only whip_bounce skips live admission. Under the
-        # tape gate, whip_extreme is true for EVERY armed entry (the gate
-        # arms while the tape is at its own 12h min), so blanket-blocking
-        # it admitted n=0/22d — armed books: extreme/both = $0, bounce-only
-        # = +$80.52/n=21 vs unguarded +$71.15/n=25 (scratch/_lane_bucket_
-        # guard_20261113.py, scratch/_lane_whip_rescope_20261113.py,
-        # 2026-11-13). extreme stays a shadow tag + a live ANNOTATION:
-        # accrual keeps measuring it and the live book keeps the audit
-        # trail. WARNING level on the skip: it is a live gate decision.
+        # WHIP TAGS — ANNOTATION ONLY (bounce skip RETIRED 2026-11-22,
+        # t_24cd25fd-B; was blanket-any-tag t_d442381f, then bounce-only
+        # skip t_9b3276ab). History: blanket skip admitted n=0/22d;
+        # bounce-only skip measured +$80.52/n=21 vs unguarded +$71.15/25
+        # on the 22d pre-flip window (2026-11-13). That edge did NOT
+        # survive the -4.5 depth ceiling: the cohort the guard protected
+        # (deep+bounce -$64.00) sits deeper than the ceiling already
+        # gates, so the skip's live population collapsed to in-band rows
+        # where it is pure cost — two consecutive dump windows of in-band
+        # cost (-$15.19 at 11-18 read; -$23.17 at 11-22 read: skip removes
+        # 3 fills worth +$23.16, ZERO onset-arm rows; live book +$124.77/29
+        # with skip vs +$147.94/32 without, scratch/_bounce_scope_probe_
+        # 20261122.py). Tags keep emitting (shadow anti= + live whip_tags=)
+        # so accrual can re-open this if a future config makes deep rows
+        # reachable again.
         _whips = whip_guard_tags(cand.get("lane"), tape)
-        if "whip_bounce" in _whips:
-            logger.warning(
-                f"[aligned-short-lane][LIVE] {coin} skip: whip whip_bounce "
-                f"— btc1h {_fmt((tape or {}).get('btc1h'))} (V underway), "
-                f"drift {drift:+.2f}% vs 12h min "
-                f"{_fmt((tape or {}).get('drift_min12'))}")
-            continue
         # ONSET arm per-candidate gate: the thrust is universe-wide, but the
         # coin must be at the FRONT of its own leg — own DN flip fresh.
         # Untracked coin / dead tracker = skip (fail closed).
