@@ -162,6 +162,106 @@ def seat_gate_cfg(config: Dict[str, Any], key: str, model_name: str,
     merged = apply_seat_gate_bars(config, model_name)
     return merged.get(key, default) if isinstance(merged, dict) else default
 
+
+# Confidence-floor precedence (owner ruling 2026-11-24, kanban t_5cc67821 /
+# t_40bcf04d). A general (side-agnostic) bar at config level is fine, but a
+# config-level SIDE-SPECIFIC bar must override it, and a SIDE-SPECIFIC bar in
+# the answering seat's own profile (config-models/<seat>.json) has the HIGHEST
+# precedence — "mammoth's JSON must win". Before this ruling the classic
+# confidence gate read only the general bar (`min_ai_confidence`), so it
+# silently re-blocked everything a seat's side-specific bar was set to admit:
+# measured on the mammoth-1 seat era, 1,210 deduped `confidence 0.6x < 0.65`
+# refusals against **0** `short confidence` refusals, i.e. the profile's
+# entry_min_short_confidence 0.60 never bound outside the cohort-admission lane.
+_SEAT_SIDE_BAR_KEYS: Dict[str, str] = {
+    "long": "entry_min_confidence",
+    "short": "entry_min_short_confidence",
+}
+_CONFIG_SIDE_BAR_KEYS: Dict[str, str] = {
+    "long": "min_long_confidence",    # optional; unset in live config today
+    "short": "min_short_confidence",
+}
+
+
+def effective_conf_floor(
+    config: Dict[str, Any],
+    side: Any,
+    model_name: str = "",
+    *,
+    general_key: str = "min_ai_confidence",
+    gate_key: str = "runner_entry_gate",
+    default_general: float = 0.8,
+) -> Any:
+    """Resolve THE confidence floor for one side, with no ambiguity.
+
+    Precedence (highest first):
+      1. answering seat's profile side bar — ``entry_min_short_confidence``
+         (short) / ``entry_min_confidence`` (long);
+      2. config-level side bar — ``<gate_key>.min_short_confidence`` (short) /
+         ``<gate_key>.min_long_confidence`` (long), already seat-overlaid when
+         the caller passed an ``apply_seat_gate_bars`` result;
+      3. general side-agnostic bar — ``config[general_key]`` (profile
+         ``gate_bars`` overlaid), else ``default_general``.
+
+    Returns ``(floor, source)`` with source in ``{"seat_profile",
+    "config_side", "general"}`` so callers can report WHICH tier bound without
+    extra log lines. Fail-open at every tier: unknown side, absent/unreadable
+    profile, missing or malformed (non-numeric, out of (0, 1]) value = fall
+    through to the next tier, so an unprofiled seat stays byte-identical.
+
+    ONE deliberate asymmetry at tier 3: the general bar keeps the tolerance the
+    pre-resolver call (`risk_gates._cfg`) had — a camelCase key is accepted and
+    **0.0 is a legitimate value meaning "this gate is off"**, the live way to
+    disable it. Rejecting 0.0 there would silently RAISE a deliberately-zero bar
+    to ``default_general``, i.e. fail closed in a direction nobody asked for.
+    Tiers 1-2 keep the (0, 1] guard: a side-specific bar of 0 is far more likely
+    a typo than an intent to switch the floor off, and "no extra floor for this
+    side" is expressed by deleting the key, not by setting 0.
+    """
+    def _num(raw: Any, allow_zero: bool = False) -> Any:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if val < 0.0 or val > 1.0:
+            return None
+        if val == 0.0 and not allow_zero:
+            return None
+        return val
+
+    side_l = str(side or "").strip().lower()
+
+    if side_l in _SEAT_SIDE_BAR_KEYS and model_name:
+        prof = read_model_profile_for_model(str(model_name)) or {}
+        val = _num(prof.get(_SEAT_SIDE_BAR_KEYS[side_l]))
+        if val is not None:
+            return val, "seat_profile"
+
+    gate = config.get(gate_key) if isinstance(config, dict) else None
+    if side_l in _CONFIG_SIDE_BAR_KEYS and isinstance(gate, dict):
+        val = _num(gate.get(_CONFIG_SIDE_BAR_KEYS[side_l]))
+        if val is not None:
+            return val, "config_side"
+
+    val = _num(_general_bar_raw(config, general_key), allow_zero=True)
+    if val is not None:
+        return val, "general"
+    return float(default_general), "general"
+
+
+def _general_bar_raw(config: Any, general_key: str) -> Any:
+    """Read the general (side-agnostic) bar tolerating snake_case or camelCase,
+    mirroring ``risk_gates._cfg`` so the tier-3 lookup accepts exactly what the
+    pre-resolver call accepted (incl. an explicit 0.0 = gate off)."""
+    if not isinstance(config, dict):
+        return None
+    if general_key in config:
+        return config[general_key]
+    parts = general_key.split("_")
+    camel = parts[0] + "".join(p.capitalize() for p in parts[1:])
+    return config.get(camel)
+
+
 DEFAULT_CONFIG: Dict[str, Any] = {"mode": "OFF"}
 
 # Documented block shape for the LLM slots (hot-read at call time by the

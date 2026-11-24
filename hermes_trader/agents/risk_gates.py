@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from hermes_trader.agents.config_store import (
     apply_seat_gate_bars,
+    effective_conf_floor,
     read_model_profile_for_model,
 )
 
@@ -3210,7 +3211,9 @@ def eval_all_gates(
     # LONG-side 0.70-0.80 leak; applying it to aligned shorts made us sit out
     # selloffs (e.g. SOL SHORT 0.72 / -6.3% / $399M blocked). Demand full
     # conviction only to fight the trend (neutral/counter-trend keep the default).
-    min_conf = float(_cfg(effective_config, "min_ai_confidence", 0.8))
+    min_conf, _floor_src = effective_conf_floor(
+        effective_config, ctx.trade_side, str(getattr(ctx, "primary_model", "") or ""),
+        general_key="min_ai_confidence", default_general=0.8)
     aligned_min_conf = effective_config.get("aligned_min_conf")
     if aligned_min_conf is not None:
         try:
