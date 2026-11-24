@@ -3616,13 +3616,37 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
         seat_bar = _seat_bar("entry_min_short_confidence") if side == "short" else None
         if seat_bar is None:
             seat_bar = _seat_bar("entry_min_confidence")
+        _bar_src = "profile"
+        if seat_bar is None and side in ("short", "long"):
+            # Tier 2 of the conf-floor precedence ruling (2026-11-24,
+            # t_5cc67821): a config-level SIDE-specific bar overrides the
+            # general bar. Without this hop a seat with no profile bars is
+            # refused here at the general floor and never reaches the side
+            # floor (short: `min_short_confidence` below at the allow_shorts
+            # branch; long: no side floor at all), so the side-specific config
+            # key would be inert — the exact ambiguity the ruling removes.
+            _raw = gate.get("min_short_confidence" if side == "short"
+                            else "min_long_confidence")
+            try:
+                if _raw is not None:
+                    seat_bar, _bar_src = float(_raw), "config"
+            except (TypeError, ValueError):
+                seat_bar = None  # malformed -> general bar (fail-open)
         if seat_bar is not None and conf >= seat_bar:
-            logger.info(
-                f"[gate][SEAT-BAR] ADMIT {coin} {side.upper()}: profile "
-                f"'{str(analysis.get('primary_model') or '').strip().lower()}' "
-                f"entry_min_confidence {seat_bar:.2f} — conf {conf:.2f} "
-                f"below general bar {min_conf:.2f} (other runner checks apply)"
-            )
+            if _bar_src == "profile":
+                logger.info(
+                    f"[gate][SEAT-BAR] ADMIT {coin} {side.upper()}: profile "
+                    f"'{str(analysis.get('primary_model') or '').strip().lower()}' "
+                    f"entry_min_confidence {seat_bar:.2f} — conf {conf:.2f} "
+                    f"below general bar {min_conf:.2f} (other runner checks apply)"
+                )
+            else:
+                logger.info(
+                    f"[gate][SIDE-BAR] ADMIT {coin} {side.upper()}: config "
+                    f"{'min_short_confidence' if side == 'short' else 'min_long_confidence'} "
+                    f"{seat_bar:.2f} — conf {conf:.2f} below general bar "
+                    f"{min_conf:.2f} (other runner checks apply)"
+                )
             min_conf = seat_bar
         else:
             # Report the EFFECTIVE bar (the seat bar filtered it, not the
