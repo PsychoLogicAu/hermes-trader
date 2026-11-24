@@ -1270,6 +1270,73 @@ def short_liquidity_floor(ctx: GateContext, min_short_volume: float) -> GateResu
                        f"< short floor ${min_short_volume/1e6:.0f}M (squeeze risk)")}
 
 
+def _lane_identity_keys(ctx: GateContext) -> list:
+    """The lane-admission identities a lane-scoped config key may match:
+    "<primary_model>/<cohort_tag>", "<cohort_tag>", "<entry_class>".
+    Shared by lane_gate_policy and lane_min_short_volume_usd (t_42e148eb) so
+    both key lanes identically."""
+    keys = []
+    cohort = getattr(ctx, "cohort_tag", None)
+    model = getattr(ctx, "primary_model", None)
+    if cohort and model:
+        keys.append(f"{str(model).strip().lower()}/{str(cohort).strip().lower()}")
+    if cohort:
+        keys.append(str(cohort).strip().lower())
+    if getattr(ctx, "entry_class", None):
+        keys.append(str(ctx.entry_class).strip().lower())
+    return keys
+
+
+def lane_short_floor(ctx: GateContext, effective_config: Dict[str, Any],
+                     global_floor: float) -> float:
+    """Lane-scoped override for the short-liquidity floor (owner decision
+    2026-11-25, board t_42e148eb).
+
+    Config `lane_min_short_volume_usd`: {lane_identity: usd_floor}, keyed by the
+    same identities as lane_gate_policy; first match wins. The $20M floor was
+    calibrated for SEAT-sized shorts (72h segmentation: thin markets squeeze
+    ~17x harder) but it voided 91% of the aligned-short lane's measured book
+    while its protective value above $1M did not survive the broader 32-day
+    sample (knives distribute across liquidity; scratch/_lane_floor_grid.py:
+    the $2-5M band is 14 fills 100%W 0 knives, the knife pocket sits at
+    $6-10M). $2M is the owner-set lane floor; the global $1M market floor still
+    kills sub-$1M junk for every path, lane included.
+
+    Absent key = byte-identical global behavior. Value must be numeric >= 0
+    (0 = floor disabled for that lane). Malformed block or value = loud
+    [gate][LANE-FLOOR] warning and the GLOBAL floor stands (fail-safe: never
+    silently loosen a liquidity gate). When an override applies, the one INFO
+    line names the effective floor, and any resulting block reason carries
+    it too ("short floor $2M") - greppable evidence, no blind spot.
+    """
+    block = effective_config.get("lane_min_short_volume_usd")
+    if block is None:
+        return global_floor
+    if not isinstance(block, dict):
+        logger.warning("[gate][LANE-FLOOR] lane_min_short_volume_usd is not "
+                       "an object - global floor retained")
+        return global_floor
+    for lane in _lane_identity_keys(ctx):
+        if lane not in block:
+            continue
+        raw = block[lane]
+        try:
+            val = float(raw)
+            if val < 0:
+                raise ValueError("negative floor")
+        except (TypeError, ValueError):
+            logger.warning(f"[gate][LANE-FLOOR] lane={lane} value {raw!r} is "
+                           "not a number >= 0 - global floor retained")
+            return global_floor
+        if val != global_floor and ctx.trade_side == "short":
+            logger.info(
+                f"[gate][LANE-FLOOR] {ctx.coin} SHORT: short floor "
+                f"${val / 1e6:.2f}M replaces global ${global_floor / 1e6:.2f}M "
+                f"(lane={lane})")
+        return val
+    return global_floor
+
+
 def history_floor_reason(coin: str, min_history_bars: int, fetch_daily) -> str:
     """Preflight gate: block coins younger than `min_history_bars` completed DAILY bars.
 
@@ -3132,6 +3199,9 @@ def _apply_lane_gate_policy(ctx: GateContext, effective_config: Dict[str, Any],
     admits, the only two that clear the short-liquidity floor (ZEC/LIT 11-23)
     were blocked by this gate ALONE and are green. The short-liquidity floor
     stays ON for every lane (owner: "the liquidity floor is fine").
+    UPDATE 2026-11-25: the floor VALUE became lane-overridable via
+    `lane_min_short_volume_usd` ($2M for this cohort, owner call) — the gate
+    itself still runs everywhere; nothing about this policy mechanism changed.
     """
     try:
         policy = effective_config.get("lane_gate_policy") or {}
@@ -3140,15 +3210,7 @@ def _apply_lane_gate_policy(ctx: GateContext, effective_config: Dict[str, Any],
         pol_norm = {str(k).strip().lower(): v for k, v in policy.items()
                     if isinstance(v, dict)}
         policy = pol_norm
-        cohort = getattr(ctx, "cohort_tag", None)
-        model = getattr(ctx, "primary_model", None)
-        lane_keys = []
-        if cohort and model:
-            lane_keys.append(f"{str(model).strip().lower()}/{str(cohort).strip().lower()}")
-        if cohort:
-            lane_keys.append(str(cohort).strip().lower())
-        if getattr(ctx, "entry_class", None):
-            lane_keys.append(str(ctx.entry_class).strip().lower())
+        lane_keys = _lane_identity_keys(ctx)
         for lane in lane_keys:
             lane_pol = policy.get(lane)
             if not isinstance(lane_pol, dict):
@@ -3258,7 +3320,9 @@ def eval_all_gates(
         gate_config=runner_gate_cfg,
     )
     results["short_liquidity"] = short_liquidity_floor(
-        ctx, float(_cfg(effective_config, "min_short_volume_usd", 0) or 0)
+        ctx, lane_short_floor(
+            ctx, effective_config,
+            float(_cfg(effective_config, "min_short_volume_usd", 0) or 0))
     )
     results["coin_filter"] = coin_allowlist_gate(
         ctx,
