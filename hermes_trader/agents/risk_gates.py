@@ -327,7 +327,8 @@ def tape_state_stamp(btc_history: Any, tape_cfg: Dict[str, Any], band_max: Any =
 
 
 def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
-                    band_max: Any = None) -> Any:
+                    band_max: Any = None,
+                    disarm_probe: Optional[Dict[str, Any]] = None) -> Any:
     """Compute the crossing-clock arms behind the tape-state stamp, as data.
 
     Returns {"deep": {"age": h|None, "clock": h, "active": bool,
@@ -365,6 +366,17 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
     band would silently refuse all entries in it — nonsense config may
     only make the gate stricter, never inverted). A malformed value makes
     the whole arms read "malformed" -> the gate fails CLOSED.
+
+    DISARM PROBE (t_0c635008, 2026-11-25, LOG-ONLY): ``disarm_probe`` re-runs the
+    SAME arm math with the disarm inputs relaxed, so the ARM-SKIP branch can accrue
+    what the disarm rule is refusing. Keys ``above_pct`` / ``hard_above_pct`` /
+    ``confirm_bars`` override the matching ``tape_cfg`` keys (set one to ``None`` to
+    disable that leg entirely). It changes no verdict — the gate calls this with the
+    probe only to build a log line; absent/empty probe -> identical code path,
+    byte-identical arms. Basis for the probe: in the 11-07..25 shadow window all
+    3,196 ARM-SKIP decisions carry stamp flag 'd' (disarmed) on BOTH legs and zero
+    carry 'x' (past clock), so widening deep/shallow_arm_clock_h admits exactly zero
+    and the disarm rule is the only arm door left.
     """
     if not btc_history or len(btc_history) < 30:
         return None
@@ -380,10 +392,20 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
         if not series:
             return None
         now_ms = series[-1][0]
-        top = tape_cfg.get("disarm_above_pct", band_max)
+        # Probe seam: with no probe _src IS tape_cfg, so every read below (and
+        # therefore every live arm) stays byte-identical.
+        _src: Dict[str, Any] = tape_cfg
+        if isinstance(disarm_probe, dict) and disarm_probe:
+            _src = dict(tape_cfg)
+            for _pk, _ck in (("above_pct", "disarm_above_pct"),
+                             ("hard_above_pct", "disarm_hard_above_pct"),
+                             ("confirm_bars", "disarm_confirm_bars")):
+                if _pk in disarm_probe:
+                    _src[_ck] = disarm_probe[_pk]
+        top = _src.get("disarm_above_pct", band_max)
         if top is not None:
             top = float(top)
-        hard = tape_cfg.get("disarm_hard_above_pct")
+        hard = _src.get("disarm_hard_above_pct")
         if hard is not None:
             hard = float(hard)  # malformed -> outer except -> "malformed"
             if top is not None and hard < top:
@@ -391,8 +413,12 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
         disarm_t = None
         if top is not None or hard is not None:
             try:
-                conf = max(1, int(tape_cfg.get("disarm_confirm_bars", 1)))
-            except (TypeError, ValueError):
+                conf = max(1, int(_src.get("disarm_confirm_bars", 1)))
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError matters: JSON Infinity parses and int(inf) raises
+                # it, which used to escape BOTH guards and crash the decision
+                # (audit F4, 2026-11-25). Same treatment as any other malformed
+                # knob: single-close rule, i.e. the STRICTER direction.
                 conf = 1  # malformed knob -> single-close rule (no tolerance)
             for i in range(len(series) - 1, 0, -1):
                 d = series[i][1]
@@ -424,8 +450,93 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
                          "active": (age is not None and age <= clock
                                     and not disarmed)}
         return out
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "malformed"
+
+
+# Probe fan-out bound: this is an accrual flight-recorder, not a tuning knob, so
+# a typo'd list of 200 probes must not become 200 log lines per ARM-SKIP.
+DISARM_CF_MAX = 4
+
+
+def parse_disarm_cf(raw: Any) -> List[Dict[str, Any]]:
+    """Parse ``tape_state.disarm_cf`` into probe dicts (t_0c635008, LOG-ONLY).
+
+    Accepts ONE dict or a LIST of dicts. Each probe may carry ``above_pct``,
+    ``hard_above_pct``, ``confirm_bars`` (matching the disarm inputs; ``None``
+    disables that leg entirely) plus an optional ``tag`` for the accrual line.
+    Anything malformed yields NO probes — a broken probe block may never change
+    a verdict, an ARM-SKIP why-line, or the stamp.
+    """
+    if isinstance(raw, dict):
+        items: List[Any] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        return []
+    out: List[Dict[str, Any]] = []
+    for it in items[:DISARM_CF_MAX]:
+        if not isinstance(it, dict):
+            continue
+        probe = {k: it[k] for k in ("above_pct", "hard_above_pct", "confirm_bars")
+                 if k in it}
+        if not probe:
+            continue  # a probe that relaxes nothing accrues nothing
+        tag = str(it.get("tag") or "").strip() or ",".join(
+            f"{k}={'off' if probe[k] is None else probe[k]}" for k in sorted(probe))
+        out.append({"tag": tag[:60], "probe": probe})
+    return out
+
+
+def disarm_cf_log_lines(analysis: Dict[str, Any], tapecfg: Dict[str, Any],
+                        band_max: Any, live_stamp: str) -> List[str]:
+    """Build the SHADOW-DISARM accrual lines (t_0c635008). NEVER raises, NEVER
+    changes the verdict: the caller has already decided ARM-SKIP; these lines
+    only record which relaxed disarm rule would have armed, so the refused
+    population gets priced against the live ARM-SKIP baseline instead of argued.
+
+    Audit F2 (2026-11-25): the fault guard is PER PROBE. One poison value — JSON
+    `Infinity` parses cleanly and int(inf) raises OverflowError — must cost one
+    accrual row, not the whole list. Faults log at WARNING, not DEBUG: DEBUG is
+    not emitted by the live logger, so a DEBUG-only fault note would make the
+    lost accrual invisible exactly when it matters.
+    """
+    lines: List[str] = []
+    try:
+        probes = parse_disarm_cf(tapecfg.get("disarm_cf"))
+        hist = analysis.get("btc_history_1h")
+        coin = str(analysis.get("coin") or "unknown")
+        side = str(analysis.get("side") or "").upper() or "?"
+    except Exception as exc:  # input shaping can never cost a decision
+        logger.warning(f"[gate][STATE-ADMIT][DISARM-CF-FAULT] setup dropped: {exc}")
+        return lines
+    for p in probes:
+        try:
+            arms = tape_state_arms(hist, tapecfg, band_max=band_max,
+                                   disarm_probe=p["probe"])
+            if not isinstance(arms, dict):
+                continue  # no-history / malformed -> nothing to accrue for this probe
+            if not (arms["deep"]["active"] or arms["shallow"]["active"]):
+                continue  # probe still refuses: that IS the answer, no line needed
+            relaxed = dict(tapecfg)
+            relaxed["disarm_above_pct"] = p["probe"].get(
+                "above_pct", tapecfg.get("disarm_above_pct", band_max))
+            relaxed["disarm_hard_above_pct"] = p["probe"].get(
+                "hard_above_pct", tapecfg.get("disarm_hard_above_pct"))
+            relaxed["disarm_confirm_bars"] = p["probe"].get(
+                "confirm_bars", tapecfg.get("disarm_confirm_bars", 1))
+            lines.append(
+                f"[gate][STATE-ADMIT][SHADOW-DISARM] WOULD ADMIT {coin} {side}: "
+                f"live arm [{live_stamp}] but relaxed disarm rule [{p['tag']}] "
+                f"would arm [{tape_state_stamp(hist, relaxed, band_max=band_max)}] "
+                f"— PROBE ONLY, NOT admitting (log-only; verdict unchanged)")
+        except Exception as exc:  # this probe is dropped; the others still accrue
+            # NB: deliberately NOT the accrual marker string — WOULD-ADMIT grep
+            # counts must stay 1:1 with decisions.
+            logger.warning(f"[gate][STATE-ADMIT][DISARM-CF-FAULT] probe "
+                           f"[{p['tag']}] dropped: {exc}")
+            continue
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -693,8 +804,10 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
     (clause false + short shadow true = shorts still accrue; clause true
     + short shadow false = shorts live while the long arm accrues).
     Sub-block shadow absent = clause-level value, byte-identical prior
-    behavior. Returns (admit, why, shadow). Pure: no I/O, no
-    logging.
+    behavior. Returns (admit, why, shadow). No I/O; the ONLY logging is the
+    t_0c635008 disarm-counterfactual accrual at the ARM-SKIP branch
+    (SHADOW-DISARM lines / DISARM-CF-FAULT faults) — verdict-neutral by
+    construction, and silent unless tape_state.disarm_cf is configured.
     Side-level inert paths (no side sub-block, unset tape keys, no tape
     read, malformed values) return a LABELLED why — the call sites log
     a SKIP line whenever the clause dict exists, so an empty why would
@@ -791,6 +904,15 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
             if _tapecfg is not None and bool(_tapecfg.get("require_arm", False)):
                 _arms = tape_state_arms(analysis.get("btc_history_1h"), _tapecfg, band_max=_mx)
                 if not isinstance(_arms, dict) or not (_arms["deep"]["active"] or _arms["shallow"]["active"]):
+                    # t_0c635008 (2026-11-25): the refusal stands — but the 11-07..25
+                    # accrual shows WHY it stands (stamp flag 'd' = disarmed on both
+                    # legs in 3,196/3,196 cases, zero 'x'), so the disarm rule is
+                    # priced as a log-only probe instead of argued from two
+                    # irreconcilable cohort reads. Probe lines never gate.
+                    _live = _st.strip().removeprefix("tape [").removesuffix("]")
+                    for _ln in disarm_cf_log_lines(analysis, _tapecfg, _mx,
+                                                   _live or "no-history"):
+                        logger.info(_ln)
                     return False, ("ARM-SKIP: crash arm not active (drift has not "
                                    f"gone through the band floor and recovered back; "
                                    f"deep clock {_tapecfg.get('deep_arm_clock_h', 48):g}h, "
