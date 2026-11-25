@@ -229,3 +229,44 @@ def test_no_identity_without_a_clause_admit():
     ctx = _seat_shape(6_000_000)
     eval_all_gates(ctx, _cfg())
     assert "state_admission" not in _lane_identity_keys(ctx)
+
+
+# ---- audit follow-ups (independent review of 4126ec7d, probe P9/P10) ------
+
+def test_stale_stamp_cannot_ride_into_a_later_decision():
+    """P9: the identity is PER-EVAL, not per-object. Re-evaluating the same
+    GateContext — now a seat-confidence short the clause never admitted — must
+    fall back to the global $20M floor, not keep the scoped $3M."""
+    cfg = _cfg({"lane_min_short_volume_usd": {"state_admission": 3_000_000}})
+    ctx = _clause_shape(6_000_000)
+    assert _sl(ctx, cfg)["pass"] is True          # clause admit -> $3M floor
+    ctx.confidence = 0.90                        # same object, now a seat short
+    r = _sl(ctx, cfg)
+    assert r["pass"] is False and "$20M" in r["reason"]
+
+
+def test_lane_gate_policy_cannot_release_a_gate_for_the_clause_identity():
+    """P10: `lane_gate_policy` RELEASES whole gates for whoever matches its key.
+    Keying it on "state_admission" would leave the clause cohort with NO
+    short-liquidity floor — a bigger lever than the owner's $3M ruling, so the
+    clause identity is floor-only (`include_clause=False`). The cohort key stays
+    usable (positive control below), which proves the guard is scoped and not a
+    broken policy path."""
+    cfg = _cfg({"lane_gate_policy": {"state_admission": {"short_liquidity": False}}})
+    r = _sl(_clause_shape(1_500_000), cfg)
+    assert r["pass"] is False and "short floor $20M" in r["reason"]
+    assert "lane_exempt" not in str(r)
+    out = eval_all_gates(_clause_shape(1_500_000), cfg)
+    assert not any(str(v.get("lane_exempt", "")) == "state_admission"
+                   for v in out["results"].values() if isinstance(v, dict))
+
+
+def test_lane_gate_policy_still_works_for_cohort_keys():
+    """Positive control for the guard above: cohort-keyed policy is unaffected."""
+    cfg = _cfg({"lane_gate_policy":
+                {"aligned_short_live": {"short_liquidity": False}}})
+    ctx = _clause_shape(1_500_000, coin="ZRO", model="mechanical",
+                        cohort="aligned_short_live")
+    out = eval_all_gates(ctx, cfg)
+    r = out["results"]["short_liquidity"]
+    assert r["pass"] is True and r.get("via") == "lane_gate_policy"
