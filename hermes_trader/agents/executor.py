@@ -42,6 +42,7 @@ from hermes_trader.agents.dsl_exit import (
 from hermes_trader.agents.memory import memory
 from hermes_trader.ledger import record_open, record_close
 from hermes_trader.agents.risk_gates import GateContext, eval_all_gates, state_admission, inject_state_quality, lane_mode, tape_state_arms, tape_state_stamp, clause_slot_budget_check
+from hermes_trader.agents.chase_shadow import log_chase_shadow
 from hermes_trader.client.exchange import (
     HL_LEVERAGE,
     cancel_open_orders_for_coin,
@@ -1620,6 +1621,14 @@ def maybe_execute(analysis: Dict[str, Any], _rotation_retry: bool = False) -> Di
         # timesfm_tail_trigger_gate's lane-scoped block (B.49, 2026-10-27).
         entry_class=analysis.get("_entry_class"),
     )
+
+    # CHASE-SHADOW accrual (t_c95ea397): ONE log-only line per SHORT entry
+    # evaluation — the chase-crash discriminator (dd24h <= -8% under the 24h
+    # high was the only OOS-protective entry feature in the 105d backtest).
+    # Reads the persistent candlestore (zero API weight), fail-open, and the
+    # return value is discarded BY CONTRACT: nothing here blocks, tags, or
+    # feeds a decision. Promotion decision belongs to the board card.
+    log_chase_shadow(analysis["coin"], trade_side, config)
 
     gate_output = eval_all_gates(ctx, config, last_trade_time)
 
