@@ -414,7 +414,11 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
         if top is not None or hard is not None:
             try:
                 conf = max(1, int(_src.get("disarm_confirm_bars", 1)))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError matters: JSON Infinity parses and int(inf) raises
+                # it, which used to escape BOTH guards and crash the decision
+                # (audit F4, 2026-11-25). Same treatment as any other malformed
+                # knob: single-close rule, i.e. the STRICTER direction.
                 conf = 1  # malformed knob -> single-close rule (no tolerance)
             for i in range(len(series) - 1, 0, -1):
                 d = series[i][1]
@@ -446,7 +450,7 @@ def tape_state_arms(btc_history: Any, tape_cfg: Dict[str, Any],
                          "active": (age is not None and age <= clock
                                     and not disarmed)}
         return out
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "malformed"
 
 
@@ -490,16 +494,24 @@ def disarm_cf_log_lines(analysis: Dict[str, Any], tapecfg: Dict[str, Any],
     changes the verdict: the caller has already decided ARM-SKIP; these lines
     only record which relaxed disarm rule would have armed, so the refused
     population gets priced against the live ARM-SKIP baseline instead of argued.
+
+    Audit F2 (2026-11-25): the fault guard is PER PROBE. One poison value — JSON
+    `Infinity` parses cleanly and int(inf) raises OverflowError — must cost one
+    accrual row, not the whole list. Faults log at WARNING, not DEBUG: DEBUG is
+    not emitted by the live logger, so a DEBUG-only fault note would make the
+    lost accrual invisible exactly when it matters.
     """
     lines: List[str] = []
     try:
         probes = parse_disarm_cf(tapecfg.get("disarm_cf"))
-        if not probes:
-            return lines
         hist = analysis.get("btc_history_1h")
         coin = str(analysis.get("coin") or "unknown")
         side = str(analysis.get("side") or "").upper() or "?"
-        for p in probes:
+    except Exception as exc:  # input shaping can never cost a decision
+        logger.warning(f"[gate][STATE-ADMIT][DISARM-CF-FAULT] setup dropped: {exc}")
+        return lines
+    for p in probes:
+        try:
             arms = tape_state_arms(hist, tapecfg, band_max=band_max,
                                    disarm_probe=p["probe"])
             if not isinstance(arms, dict):
@@ -518,11 +530,12 @@ def disarm_cf_log_lines(analysis: Dict[str, Any], tapecfg: Dict[str, Any],
                 f"live arm [{live_stamp}] but relaxed disarm rule [{p['tag']}] "
                 f"would arm [{tape_state_stamp(hist, relaxed, band_max=band_max)}] "
                 f"— PROBE ONLY, NOT admitting (log-only; verdict unchanged)")
-    except Exception as exc:  # a probe fault must never cost a decision
-        # NB: deliberately NOT the accrual marker string — grep counts for
-        # WOULD ADMIT must stay 1:1 with decisions.
-        logger.debug(f"[gate][STATE-ADMIT][DISARM-CF-FAULT] probe fault: {exc}")
-        return []
+        except Exception as exc:  # this probe is dropped; the others still accrue
+            # NB: deliberately NOT the accrual marker string — WOULD-ADMIT grep
+            # counts must stay 1:1 with decisions.
+            logger.warning(f"[gate][STATE-ADMIT][DISARM-CF-FAULT] probe "
+                           f"[{p['tag']}] dropped: {exc}")
+            continue
     return lines
 
 
@@ -791,8 +804,10 @@ def state_admission(analysis: Dict[str, Any], clause_cfg: Any,
     (clause false + short shadow true = shorts still accrue; clause true
     + short shadow false = shorts live while the long arm accrues).
     Sub-block shadow absent = clause-level value, byte-identical prior
-    behavior. Returns (admit, why, shadow). Pure: no I/O, no
-    logging.
+    behavior. Returns (admit, why, shadow). No I/O; the ONLY logging is the
+    t_0c635008 disarm-counterfactual accrual at the ARM-SKIP branch
+    (SHADOW-DISARM lines / DISARM-CF-FAULT faults) — verdict-neutral by
+    construction, and silent unless tape_state.disarm_cf is configured.
     Side-level inert paths (no side sub-block, unset tape keys, no tape
     read, malformed values) return a LABELLED why — the call sites log
     a SKIP line whenever the clause dict exists, so an empty why would

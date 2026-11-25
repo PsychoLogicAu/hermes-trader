@@ -13,11 +13,19 @@ What these tests pin:
   3. a probe that still refuses emits nothing (the refusal IS the answer);
   4. malformed / absent / no-history probe blocks can never raise and never
      change the ARM-SKIP fail-closed behavior;
-  5. fan-out is bounded (DISARM_CF_MAX).
+  5. fan-out is bounded (DISARM_CF_MAX);
+  6. one poison probe value (JSON Infinity -> OverflowError on int()) loses only
+     its own accrual row and logs a WARNING the LIVE logger actually emits
+     (audit F2, 2026-11-25);
+  7. a non-finite value in the LIVE disarm_confirm_bars knob fails closed to the
+     stricter conf=1 rule instead of raising past the guards and out of the
+     decision path (audit F4 — pre-existing flaw class the new knob invites).
 """
 import datetime as dt
 import inspect
 import logging
+
+import pytest
 
 from hermes_trader.agents import risk_gates
 from hermes_trader.agents.risk_gates import (
@@ -181,6 +189,75 @@ def test_probe_helper_never_raises():
                                {"disarm_cf": [{"hard_above_pct": object()}]},
                                0.0, "deep=n shallow=n") == []
     assert disarm_cf_log_lines({}, {"disarm_cf": {"confirm_bars": 6}}, 0.0, "") == []
+
+
+# ---- audit F2 (2026-11-25): one poison probe may not zero the whole list -----
+
+@pytest.mark.parametrize("poison", [float("inf"), float("-inf"), float("nan")])
+def test_poison_probe_value_cannot_zero_the_list(caplog, poison):
+    # F4's guard turns a non-finite confirm_bars into the stricter conf=1, so the
+    # poison probe stays disarmed and simply accrues nothing; F2's per-probe guard
+    # is the backstop. Either way the two GOOD probes must still accrue and the
+    # decision must still be the live ARM-SKIP refusal.
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        adm, why, _ = state_admission(_analysis(), _clause({"disarm_cf": [
+            {"tag": "good1", "hard_above_pct": None, "confirm_bars": 6},
+            {"tag": "poison", "confirm_bars": poison},
+            {"tag": "good2", "above_pct": None, "hard_above_pct": None},
+        ]}), True)
+    assert not adm and "ARM-SKIP" in why
+    got = _lines(caplog)
+    assert len(got) == 2, f"good probes must still accrue: {got}"
+    assert "[good1]" in got[0] and "[good2]" in got[1]
+    assert "[poison]" not in "".join(got)
+
+
+def test_per_probe_fault_guard_is_isolated_and_audible(monkeypatch, caplog):
+    # The per-probe try/except is defense-in-depth: prove a fault raised for ONE
+    # probe (simulated here) drops that probe only, and is logged at WARNING —
+    # the live logger does not emit DEBUG, so a DEBUG-only fault note would make
+    # lost accrual invisible (audit F2).
+    real = risk_gates.tape_state_arms
+
+    def flaky(hist, cfg, band_max=None, disarm_probe=None):
+        if disarm_probe and disarm_probe.get("confirm_bars") == 7:
+            raise RuntimeError("simulated probe-internal fault")
+        return real(hist, cfg, band_max=band_max, disarm_probe=disarm_probe)
+
+    monkeypatch.setattr(risk_gates, "tape_state_arms", flaky)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        adm, why, _ = state_admission(_analysis(), _clause({"disarm_cf": [
+            {"tag": "good1", "hard_above_pct": None, "confirm_bars": 6},
+            {"tag": "flaky", "confirm_bars": 7},
+            {"tag": "good2", "above_pct": None, "hard_above_pct": None},
+        ]}), True)
+    assert not adm and "ARM-SKIP" in why
+    got = _lines(caplog)
+    assert len(got) == 2 and "[good1]" in got[0] and "[good2]" in got[1], got
+    faults = [r.getMessage() for r in caplog.records
+              if "DISARM-CF-FAULT" in r.getMessage() and r.levelno >= logging.WARNING]
+    assert len(faults) == 1 and "[flaky]" in faults[0], faults
+    assert "SHADOW-DISARM" not in "".join(f for f in faults)  # fault marker distinct
+
+
+# ---- audit F4: non-finite in the LIVE disarm knob must not crash the decision --
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+def test_nonfinite_live_disarm_conf_fails_closed_not_upwards(bad):
+    # Pre-existing flaw class this knob invites: JSON Infinity parses, then
+    # int(inf) raised OverflowError PAST both guards and out of state_admission
+    # (no per-gate try at either call site). Now: treated as a malformed knob,
+    # i.e. conf=1 = the STRICTER single-close disarm. Never an exception, never
+    # a looser arm.
+    cfg = dict(LIVE_TAPE)
+    cfg["disarm_confirm_bars"] = bad
+    arms = tape_state_arms(HIST, cfg, band_max=0.0)
+    assert isinstance(arms, dict), "must not degrade to 'malformed' refusal path"
+    assert arms["deep"]["disarmed"] and arms["shallow"]["disarmed"]
+    assert not arms["deep"]["active"] and not arms["shallow"]["active"]
+    adm, why, _ = state_admission(_analysis(),
+                                  _clause({"disarm_confirm_bars": bad}), True)
+    assert not adm and "ARM-SKIP" in why
 
 
 # ---- 5. parser + fan-out bound ---------------------------------------------
