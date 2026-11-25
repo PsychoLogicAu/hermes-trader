@@ -21,6 +21,7 @@ What these tests pin:
      stricter conf=1 rule instead of raising past the guards and out of the
      decision path (audit F4 — pre-existing flaw class the new knob invites).
 """
+import copy
 import datetime as dt
 import inspect
 import logging
@@ -277,6 +278,29 @@ def test_fanout_bounded(caplog):
     with caplog.at_level(logging.INFO, logger=LOGGER):
         state_admission(_analysis(), _clause({"disarm_cf": probes}), True)
     assert len(_lines(caplog)) == DISARM_CF_MAX
+
+
+# ---- audit I10 gap: the probe must not write back --------------------------
+
+def test_probe_never_mutates_the_profile_or_analysis_dicts():
+    """Audit I10 gap: a write-back into the profile dict or the TTL-cached BTC
+    history would poison EVERY later decision, and the parity pins above would
+    still pass. Prove no write-back across two consecutive calls on the SAME
+    dict objects — the shape the live gate actually sees."""
+    tape = dict(LIVE_TAPE)
+    tape["disarm_cf"] = [{"hard_above_pct": None, "confirm_bars": 6},
+                         {"above_pct": None, "hard_above_pct": None}]
+    clause = {"shadow": True, "short": {"btc24_min_pct": -2.0, "btc24_max_pct": 0.0,
+                                        "min_conf": 0.1, "tape_state": tape}}
+    an = _analysis()
+    tape_before, an_before = copy.deepcopy(tape), copy.deepcopy(an)
+    adm, why, sh = False, "", True
+    for _ in range(2):
+        adm, why, sh = state_admission(an, clause, True)
+    assert not adm and "ARM-SKIP" in why            # accrual did happen
+    assert tape == tape_before, "tape_state dict mutated by the probe"
+    assert an == an_before, "analysis dict (incl. cached BTC history) mutated"
+    assert tape["disarm_confirm_bars"] == LIVE_TAPE["disarm_confirm_bars"]
 
 
 # ---- wiring pins -----------------------------------------------------------
