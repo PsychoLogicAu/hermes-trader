@@ -1116,6 +1116,21 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
             _out["reason"] = (f"clause slot budget "
                               f"{_budget['used']}/{_budget['limit']}")
             return _out
+        # Clause identity for LANE-SCOPED knobs (t_fb899217, owner ruling
+        # 2026-11-25): stamp ctx so `_lane_identity_keys` can match
+        # `lane_min_short_volume_usd` on "state_admission" (or
+        # "<model>/state_admission"). Ordering is safe by construction:
+        # eval_all_gates evaluates `confidence` (this gate) BEFORE
+        # `short_liquidity`, so the stamp is in place before the floor resolves.
+        # Stamped ONLY on the admitted path — a clause admit refused by the
+        # dedicated slot budget returns above and must not acquire the identity.
+        # Unlike `clause_lane_tag` above, this is NOT gated on the budget being
+        # armed: the liquidity floor applies to every clause admit, and the
+        # budget posture is orthogonal. ctx is not serialized into gate_results
+        # or the Trade-result line, so with no config key present the observable
+        # behaviour is byte-identical (the resolver falls through to the global
+        # floor; pinned in tests/test_state_admission_lane_floor.py).
+        setattr(ctx, "clause_tag", "state_admission")
         logger.warning(
             f"[gate][STATE-ADMIT] ADMIT (classic conf gate) {_tag}: {why} — "
             f"classic floor {min_conf:.2f} exempted by profile clause; all "
@@ -1411,6 +1426,19 @@ def _lane_identity_keys(ctx: GateContext) -> list:
         keys.append(str(cohort).strip().lower())
     if getattr(ctx, "entry_class", None):
         keys.append(str(ctx.entry_class).strip().lower())
+    # State-admission clause identity (t_fb899217). The clause's cohort has no
+    # `cohort_tag` of its own — it is defined by WHICH GATE let the entry past
+    # the confidence floor — so it is stamped onto ctx by `_state_conf_admission`
+    # when it admits (see the stamp there for why that ordering is safe). Appended
+    # LAST: a cohort/entry_class key still wins, and the compound
+    # "<model>/state_admission" form (which stays seat-exclusive) is tried before
+    # the bare "state_admission". Absent the stamp = no extra key = byte-identical.
+    clause_tag = getattr(ctx, "clause_tag", None)
+    if clause_tag:
+        tag = str(clause_tag).strip().lower()
+        if model:
+            keys.append(f"{str(model).strip().lower()}/{tag}")
+        keys.append(tag)
     return keys
 
 
