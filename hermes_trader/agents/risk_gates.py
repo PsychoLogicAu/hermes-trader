@@ -205,6 +205,13 @@ class GateContext:
         self.daily_move_pct = daily_move_pct
         self.daily_mover_fired = daily_mover_fired
         self.entry_class = entry_class
+        # Lane-scoped-knob identity for the STATE-ADMISSION CLAUSE cohort
+        # (t_fb899217). Declared here so the attribute always exists rather than
+        # appearing mid-flight: `_state_conf_admission` sets it to
+        # "state_admission" on an admit and `eval_all_gates` clears it per call.
+        # Read by `_lane_identity_keys` for lane_min_short_volume_usd. Never
+        # serialized into gate_results or the 'Trade result:' line.
+        self.clause_tag: Optional[str] = None
 
 
 def _tail_composite_escape_allowed(ctx: GateContext, cfg: Dict[str, Any]) -> bool:
@@ -1116,6 +1123,21 @@ def _state_conf_admission(ctx: GateContext, cfg: Dict[str, Any],
             _out["reason"] = (f"clause slot budget "
                               f"{_budget['used']}/{_budget['limit']}")
             return _out
+        # Clause identity for LANE-SCOPED knobs (t_fb899217, owner ruling
+        # 2026-11-25): stamp ctx so `_lane_identity_keys` can match
+        # `lane_min_short_volume_usd` on "state_admission" (or
+        # "<model>/state_admission"). Ordering is safe by construction:
+        # eval_all_gates evaluates `confidence` (this gate) BEFORE
+        # `short_liquidity`, so the stamp is in place before the floor resolves.
+        # Stamped ONLY on the admitted path — a clause admit refused by the
+        # dedicated slot budget returns above and must not acquire the identity.
+        # Unlike `clause_lane_tag` above, this is NOT gated on the budget being
+        # armed: the liquidity floor applies to every clause admit, and the
+        # budget posture is orthogonal. ctx is not serialized into gate_results
+        # or the Trade-result line, so with no config key present the observable
+        # behaviour is byte-identical (the resolver falls through to the global
+        # floor; pinned in tests/test_state_admission_lane_floor.py).
+        setattr(ctx, "clause_tag", "state_admission")
         logger.warning(
             f"[gate][STATE-ADMIT] ADMIT (classic conf gate) {_tag}: {why} — "
             f"classic floor {min_conf:.2f} exempted by profile clause; all "
@@ -1392,12 +1414,14 @@ def short_liquidity_floor(ctx: GateContext, min_short_volume: float) -> GateResu
                        f"< short floor ${min_short_volume/1e6:.0f}M (squeeze risk)")}
 
 
-def _lane_identity_keys(ctx: GateContext) -> list:
+def _lane_identity_keys(ctx: GateContext, include_clause: bool = True) -> list:
     """The lane-admission identities a lane-scoped config key may match:
     "<primary_model>/<cohort_tag>", "<cohort_tag>", "<entry_class>".
     Shared by lane_gate_policy and lane_min_short_volume_usd (t_42e148eb) for
     key GENERATION; application semantics differ by design (policy merges all
-    matching blocks; the floor takes first match, most-specific first). NOTE:
+    matching blocks; the floor takes first match, most-specific first). The
+    CLAUSE identity is floor-only: the policy call site passes
+    `include_clause=False` (t_fb899217 audit). NOTE:
     these identities are not lane-provenance — seat entries can carry them
     too (vwap-* cohort_tag, entry_class late_chase), so a cohort-only or
     entry_class key intentionally loosens the gate for THAT cohort on the seat
@@ -1411,6 +1435,30 @@ def _lane_identity_keys(ctx: GateContext) -> list:
         keys.append(str(cohort).strip().lower())
     if getattr(ctx, "entry_class", None):
         keys.append(str(ctx.entry_class).strip().lower())
+    # State-admission clause identity (t_fb899217, owner ruling 2026-11-25: a
+    # $3,000,000 SHORT liquidity floor scoped to this cohort). The clause's
+    # cohort has no `cohort_tag` of its own — it is defined by WHICH GATE let the
+    # entry past the confidence floor — so `_state_conf_admission` stamps it onto
+    # ctx when it admits. Appended LAST: a cohort/entry_class key still wins, and
+    # the compound "<model>/state_admission" form (seat-exclusive) is tried before
+    # the bare "state_admission". Absent the stamp = no extra key = byte-identical.
+    #
+    # `include_clause=False` on the lane_gate_policy call site
+    # (_apply_lane_gate_policy): a policy block RELEASES an entire gate for
+    # whoever matches its key, which for the clause cohort would mean NO
+    # short-liquidity floor at all — not the owner's $3M. That is a strictly
+    # bigger lever than the t_fb899217 ruling and is not authorized by it; the
+    # independent audit reproduced the release exactly (probe P10:
+    # via="lane_gate_policy", lane_exempt="state_admission" on a $1.5M SHORT).
+    # Widening the clause identity to gate exemptions must therefore be a CODE
+    # change backed by its own owner card, never a config edit. Floor-only today,
+    # pinned in tests/test_state_admission_lane_floor.py.
+    clause_tag = getattr(ctx, "clause_tag", None) if include_clause else None
+    if clause_tag:
+        tag = str(clause_tag).strip().lower()
+        if model:
+            keys.append(f"{str(model).strip().lower()}/{tag}")
+        keys.append(tag)
     return keys
 
 
@@ -3346,7 +3394,9 @@ def _apply_lane_gate_policy(ctx: GateContext, effective_config: Dict[str, Any],
         pol_norm = {str(k).strip().lower(): v for k, v in policy.items()
                     if isinstance(v, dict)}
         policy = pol_norm
-        lane_keys = _lane_identity_keys(ctx)
+        # Floor-vs-policy scope (t_fb899217): the clause cohort identity is NOT
+        # usable here — see `_lane_identity_keys(include_clause=...)`.
+        lane_keys = _lane_identity_keys(ctx, include_clause=False)
         for lane in lane_keys:
             lane_pol = policy.get(lane)
             if not isinstance(lane_pol, dict):
@@ -3402,6 +3452,16 @@ def eval_all_gates(
     # value, so block/SHADOW lines date the EFFECTIVE bar.
     effective_config = apply_seat_gate_bars(
         effective_config, str(getattr(ctx, "primary_model", "") or ""))
+    # PER-EVAL clause identity (independent audit of t_fb899217, probe P9):
+    # `_state_conf_admission` stamps `ctx.clause_tag` when it admits, and
+    # `lane_short_floor` / `_apply_lane_gate_policy` read it later in THIS call.
+    # Clear any stamp left by an earlier evaluation of the same object so a
+    # scoped floor can never ride into a decision the clause did not admit —
+    # measured leak: re-evaluating an admitted ctx at conf 0.90 kept the $3M
+    # floor. Today unreachable (one GateContext per decision, executor:1561;
+    # one eval_all_gates call, executor:1624), but the failure class costs one
+    # line to delete.
+    ctx.clause_tag = None
     results = {}
     # Regime-aware confidence floor: a WITH-TREND (aligned) trade — long in an up
     # regime, SHORT in a DOWN regime — gets a lower bar (`aligned_min_conf`) than
