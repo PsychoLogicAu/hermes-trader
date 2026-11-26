@@ -10,7 +10,9 @@ Pins the properties that make a log-only accrual safe and comparable:
     a data gap logs a nodata line (denominator preserved)
 """
 
+import json
 import logging
+import time
 
 import pytest
 
@@ -239,3 +241,85 @@ def test_trade_side_garbage_no_escape(store, caplog):
     log_chase_shadow("FOO", None, {})
     log_chase_shadow("FOO", 5, {})
     assert _lines(caplog) == []
+
+
+# ---- re-entry lens (t_c95ea397 checkpoint, 11-21 plummet analysis) --------
+
+def _write_ledger(tmp_path, monkeypatch, rows):
+    from hermes_trader import ledger as L
+    p = tmp_path / "trades.jsonl"
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(L, "LEDGER_FILE", str(p))
+
+
+def _close_row(coin, ts, pnl, exit_type="floor_breach", fee=0.1):
+    return {"event": "CLOSE", "coin": coin, "side": "short", "ts": ts,
+            "ts_iso": "2026-11-26T00:00:00Z", "entry_px": 1.0, "exit_px": 1.0,
+            "realized_pnl_usd": pnl, "fee_usd": fee, "funding_cost_usd": 0.0,
+            "exit_type": exit_type}
+
+
+def test_reentry_flag_y_after_recent_win(store, tmp_path, monkeypatch, caplog):
+    now = int(time.time() * 1000)
+    _write_ledger(tmp_path, monkeypatch,
+                  [_close_row("FOO", now - 2 * 3_600_000, 1.5)])
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    log_chase_shadow("FOO", "short", {})
+    line = _lines(caplog)[0]
+    assert "reentry_flag=Y" in line
+    assert "prev_net=+1.40" in line      # 1.5 - 0.1 fee
+    assert "prev_stop=N" in line
+
+
+def test_no_flag_after_loss_or_wide_gap(store, tmp_path, monkeypatch, caplog):
+    now = int(time.time() * 1000)
+    _write_ledger(tmp_path, monkeypatch,
+                  [_close_row("FOO", now - 2 * 3_600_000, -3.0, "max_loss")])
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    log_chase_shadow("FOO", "short", {})
+    line = _lines(caplog)[0]
+    assert "reentry_flag=N" in line      # prior close lost -> not the cell
+    assert "prev_stop=Y" in line
+    # same win, but 6h old: outside the default 4h candidate gap
+    _write_ledger(tmp_path, monkeypatch,
+                  [_close_row("FOO", now - 6 * 3_600_000, 1.5)])
+    caplog.clear()
+    log_chase_shadow("FOO", "short", {})
+    assert "reentry_flag=N" in _lines(caplog)[0]
+
+
+def test_reentry_fields_configurable_and_na(store, tmp_path, monkeypatch, caplog):
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    # missing ledger file -> NA fields, line still emitted, no crash
+    from hermes_trader import ledger as L
+    monkeypatch.setattr(L, "LEDGER_FILE", str(tmp_path / "missing.jsonl"))
+    log_chase_shadow("FOO", "short", {})
+    assert "reentry_flag=N gap_h=NA prev_net=NA" in _lines(caplog)[0]
+    # candidate gap configurable
+    now = int(time.time() * 1000)
+    _write_ledger(tmp_path, monkeypatch,
+                  [_close_row("FOO", now - 5 * 3_600_000, 1.5)])
+    caplog.clear()
+    log_chase_shadow("FOO", "short", {"chase_shadow": {"reentry_gap_max_h": 6.0}})
+    assert "reentry_flag=Y" in _lines(caplog)[0]
+
+
+def test_garbage_ledger_rows_fail_open(store, tmp_path, monkeypatch, caplog):
+    from hermes_trader import ledger as L
+    p = tmp_path / "trades.jsonl"
+    p.write_text('not json\n{"event": "CLOSE", "coin": "FOO", "ts": bad}\n')
+    monkeypatch.setattr(L, "LEDGER_FILE", str(p))
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    log_chase_shadow("FOO", "short", {})
+    lines = _lines(caplog)
+    assert len(lines) == 1
+    # lens fields go NA, but the CHASE line still computes and emits
+    assert "dd24h=-" in lines[0] and "reentry_flag=N gap_h=NA" in lines[0]
