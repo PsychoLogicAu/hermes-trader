@@ -85,20 +85,32 @@ def btc_features(bars: List[Dict[str, Any]], tdec_ms: int) -> Dict[str, Optional
     return {"btc_drift24": drift, "btc_mom4h": mom4}
 
 
-def log_chase_shadow(coin: str, trade_side: str, config: Dict[str, Any],
+def log_chase_shadow(coin: str, trade_side: Any, config: Any,
                      now_ms: Optional[int] = None) -> None:
     """Emit ONE `[gate][CHASE-SHADOW]` line per SHORT entry evaluation.
+
+    (Any-typed on purpose: hot config values can be any JSON shape and this
+    instrument tolerates all of them — pins pass deliberately-garbage types.)
 
     Call-and-discard: the return value is None BY CONTRACT (pinned test) so no
     decision path can consume it. Fail-open: any error is swallowed to a
     once-warned line — this instrument must never affect a live decision.
+    EVERY guard runs INSIDE the try (independent audit 2026-11-26: guards
+    outside it let a hot-config shorthand like {"chase_shadow": true} raise
+    AttributeError into the executor call path — the one defect class this
+    instrument must never have).
     """
-    if str(trade_side).lower() != "short":
-        return
-    cfg = (config or {}).get("chase_shadow") or {}
-    if not cfg.get("enabled", True):
-        return
     try:
+        if str(trade_side).lower() != "short":
+            return
+        cfg = config.get("chase_shadow") if isinstance(config, dict) else None
+        if not isinstance(cfg, dict):
+            cfg = {}  # shorthand/typo (true, list, missing) -> defaults
+        en = cfg.get("enabled", True)
+        if isinstance(en, str):  # "false" quoted in config must silence
+            en = en.strip().lower() not in ("false", "0", "off", "no")
+        if not en:
+            return
         import time
         import hermes_trader.client.candlestore as cs
 

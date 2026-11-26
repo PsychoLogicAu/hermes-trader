@@ -15,6 +15,7 @@ import logging
 import pytest
 
 from hermes_trader.client import candlestore as cs
+from hermes_trader.agents import chase_shadow as chs
 from hermes_trader.agents.chase_shadow import (
     coin_features, btc_features, log_chase_shadow)
 
@@ -25,6 +26,7 @@ H = 3_600_000
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     cs.reset_store()
+    chs._ERR_STATE.update(count=0, last_msg=None)  # once-warned must not dedupe across tests
     monkeypatch.setenv("HERMES_CANDLESTORE_DIR", str(tmp_path))
     monkeypatch.setattr(cs, "_cfg", lambda: {
         "enabled": True, "harvest": True,
@@ -172,3 +174,68 @@ def test_no_store_env_is_nodata_not_crash(monkeypatch, caplog):
     log_chase_shadow("FOO", "short", {})  # must not raise
     lines = _lines(caplog)
     assert len(lines) == 1 and "nodata" in lines[0]
+
+
+# ── audit regression pins (independent review 2026-11-26, needs-fix major) ──
+# Guards used to run OUTSIDE the try: {"chase_shadow": true} raised
+# AttributeError INTO the executor (maybe_execute, unwrapped) and aborted a
+# short-entry evaluation. Every guard is now inside; these pins falsify the
+# escape for the whole malformed-config class.
+
+def test_bool_shorthand_config_no_escape(store, caplog):
+    """{"chase_shadow": true} — the exact shorthand C6 advertises — must be
+    treated as defaults (enabled), NEVER raise into the caller."""
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    for cfg in ({"chase_shadow": True}, {"chase_shadow": []},
+                {"chase_shadow": "on"}, {"chase_shadow": None}):
+        log_chase_shadow("FOO", "short", cfg)  # must not raise
+    assert all("would_block=Y" in m for m in _lines(caplog))  # defaults applied
+
+
+def test_non_dict_config_no_escape(store, caplog):
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    for cfg in ([], ["x"], 42, "s", 0, None):
+        log_chase_shadow("FOO", "short", cfg)  # must not raise
+    assert len(_lines(caplog)) == 6
+
+
+def test_enabled_string_false_silences(store, caplog):
+    """The kill switch must work when JSON quoting turns false into "false"."""
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    for s in ("false", "False", " off ", "0", "no"):
+        log_chase_shadow("FOO", "short", {"chase_shadow": {"enabled": s}})
+    assert _lines(caplog) == []
+    log_chase_shadow("FOO", "short", {"chase_shadow": {"enabled": "true"}})
+    assert len(_lines(caplog)) == 1  # a truthy string keeps accrual on
+
+
+def test_nan_bar_never_blocks(store, caplog):
+    _load(store, CRASH_CLOSES)  # dd24h = -48.33
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    log_chase_shadow("FOO", "short",
+                     {"chase_shadow": {"dd24h_bar_pct": float("nan")}})
+    line = _lines(caplog)[0]
+    assert "would_block=N" in line  # NaN comparisons are False: never fires
+
+
+def test_garbage_bar_fail_opens_with_warn(store, caplog):
+    _load(store, CRASH_CLOSES)
+    _btc(store)
+    caplog.set_level(logging.WARNING)
+    log_chase_shadow("FOO", "short", {"chase_shadow": {"dd24h_bar_pct": "x"}})
+    lines = _lines(caplog)
+    assert len(lines) == 1 and "fail-open" in lines[0]
+
+
+def test_trade_side_garbage_no_escape(store, caplog):
+    caplog.set_level(logging.WARNING)
+    log_chase_shadow("FOO", None, {})
+    log_chase_shadow("FOO", 5, {})
+    assert _lines(caplog) == []
