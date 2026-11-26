@@ -441,6 +441,12 @@ def primary_engine_config() -> Dict[str, Any]:
             # tags never enter the prompt, the seat stays byte-identical.
             # Default off; profile opt-in, hot rollback (same pattern as above).
             "setup_shadow": str(slot.get("setup_shadow", False)).lower() not in ("false", "0", "off"),
+            # t_8577433e (2026-11-26): short_chase_risk label in seat state —
+            # the extension-evidence gauntlet's C-label arm (BN2 +106pp both
+            # halves; realized-book test +$12.69). ONE gated state key, rides
+            # LAST; the archived blob keeps it, so control = --strip-ext.
+            # Default off = byte-identical state; profile opt-in, hot rollback.
+            "ext_fields": str(slot.get("ext_fields", False)).lower() not in ("false", "0", "off"),
             # F3 momentum doctrine (t_757ed56a round-4 gauntlet, 2026-10-22):
             # qual-row-only direction clause + conviction band (arm fired +
             # 4h EMA >0.7% from cross + decisive 6h net). Default off =
@@ -506,6 +512,7 @@ def systemone_primary_verdict(
         breakout_side_label=bool(cfg.get("breakout_side_label", False)),
         crowded_mover_label=bool(cfg.get("crowded_mover_label", False)),
         setup_shadow=bool(cfg.get("setup_shadow", False)),
+        ext_fields=bool(cfg.get("ext_fields", False)),
     )
     # F3 momentum doctrine (t_757ed56a): emitted ONLY when the qual predicate
     # fires (arm fired + deep 4h EMA distance + decisive 6h net). Everything
@@ -687,6 +694,82 @@ def _setup_tag_line(
             f"chg3={chg3_s} chg24={d24_s} adx1d={adx_s}")
 
 
+# t_8577433e (2026-11-26): extension-evidence fields — the gauntlet's
+# C-label arm (plan 2026-11-26_102317). Two distilled 1h-tape facts computed
+# from CONFIRMED 1h bars only (a bar counts iff t + 1h <= call ts — the same
+# no-lookahead rule the gauntlet priced under):
+#   off_24h_low_pct = (mid - min low of last 24 confirmed 1h) / minLow * 100
+#   ema_dist_pct    = (mid - EMA4(last 100 confirmed 1h closes)) / EMA4 * 100
+# Verdict-side evidence (2,954-row three-arm replay on a replica seat):
+# BN2 5%/6h bar-gated net +106pp, both halves positive (+54.7/+51.4); on the
+# REALIZED last-week book, 25/63 entry calls vetoed: +$27.16 losers avoided
+# vs $14.47 collateral -> net +$12.69. The unframed numeric arm (B) was
+# REJECTED (raised off-target conf). Values ride the archived prompt-log
+# blob, so a no-clause control prompt is rebuilt by stripping the ONE key:
+# scripts/llm_ab_replay.py --strip-ext. Knob: profile ext_fields, default
+# off = byte-identical state, hot rollback.
+_EXT_ONE_H_MS = 3_600_000
+
+
+def _ext_fields_from_rows(rows: List[Dict[str, Any]], ts_ms: int,
+                          mid: float) -> Optional[tuple]:
+    """(off_24h_low_pct, ema_dist_pct) from ascending 1h bar dicts, or None
+    when depth/values are missing. Lockstep with the gauntlet's shared
+    module (extf_fields.fields_at): same confirmed-bar cut, same 24-low /
+    100-EMA(alpha 0.4) windows, same guards. If you change one, change the
+    other or live prompts stop matching the priced arm."""
+    import bisect
+    try:
+        ts_list = [r["t"] for r in rows]
+        closes = [r.get("c") for r in rows]
+        lows = [r.get("l") for r in rows]
+        if not ts_list:
+            return None
+        i = bisect.bisect_right(ts_list, ts_ms)
+        if i > 0 and ts_list[i - 1] + _EXT_ONE_H_MS > ts_ms:
+            i -= 1
+        if i < 30:
+            return None
+        win_lows = lows[max(0, i - 24):i]
+        min_low_v = None
+        for x in win_lows:
+            if x is None:
+                return None
+            if min_low_v is None or x < min_low_v:
+                min_low_v = x
+        if min_low_v is None or min_low_v <= 0:
+            return None
+        min_low = float(min_low_v)
+        off = (mid - min_low) / min_low * 100.0
+        win = closes[max(0, i - 100):i]
+        closes_f: List[float] = []
+        for x in win:
+            if x is None:
+                return None
+            closes_f.append(float(x))
+        ema = closes_f[0]
+        for x in closes_f[1:]:
+            ema = ema + 0.4 * (x - ema)
+        if ema <= 0:
+            return None
+        dist = (mid - ema) / ema * 100.0
+        return max(0.0, off), dist
+    except (KeyError, TypeError):
+        return None
+
+
+def _ext_position_fields(coin: str, mid: float,
+                         now_ms: int) -> Optional[tuple]:
+    """Store lookup wrapper — dv is best-effort: a store fault means 'no
+    field', never a broken scan or a faked value."""
+    try:
+        from hermes_trader.client import candlestore
+        rows = candlestore.series(coin, "1h") or []
+    except Exception:  # noqa: BLE001
+        return None
+    return _ext_fields_from_rows(rows, now_ms, mid)
+
+
 def build_state(
     coin: str,
     perception: Dict[str, Any],
@@ -705,6 +788,7 @@ def build_state(
     breakout_side_label: bool = False,
     crowded_mover_label: bool = False,
     setup_shadow: bool = False,
+    ext_fields: bool = False,
 ) -> Dict[str, Any]:
     """The STATE: a compact structured snapshot of what the chat prompt says
     in prose. Deliberately lean (~1-2k tokens): the decision model's edge is
@@ -893,6 +977,29 @@ def build_state(
         _tag_line = _setup_tag_line(coin, perception, tf1h, tf4h, tf1d)
         if _tag_line:
             logger.info(_tag_line)
+
+    # t_8577433e (2026-11-26): short_chase_risk rides LAST, after the trim —
+    # the exact append position the priced gauntlet arm used on the archived
+    # state, so on-knob live prompts match the arm and off-knob states stay
+    # byte-identical.
+    if ext_fields:
+        _mid = perception.get("mid")
+        try:
+            _fv = (_ext_position_fields(coin, float(_mid), int(time.time() * 1000))
+                   if _mid else None)
+        except Exception:  # noqa: BLE001 — dv is best-effort, never break the scan
+            _fv = None
+        if _fv is not None:
+            _off, _dist = _fv
+            if _off >= 1.5 or _dist > 0:
+                _side = "above" if _dist > 0 else "below"
+                state["short_chase_risk"] = (
+                    f"price {_off:.1f}% above 24h low, {abs(_dist):.1f}% {_side} fast 1h EMA"
+                    " — short is entering the bounce, not the flush")
+                logger.info(
+                    f"[dv] short_chase_risk emitted: off={_off:.1f}% "
+                    f"dist={_dist:+.1f}% (profile ext_fields on — t_8577433e live)"
+                )
     return state
 
 

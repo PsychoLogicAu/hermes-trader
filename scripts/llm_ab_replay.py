@@ -311,6 +311,14 @@ def cmd_replay(args):
         max_toks = max_toks or m0
 
     arm_tag = args.arm
+    ext = getattr(args, "ext_fields", "none") or "none"
+    if ext != "none":
+        arm_tag += f"__ext-{ext}"
+    if getattr(args, "strip_ext", False):
+        arm_tag += "__stripped"
+    cohort_path = COHORT
+    if getattr(args, "cohort", ""):
+        cohort_path = Path(args.cohort)
     if args.inject_vwap:
         arm_tag += f"__vw-{args.inject_vwap}"
     if args.fade_mode:
@@ -320,7 +328,7 @@ def cmd_replay(args):
     if getattr(args, "profile_shape", None):
         arm_tag += f"__ps-{args.profile_shape}"
     done = purge_errors(arm_tag)
-    rows = [json.loads(l) for l in COHORT.open(errors="ignore") if l.strip()]
+    rows = [json.loads(l) for l in cohort_path.open(errors="ignore") if l.strip()]
     if args.only_vwap_episodes or args.inject_vwap:
         by_coin = load_vwap_episodes()
         rows = [r for r in rows if vwap_join(by_coin, r["coin"], r["ts"])]
@@ -557,26 +565,74 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
     import threading
     write_lock = threading.Lock()
 
+    # ---- blob-native ext-fields gauntlet (plan 2026-11-26) -----------------
+    # Cohort rows from dv-era prompt-log carry byte-exact {state,questions}
+    # blobs: replay = json.loads, NO reconstruction, NO field pops. Arms add
+    # keys via the shared scratch/extf_fields module (prep/audit use the same).
+    ext = getattr(args, "ext_fields", "none") or "none"
+    # --strip-ext: rebuild the NO-CLAUSE control prompt from live-era blobs
+    # that already carry short_chase_risk (t_8577433e knob LIVE from
+    # 2026-11-26): pop the extension key(s) so arm-vs-control compares can
+    # still be run over post-knob accrual.
+    strip_ext = bool(getattr(args, "strip_ext", False))
+    sys.path.insert(0, str(REPO / "scratch"))
+    from extf_fields import fields_at, apply_ext_fields  # noqa: E402
+    ctrl_map = {}
+    if ext == "label":
+        cp = results_path(args.arm)  # control = base arm tag, no __ext suffix
+        if cp.exists():
+            for line in cp.open(errors="ignore"):
+                try:
+                    c = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not c.get("error"):
+                    ctrl_map[c["perception_id"]] = c
+
     def one(r):
         rec = {"perception_id": r["perception_id"], "arm": arm_tag,
                "coin": r["coin"], "ts": r["ts"], "model": model}
-        state, held = _state_from_prompt(r["coin"], r["user_message"])
-        held = bool(held)
+        raw = r["user_message"]
+        blob = None
+        if raw.lstrip().startswith("{"):
+            try:
+                maybe = json.loads(raw)
+                if isinstance(maybe, dict) and isinstance(maybe.get("state"), dict):
+                    blob = maybe
+            except Exception:
+                blob = None
+        if blob is not None:
+            state = json.loads(json.dumps(blob["state"]))  # deep copy
+            questions = blob.get("questions")
+            held = bool(state.get("held_position"))
+            if strip_ext:
+                for _k in ("short_chase_risk", "tape_position"):
+                    if _k in state:
+                        state.pop(_k)
+                        rec["ext_stripped"] = True
+        else:
+            state, held = _state_from_prompt(r["coin"], r["user_message"])
+            held = bool(held)
+            questions = None
         parsed_composite = state.get("composite_score")
         # Mirror B.45 live build_state: news_recent only rides when live; the
         # archive never had real news, so drop it (news_negative unasked).
         # B.45 meta drop: composite_score + track_record no longer ride state
         # either — strip score/meta arms are no-ops by design now; the
         # trackadd arm re-adds a synthesized track_record on demand.
-        state.pop("news_recent", None)
-        if stripf != "scoreadd":
-            state.pop("composite_score", None)
-        state.pop("track_record", None)
-        if stripf == "trackadd":
-            state["track_record"] = _track_at(r["ts"])
+        # Blob rows are byte-exact archived state: NO pops.
+        if blob is None:
+            state.pop("news_recent", None)
+            if stripf != "scoreadd":
+                state.pop("composite_score", None)
+            state.pop("track_record", None)
+            if stripf == "trackadd":
+                state["track_record"] = _track_at(r["ts"])
         if stripf:
             apply_strip_fields(state, stripf)
         if knobs:
+            if blob is not None:
+                raise SystemExit("--profile-shape is not supported on blob rows")
             _, fired = _state_from_prompt(r["coin"], r["user_message"],
                                           with_fired=True)
             apply_profile_shape(state, fired, knobs, parsed_composite)
@@ -601,7 +657,29 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
                 # the archived fired trigger; --inject-vwap gauntlet arms
                 # still use the episode-join injection.
                 apply_vwap_inject(state, j[2], inject_mode)
-        questions = build_questions(held)
+        if ext != "none":
+            if blob is None:
+                raise SystemExit("--ext-fields requires blob cohort rows")
+            fv = fields_at(r["coin"], int(r["ts"]), float(state.get("mid") or 0))
+            added = []
+            if fv:
+                added = apply_ext_fields(state, ext, fv[0], fv[1])
+            rec["extf"] = {"off": round(fv[0], 3) if fv else None,
+                           "dist": round(fv[1], 3) if fv else None,
+                           "added": added}
+            if ext == "label" and not added:
+                # Arm state is byte-identical to control: DO NOT serve —
+                # inherit the control's answer (deterministic seat). This
+                # makes the determinism canary exact by construction.
+                c = ctrl_map.get(r["perception_id"])
+                if c is not None:
+                    rec["reused"] = True
+                    rec["parsed"] = c["parsed"]
+                    rec["dv_answers"] = c.get("dv_answers")
+                    rec["wall_ms"] = 0
+                    return rec
+        if questions is None:
+            questions = build_questions(held)
         answers, wall_ms, server_ms = call_systemone(
             url_root, api_key, model, state, questions, timeout_s=timeout_s)
         rec["wall_ms"] = wall_ms
@@ -1016,6 +1094,16 @@ def main():
     sub.add_parser("prep")
     rp = sub.add_parser("replay")
     rp.add_argument("--arm", required=True)
+    rp.add_argument("--cohort", default="", help="override cohort jsonl path")
+    rp.add_argument("--ext-fields", choices=("none", "numeric", "label"), default="none",
+                    help="blob-native ext-fields gauntlet arms (plan 2026-11-26): "
+                         "numeric = add tape_position scalars; label = add gated "
+                         "short_chase_risk sentence. Requires cohort rows whose "
+                         "user_message is a {state,questions} JSON blob.")
+    rp.add_argument("--strip-ext", action="store_true",
+                    help="strip short_chase_risk/tape_position from blob state to rebuild the "
+                         "NO-CLAUSE control prompt over post-knob live accrual (t_8577433e; "
+                         "arm tag gains a __stripped suffix).")
     rp.add_argument("--limit", type=int, default=0)
     rp.add_argument("--profile-shape", default=None,
                     help="systemone arms: re-apply the state-shape knobs of "
