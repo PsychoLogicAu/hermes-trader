@@ -1,122 +1,132 @@
 {
-  "_comment": "Arms for scripts/llm_ab_replay.py. base_url is the OPENAI-COMPATIBLE root (\u2026/v1). api_key_env names an env var (never put keys here). sampling/chat_template_kwargs override the live .agent-config.json llm.primary block when present. Run: .venv/bin/python scripts/llm_ab_replay.py replay --arm TAG",
-  "arms": [
-    {
-      "tag": "incumbent-selfcheck",
-      "base_url": "http://127.0.0.1:13305/api/v1",
-      "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ3_S",
-      "api_key_env": "",
-      "note": "same model already serving the bot \u2014 end-to-end harness self-test; verdicts should match the archive parsed field closely (temp 0.7 is not deterministic, so expect agreement ~85-95%, not 100%)"
-    },
-    {
-      "tag": "frognano-4b-q8",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "FrogNano-4B-2609-GGUF-Q8_0",
-      "api_key_env": "",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "note": "thinking model \u2014 loaded on remote with --reasoning off; Q8 (Q4_K_M was an accidental download, arm deleted)"
-    },
-    {
-      "tag": "spark-x25-4b-q8",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "Spark-X2.5-4B-GGUF-Q8_0",
-      "api_key_env": "",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "note": "09-09 survey best arm (cleanest parse + discriminating, 6.2s at vendor settings 1.0/.95/top_k -1); loaded with --reasoning off"
-    },
-    {
-      "tag": "qwen25-coder-7b-q8",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "Qwen2.5-Coder-7B-Instruct-GGUF-Q8_0",
-      "api_key_env": "",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "note": "09-09 survey duelist pick (vendor 0.7/.8/rep 1.05); same family as the Qwen3.8 primary \u2014 quality check, not a diversity arm"
-    },
-    {
-      "tag": "neohorse-9b-q8",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "NeoHorse-1-9B-GGUF-Q8_0",
-      "api_key_env": "",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "note": "owner-flagged new model \u2014 unknown family; audit step decides format reliability"
-    },
-    {
-      "tag": "k2-horizon-7b-q8",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "K2-Horizon-7B-GGUF-Q8_0",
-      "api_key_env": "",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "note": "owner-flagged new model (modelscope pull) \u2014 CANNOT RUN: GGUF architecture 'k2-horizon' is unknown to llama.cpp b11435 (not upstream yet). Do not retry until llama.cpp gains the arch. (NeoHorse-1-9B was the other modelscope pull and works fine.)"
-    },
-    {
-      "tag": "clef-flash-q8",
-      "kind": "systemone",
-      "base_url": "http://192.168.1.16:8080",
-      "model": "clef-flash",
-      "api_key_env": "",
-      "timeout_s": 30.0,
-      "note": "DECISION MODEL (Clef family) \u2014 not a chat arm. Bare llama-server on :8080 (lemonade proxy does not route /v1/systemone). Harness maps each archived prompt's facts into the decision_voice state schema and uses the bot's own build_questions/verdict_from_answers. No generation -> masked-verdict class impossible; audit is a no-op. Server started manually: llama-server -m Cloudflare_clef-flash-Q8_0.gguf --port 8080 --host 0.0.0.0 -c 16384"
-    },
-    {
-      "tag": "confloor-a",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ2_S",
-      "kind": "chat",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "max_tokens": null,
-      "note": "Arm A: byte-identical archived prompts (0.70 text). Cohort: scratch/_ab_confloor_orig.jsonl via _confloor_run.py"
-    },
-    {
-      "tag": "confloor-b",
-      "base_url": "http://192.168.1.16:13305/api/v1",
-      "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ2_S",
-      "kind": "chat",
-      "sampling": null,
-      "chat_template_kwargs": null,
-      "max_tokens": null,
-      "note": "Arm B: floor sites -> 0.65 (renders of commit 9fe3b4e). Cohort: scratch/_ab_confloor_mod.jsonl via _confloor_run.py"
-    },
-    {
-      "tag": "pplx-decider-iq3m",
-      "kind": "systemone",
-      "base_url": "http://192.168.1.16:8080",
-      "model": "pplx-decider",
-      "api_key_env": "",
-      "timeout_s": 60.0,
-      "note": "DECISION MODEL (pplx-decider family, TurinTech Artemis IQ3_M 14.27GB) \u2014 bare llama-server (llama-master cbe28bb, 2026-10-13) on :8080, served with -b 4096 -ub 4096 per card. Replaces d3-nano-serve on that port (docker stop/start to swap). Card: IQ3_M peaks 15.9 GiB at -c 16384 (A100, untested on 16GB) \u2014 served at reduced -c to fit the 5060 Ti."
-    },
-    {
-      "tag": "decision2-lux-q8",
-      "kind": "systemone",
-      "base_url": "http://192.168.1.16:8081",
-      "model": "decision2-lux",
-      "api_key_env": "",
-      "timeout_s": 60.0,
-      "note": "DECISION MODEL (vLLM Decision 2.0 Lux 9B Q8_0) \u2014 fork build ~/llama-decision2, container d2-serve :8081, flags per _model_gauntlet.sh (--embeddings --pooling none -c 8192 -b 8192 -ub 8192). FULL-COHORT re-run 2026-10-17 on CURRENT state shape to settle d2-vs-pplx authoritatively; old 908-row old-shape results archived to scratch/preshape/ (resume-poison rule)."
-    },
-    {
-      "tag": "d3-27b-artemis-q3ks",
-      "kind": "systemone",
-      "base_url": "http://192.168.1.16:8090",
-      "model": "d3-27b-artemis",
-      "api_key_env": "",
-      "timeout_s": 60.0,
-      "note": "DECISION MODEL (d3 family, vllm-sr d3-27B TurinTech Artemis Q3_K_S 12.26GB, arch qwen35) \u2014 container d3-27b-serve :8090 (llama-master cbe28bb, same tree as d3-nano-serve; d2-serve stopped per owner 2026-10-20, nano STAYS LIVE as DV seat \u2014 co-resident run). Flags per card: -c 4096 -b 4096 -ub 4096 --parallel 1 (-np 1 mandatory, #30402). Cohort: same _ab_cohort.jsonl n=19955 as pplx-decider-iq3m + decision2-lux-q8 full runs -> true SBS. sha256 34c640d250afb383a63aee495f2c0d9ab01d8a1f309789ffd35f3f7e298e3224"
-    },
-    {
-      "tag": "pplx-decider-onsite",
-      "kind": "systemone",
-      "base_url": "http://192.168.1.16:8080",
-      "model": "pplx-decider",
-      "api_key_env": "",
-      "timeout_s": 60.0,
-      "note": "Arm A state-shape sweep: SAME pplx IQ3_M endpoint as pplx-decider-iq3m, replayed in decision2-lux live shape (--profile-shape decision2-lux-9b: composite ON, vwap fields, breakout side labels, crowdedMover). Control file untouched \u2014 results go to *_ps-* file."
-    }
-  ]
+ "_comment": "Arms for scripts/llm_ab_replay.py. base_url is the OPENAI-COMPATIBLE root (\u2026/v1). api_key_env names an env var (never put keys here). sampling/chat_template_kwargs override the live .agent-config.json llm.primary block when present. Run: .venv/bin/python scripts/llm_ab_replay.py replay --arm TAG",
+ "arms": [
+  {
+   "tag": "incumbent-selfcheck",
+   "base_url": "http://127.0.0.1:13305/api/v1",
+   "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ3_S",
+   "api_key_env": "",
+   "note": "same model already serving the bot \u2014 end-to-end harness self-test; verdicts should match the archive parsed field closely (temp 0.7 is not deterministic, so expect agreement ~85-95%, not 100%)"
+  },
+  {
+   "tag": "frognano-4b-q8",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "FrogNano-4B-2609-GGUF-Q8_0",
+   "api_key_env": "",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "note": "thinking model \u2014 loaded on remote with --reasoning off; Q8 (Q4_K_M was an accidental download, arm deleted)"
+  },
+  {
+   "tag": "spark-x25-4b-q8",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "Spark-X2.5-4B-GGUF-Q8_0",
+   "api_key_env": "",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "note": "09-09 survey best arm (cleanest parse + discriminating, 6.2s at vendor settings 1.0/.95/top_k -1); loaded with --reasoning off"
+  },
+  {
+   "tag": "qwen25-coder-7b-q8",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "Qwen2.5-Coder-7B-Instruct-GGUF-Q8_0",
+   "api_key_env": "",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "note": "09-09 survey duelist pick (vendor 0.7/.8/rep 1.05); same family as the Qwen3.8 primary \u2014 quality check, not a diversity arm"
+  },
+  {
+   "tag": "neohorse-9b-q8",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "NeoHorse-1-9B-GGUF-Q8_0",
+   "api_key_env": "",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "note": "owner-flagged new model \u2014 unknown family; audit step decides format reliability"
+  },
+  {
+   "tag": "k2-horizon-7b-q8",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "K2-Horizon-7B-GGUF-Q8_0",
+   "api_key_env": "",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "note": "owner-flagged new model (modelscope pull) \u2014 CANNOT RUN: GGUF architecture 'k2-horizon' is unknown to llama.cpp b11435 (not upstream yet). Do not retry until llama.cpp gains the arch. (NeoHorse-1-9B was the other modelscope pull and works fine.)"
+  },
+  {
+   "tag": "clef-flash-q8",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8080",
+   "model": "clef-flash",
+   "api_key_env": "",
+   "timeout_s": 30.0,
+   "note": "DECISION MODEL (Clef family) \u2014 not a chat arm. Bare llama-server on :8080 (lemonade proxy does not route /v1/systemone). Harness maps each archived prompt's facts into the decision_voice state schema and uses the bot's own build_questions/verdict_from_answers. No generation -> masked-verdict class impossible; audit is a no-op. Server started manually: llama-server -m Cloudflare_clef-flash-Q8_0.gguf --port 8080 --host 0.0.0.0 -c 16384"
+  },
+  {
+   "tag": "confloor-a",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ2_S",
+   "kind": "chat",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "max_tokens": null,
+   "note": "Arm A: byte-identical archived prompts (0.70 text). Cohort: scratch/_ab_confloor_orig.jsonl via _confloor_run.py"
+  },
+  {
+   "tag": "confloor-b",
+   "base_url": "http://192.168.1.16:13305/api/v1",
+   "model": "Qwen3.8-27B-GSQ-RCO-GGUF-Qwen3.8-27B-GSQ-RCO-IQ2_S",
+   "kind": "chat",
+   "sampling": null,
+   "chat_template_kwargs": null,
+   "max_tokens": null,
+   "note": "Arm B: floor sites -> 0.65 (renders of commit 9fe3b4e). Cohort: scratch/_ab_confloor_mod.jsonl via _confloor_run.py"
+  },
+  {
+   "tag": "pplx-decider-iq3m",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8080",
+   "model": "pplx-decider",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "note": "DECISION MODEL (pplx-decider family, TurinTech Artemis IQ3_M 14.27GB) \u2014 bare llama-server (llama-master cbe28bb, 2026-10-13) on :8080, served with -b 4096 -ub 4096 per card. Replaces d3-nano-serve on that port (docker stop/start to swap). Card: IQ3_M peaks 15.9 GiB at -c 16384 (A100, untested on 16GB) \u2014 served at reduced -c to fit the 5060 Ti."
+  },
+  {
+   "tag": "decision2-lux-q8",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8081",
+   "model": "decision2-lux",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "note": "DECISION MODEL (vLLM Decision 2.0 Lux 9B Q8_0) \u2014 fork build ~/llama-decision2, container d2-serve :8081, flags per _model_gauntlet.sh (--embeddings --pooling none -c 8192 -b 8192 -ub 8192). FULL-COHORT re-run 2026-10-17 on CURRENT state shape to settle d2-vs-pplx authoritatively; old 908-row old-shape results archived to scratch/preshape/ (resume-poison rule)."
+  },
+  {
+   "tag": "d3-27b-artemis-q3ks",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8090",
+   "model": "d3-27b-artemis",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "note": "DECISION MODEL (d3 family, vllm-sr d3-27B TurinTech Artemis Q3_K_S 12.26GB, arch qwen35) \u2014 container d3-27b-serve :8090 (llama-master cbe28bb, same tree as d3-nano-serve; d2-serve stopped per owner 2026-10-20, nano STAYS LIVE as DV seat \u2014 co-resident run). Flags per card: -c 4096 -b 4096 -ub 4096 --parallel 1 (-np 1 mandatory, #30402). Cohort: same _ab_cohort.jsonl n=19955 as pplx-decider-iq3m + decision2-lux-q8 full runs -> true SBS. sha256 34c640d250afb383a63aee495f2c0d9ab01d8a1f309789ffd35f3f7e298e3224"
+  },
+  {
+   "tag": "pplx-decider-onsite",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8080",
+   "model": "pplx-decider",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "note": "Arm A state-shape sweep: SAME pplx IQ3_M endpoint as pplx-decider-iq3m, replayed in decision2-lux live shape (--profile-shape decision2-lux-9b: composite ON, vwap fields, breakout side labels, crowdedMover). Control file untouched \u2014 results go to *_ps-* file."
+  },
+  {
+   "tag": "mammoth-ctrl",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8090",
+   "model": "mammoth-1",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "expect_model_path": "mammoth-1-IQ3_M",
+   "note": "PRIMARY-SEAT REPLICA (2026-11-26 ext-fields gauntlet): bare llama-server on .16 :8090, llama-master d1af62f97c same tree as live mammoth-serve, serve flags = live seat exactly (-c 4096 -b 4096 -ub 4096 -ngl 99 --parallel 1 --cache-type k/v q8_0). Control arm = archived blob verbatim; B/C arms add fields via --ext-fields. Stage-0: determinism identical True; fidelity vs LIVE seat 8/8 side-agree med |dconf| 0.0086 max 0.0234."
+  }
+ ]
 }
