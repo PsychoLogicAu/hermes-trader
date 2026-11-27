@@ -452,8 +452,8 @@ def primary_engine_config() -> Dict[str, Any]:
             # byte-compat of the priced arm), "facts"=facts-only under
             # short_chase_risk, "factsx"=facts-only under neutral key
             # price_extension (the key name itself is interpretation too).
-            "ext_fields": str(slot.get("ext_fields", False)).lower() not in ("false", "0", "off"),
-            "ext_label_style": _ext_style_of(slot.get("ext_fields", False)),
+            "ext_fields": _ext_knob(slot.get("ext_fields", False))[0],
+            "ext_label_style": _ext_knob(slot.get("ext_fields", False))[1],
             # F3 momentum doctrine (t_757ed56a round-4 gauntlet, 2026-10-22):
             # qual-row-only direction clause + conviction band (arm fired +
             # 4h EMA >0.7% from cross + decisive 6h net). Default off =
@@ -717,16 +717,32 @@ def _setup_tag_line(
 # scripts/llm_ab_replay.py --strip-ext. Knob: profile ext_fields, default
 # off = byte-identical state, hot rollback.
 _EXT_ONE_H_MS = 3_600_000
+_EXT_KNOB_WARNED = set()  # dedupe config-typo warnings (cfg rebuilt per hot-reload)
 
 
-def _ext_style_of(v: Any) -> str:
-    """ext_fields knob doubles as label-variant selector (t_ce765165 facts
-    arms, owner ruling 11-27: give the model the data, let it decide):
-    false/off -> knob off; 'facts'/'factsx' -> facts-only variants; any other
-    truthy -> 'directive' (the armed-then-rolled-back sentence; byte-compat of
-    the already-priced arm and its --strip-ext control)."""
-    s = str(v).lower()
-    return s if s in ("facts", "factsx") else "directive"
+def _ext_knob(v: Any) -> tuple:
+    """(on, style) for the ext_fields knob — WHITELIST parse, fail CLOSED
+    toward off (independent review t_5bf8ed25, finding 1: the old
+    'unknown-truthy -> directive' parse fail-OPENED toward the known-harmful
+    directive sentence (t_ce765165 trap saturation); plausible hand-edits
+    'factsx ', '', null, 'off ' all silently armed it).
+    off: false/'false'/'0'/'off'/'none'/''  |  variants: 'facts'/'factsx'
+    (case/space tolerant)  |  bare true/'true'/'1' -> directive (byte-compat
+    of the already-priced arm + --strip-ext control)  |  anything else ->
+    OFF + one loud warning per distinct value. Never silent directive."""
+    s = str(v).strip().lower()
+    if s in ("false", "0", "off", "none", ""):
+        return False, "directive"
+    if s in ("facts", "factsx"):
+        return True, s
+    if s in ("true", "1", "yes"):
+        return True, "directive"
+    if s not in _EXT_KNOB_WARNED:
+        _EXT_KNOB_WARNED.add(s)
+        logger.warning(
+            f"[dv] ext_fields knob value {v!r} not recognised — knob left OFF "
+            f"(expected one of: false/true/facts/factsx)")
+    return False, "directive"
 
 
 def _ext_label(style: str, off: float, dist: float) -> tuple:

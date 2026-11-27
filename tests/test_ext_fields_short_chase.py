@@ -191,13 +191,26 @@ def test_lockstep_with_gauntlet_module(monkeypatch):
 # the key name is itself interpretation. Knob off + default style stay
 # byte-identical (pins above); these arms are measured before any arming.
 
-def test_style_knob_parse():
-    assert dv._ext_style_of(False) == "directive"
-    assert dv._ext_style_of("false") == "directive"
-    assert dv._ext_style_of(True) == "directive"
-    assert dv._ext_style_of("true") == "directive"
-    assert dv._ext_style_of("facts") == "facts"
-    assert dv._ext_style_of("FACTSX") == "factsx"
+def test_knob_parse_whitelist():
+    # whitelist, fail-closed (review finding 1)
+    assert dv._ext_knob(False) == (False, "directive")
+    assert dv._ext_knob(True) == (True, "directive")
+    assert dv._ext_knob("true") == (True, "directive")
+    assert dv._ext_knob("facts") == (True, "facts")
+    assert dv._ext_knob("FACTSX") == (True, "factsx")
+    assert dv._ext_knob("factsx ") == (True, "factsx")  # strip: typo-safe
+    for offv in (False, "false", "off", "OFF ", "0", 0, "", None):
+        assert dv._ext_knob(offv)[0] is False, offv
+
+
+def test_knob_unknown_fails_closed_not_directive():
+    # any unrecognised value must NOT arm the known-harmful directive
+    # (note: 'factsx\n'/'factsx ' are RECOGNISED — strip tolerance means a
+    # whitespace-typo'd variant intent lands on factsx, never directive)
+    assert dv._ext_knob("factsx\n") == (True, "factsx")
+    for bad in ("banana", "banana ", {"x": 1}, ["factsx"], 1.5, "trueish"):
+        on, style = dv._ext_knob(bad)
+        assert on is False and style == "directive", bad
 
 
 def test_facts_variant_exact_and_lockstep(monkeypatch):
