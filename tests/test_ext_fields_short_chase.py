@@ -183,3 +183,87 @@ def test_lockstep_with_gauntlet_module(monkeypatch):
             "BTC", _perception(), _tf(), _tf(), _tf(), "0.0100%/hr", "n", [],
             win_rate=0.5, n_closes=10, ext_fields=True
         )["short_chase_risk"] == state["short_chase_risk"]
+
+
+# ---- facts-only variants (t_ce765165, owner ruling 2026-11-27: give the
+# model the data, let it decide). 'facts' drops only the directive clause;
+# 'factsx' additionally renames the key to the neutral price_extension —
+# the key name is itself interpretation. Knob off + default style stay
+# byte-identical (pins above); these arms are measured before any arming.
+
+def test_knob_parse_whitelist():
+    # whitelist, fail-closed (review finding 1)
+    assert dv._ext_knob(False) == (False, "directive")
+    assert dv._ext_knob(True) == (True, "directive")
+    assert dv._ext_knob("true") == (True, "directive")
+    assert dv._ext_knob("facts") == (True, "facts")
+    assert dv._ext_knob("FACTSX") == (True, "factsx")
+    assert dv._ext_knob("factsx ") == (True, "factsx")  # strip: typo-safe
+    for offv in (False, "false", "off", "OFF ", "0", 0, "", None):
+        assert dv._ext_knob(offv)[0] is False, offv
+
+
+def test_knob_unknown_fails_closed_not_directive():
+    # any unrecognised value must NOT arm the known-harmful directive
+    # (note: 'factsx\n'/'factsx ' are RECOGNISED — strip tolerance means a
+    # whitespace-typo'd variant intent lands on factsx, never directive)
+    assert dv._ext_knob("factsx\n") == (True, "factsx")
+    for bad in ("banana", "banana ", {"x": 1}, ["factsx"], 1.5, "trueish"):
+        on, style = dv._ext_knob(bad)
+        assert on is False and style == "directive", bad
+
+
+def test_facts_variant_exact_and_lockstep(monkeypatch):
+    monkeypatch.setattr(dv, "_ext_position_fields",
+                        lambda coin, mid, now_ms: (2.4, 1.9))
+    state = _build(_perception(), ext_fields=True, ext_style="facts")
+    assert state["short_chase_risk"] == (
+        "price 2.4% above 24h low, 1.9% above fast 1h EMA")
+    assert " — short is" not in state["short_chase_risk"]
+    if HAVE_EXT:
+        ref = {}
+        extf_fields.apply_ext_fields(ref, "facts", 2.4, 1.9)
+        assert state["short_chase_risk"] == ref["short_chase_risk"]
+
+
+def test_factsx_neutral_key(monkeypatch):
+    monkeypatch.setattr(dv, "_ext_position_fields",
+                        lambda coin, mid, now_ms: (2.4, -1.9))
+    state = _build(_perception(), ext_fields=True, ext_style="factsx")
+    assert "short_chase_risk" not in state
+    assert state["price_extension"] == (
+        "price 2.4% above 24h low, 1.9% below fast 1h EMA")
+    if HAVE_EXT:
+        ref = {}
+        added = extf_fields.apply_ext_fields(ref, "factsx", 2.4, -1.9)
+        assert added == ["price_extension"]
+        assert state["price_extension"] == ref["price_extension"]
+
+
+def test_directive_is_facts_plus_clause(monkeypatch):
+    # the rolled-back directive arm stays byte-compatible: directive text ==
+    # facts text + the interpretation clause, same key and last position.
+    monkeypatch.setattr(dv, "_ext_position_fields",
+                        lambda coin, mid, now_ms: (9.9, 5.0))
+    p = _perception()
+    d = _build(p, ext_fields=True)                       # default style
+    f = _build(p, ext_fields=True, ext_style="facts")
+    fx = _build(p, ext_fields=True, ext_style="factsx")
+    assert d["short_chase_risk"] == (f["short_chase_risk"]
+        + " — short is entering the bounce, not the flush")
+    assert fx["price_extension"] == f["short_chase_risk"]
+    assert list(f)[-1] == "short_chase_risk"
+    assert list(fx)[-1] == "price_extension"
+
+
+def test_facts_variants_share_emit_gate(monkeypatch):
+    if not HAVE_EXT:
+        pytest.skip("extf_fields module absent")
+    for off, dist in ((1.5, 0.0), (1.49, 0.0), (1.4, 0.01), (1.4, 0.0)):
+        monkeypatch.setattr(dv, "_ext_position_fields",
+                            lambda coin, mid, now_ms, o=off, d=dist: (o, d))
+        for style in ("facts", "factsx"):
+            state = _build(_perception(), ext_fields=True, ext_style=style)
+            keys = {"facts": "short_chase_risk",
+                    "factsx": "price_extension"}[style]
+            assert (keys in state) == extf_fields.emit_gate(off, dist)

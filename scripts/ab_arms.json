@@ -127,6 +127,36 @@
    "timeout_s": 60.0,
    "expect_model_path": "mammoth-1-IQ3_M",
    "note": "PRIMARY-SEAT REPLICA (2026-11-26 ext-fields gauntlet): bare llama-server on .16 :8090, llama-master d1af62f97c same tree as live mammoth-serve, serve flags = live seat exactly (-c 4096 -b 4096 -ub 4096 -ngl 99 --parallel 1 --cache-type k/v q8_0). Control arm = archived blob verbatim; B/C arms add fields via --ext-fields. Stage-0: determinism identical True; fidelity vs LIVE seat 8/8 side-agree med |dconf| 0.0086 max 0.0234."
+  },
+  {
+   "tag": "mammoth-faith",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8090",
+   "model": "mammoth-1",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "expect_model_path": "mammoth-1-IQ3_M",
+   "note": "FAITHFUL primary-seat replica (2026-11-27, t_ce765165): .16 :8090 rebuilt to EXACT live stack \u2014 GGUF sha256 0b40b3c9... re-copied --checksum (prior copy corrupt: 1x64MB block differed), llama-server binary rsynced from live sauna ~/llama-master/build (build 0a731cc, 2026-10-13). Verify probes before use."
+  },
+  {
+   "tag": "mammoth-faith-ctrlval",
+   "kind": "systemone",
+   "base_url": "http://192.168.1.16:8090",
+   "model": "mammoth-1",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "expect_model_path": "mammoth-1-IQ3_M",
+   "note": "FAITHFUL primary-seat replica (2026-11-27, t_ce765165): .16 :8090 rebuilt to EXACT live stack \u2014 GGUF sha256 0b40b3c9... re-copied --checksum (prior copy corrupt: 1x64MB block differed), llama-server binary rsynced from live sauna ~/llama-master/build (build 0a731cc, 2026-10-13). Verify probes before use."
+  },
+  {
+   "tag": "mammoth-live",
+   "kind": "systemone",
+   "base_url": "http://127.0.0.1:18090",
+   "model": "mammoth-1",
+   "api_key_env": "",
+   "timeout_s": 60.0,
+   "expect_model_path": "mammoth-1-IQ3_M",
+   "note": "LIVE seat via seat-fwd (llama-net). Owner-authorized extended gauntlet use 11-27 (factsx full cohort). Remove fwd when done: docker rm -f seat-fwd."
   }
  ]
 }

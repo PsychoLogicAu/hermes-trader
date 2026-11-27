@@ -446,7 +446,14 @@ def primary_engine_config() -> Dict[str, Any]:
             # halves; realized-book test +$12.69). ONE gated state key, rides
             # LAST; the archived blob keeps it, so control = --strip-ext.
             # Default off = byte-identical state; profile opt-in, hot rollback.
-            "ext_fields": str(slot.get("ext_fields", False)).lower() not in ("false", "0", "off"),
+            # t_ce765165 (11-27): the directive sentence saturates trap_veto on
+            # 100% of gate rows (live + faithful replica). Knob doubles as
+            # variant selector: true=directive (rolled-back text, kept for
+            # byte-compat of the priced arm), "facts"=facts-only under
+            # short_chase_risk, "factsx"=facts-only under neutral key
+            # price_extension (the key name itself is interpretation too).
+            "ext_fields": _ext_knob(slot.get("ext_fields", False))[0],
+            "ext_label_style": _ext_knob(slot.get("ext_fields", False))[1],
             # F3 momentum doctrine (t_757ed56a round-4 gauntlet, 2026-10-22):
             # qual-row-only direction clause + conviction band (arm fired +
             # 4h EMA >0.7% from cross + decisive 6h net). Default off =
@@ -513,6 +520,7 @@ def systemone_primary_verdict(
         crowded_mover_label=bool(cfg.get("crowded_mover_label", False)),
         setup_shadow=bool(cfg.get("setup_shadow", False)),
         ext_fields=bool(cfg.get("ext_fields", False)),
+        ext_style=cfg.get("ext_label_style", "directive"),
     )
     # F3 momentum doctrine (t_757ed56a): emitted ONLY when the qual predicate
     # fires (arm fired + deep 4h EMA distance + decisive 6h net). Everything
@@ -709,6 +717,46 @@ def _setup_tag_line(
 # scripts/llm_ab_replay.py --strip-ext. Knob: profile ext_fields, default
 # off = byte-identical state, hot rollback.
 _EXT_ONE_H_MS = 3_600_000
+_EXT_KNOB_WARNED = set()  # dedupe config-typo warnings (cfg rebuilt per hot-reload)
+
+
+def _ext_knob(v: Any) -> tuple:
+    """(on, style) for the ext_fields knob — WHITELIST parse, fail CLOSED
+    toward off (independent review t_5bf8ed25, finding 1: the old
+    'unknown-truthy -> directive' parse fail-OPENED toward the known-harmful
+    directive sentence (t_ce765165 trap saturation); plausible hand-edits
+    'factsx ', '', null, 'off ' all silently armed it).
+    off: false/'false'/'0'/'off'/'none'/''  |  variants: 'facts'/'factsx'
+    (case/space tolerant)  |  bare true/'true'/'1' -> directive (byte-compat
+    of the already-priced arm + --strip-ext control)  |  anything else ->
+    OFF + one loud warning per distinct value. Never silent directive."""
+    s = str(v).strip().lower()
+    if s in ("false", "0", "off", "none", ""):
+        return False, "directive"
+    if s in ("facts", "factsx"):
+        return True, s
+    if s in ("true", "1", "yes"):
+        return True, "directive"
+    if s not in _EXT_KNOB_WARNED:
+        _EXT_KNOB_WARNED.add(s)
+        logger.warning(
+            f"[dv] ext_fields knob value {v!r:.100} not recognised — knob left "
+            f"OFF (expected one of: false/true/facts/factsx)")
+    return False, "directive"
+
+
+def _ext_label(style: str, off: float, dist: float) -> tuple:
+    """(key, value) for the gated ext label. LOCKSTEP with
+    scratch/extf_fields.apply_ext_fields modes label/facts/factsx — if you
+    change one, change the other, or live prompts stop matching the priced
+    arms (ext-fields lockstep rule)."""
+    side = "above" if dist > 0 else "below"
+    facts = f"price {off:.1f}% above 24h low, {abs(dist):.1f}% {side} fast 1h EMA"
+    if style == "facts":
+        return "short_chase_risk", facts
+    if style == "factsx":
+        return "price_extension", facts
+    return "short_chase_risk", facts + " — short is entering the bounce, not the flush"
 
 
 def _ext_fields_from_rows(rows: List[Dict[str, Any]], ts_ms: int,
@@ -789,6 +837,7 @@ def build_state(
     crowded_mover_label: bool = False,
     setup_shadow: bool = False,
     ext_fields: bool = False,
+    ext_style: str = "directive",
 ) -> Dict[str, Any]:
     """The STATE: a compact structured snapshot of what the chat prompt says
     in prose. Deliberately lean (~1-2k tokens): the decision model's edge is
@@ -992,14 +1041,18 @@ def build_state(
         if _fv is not None:
             _off, _dist = _fv
             if _off >= 1.5 or _dist > 0:
-                _side = "above" if _dist > 0 else "below"
-                state["short_chase_risk"] = (
-                    f"price {_off:.1f}% above 24h low, {abs(_dist):.1f}% {_side} fast 1h EMA"
-                    " — short is entering the bounce, not the flush")
-                logger.info(
-                    f"[dv] short_chase_risk emitted: off={_off:.1f}% "
-                    f"dist={_dist:+.1f}% (profile ext_fields on — t_8577433e live)"
-                )
+                _key, _val = _ext_label(ext_style, _off, _dist)
+                state[_key] = _val
+                if ext_style == "directive":
+                    logger.info(
+                        f"[dv] short_chase_risk emitted: off={_off:.1f}% "
+                        f"dist={_dist:+.1f}% (profile ext_fields on — t_8577433e live)"
+                    )
+                else:
+                    logger.info(
+                        f"[dv] {_key} emitted ({ext_style}): off={_off:.1f}% "
+                        f"dist={_dist:+.1f}% (profile ext_fields — t_ce765165 variants)"
+                    )
     return state
 
 
