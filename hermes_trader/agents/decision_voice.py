@@ -740,8 +740,8 @@ def _ext_knob(v: Any) -> tuple:
     if s not in _EXT_KNOB_WARNED:
         _EXT_KNOB_WARNED.add(s)
         logger.warning(
-            f"[dv] ext_fields knob value {v!r} not recognised — knob left OFF "
-            f"(expected one of: false/true/facts/factsx)")
+            f"[dv] ext_fields knob value {v!r:.100} not recognised — knob left "
+            f"OFF (expected one of: false/true/facts/factsx)")
     return False, "directive"
 
 
