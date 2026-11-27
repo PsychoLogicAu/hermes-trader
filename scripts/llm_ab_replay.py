@@ -606,7 +606,7 @@ def _replay_systemone(args, arm, api_key, rows, done, arm_tag):
             questions = blob.get("questions")
             held = bool(state.get("held_position"))
             if strip_ext:
-                for _k in ("short_chase_risk", "tape_position"):
+                for _k in ("short_chase_risk", "price_extension", "tape_position"):
                     if _k in state:
                         state.pop(_k)
                         rec["ext_stripped"] = True
@@ -1095,13 +1095,15 @@ def main():
     rp = sub.add_parser("replay")
     rp.add_argument("--arm", required=True)
     rp.add_argument("--cohort", default="", help="override cohort jsonl path")
-    rp.add_argument("--ext-fields", choices=("none", "numeric", "label"), default="none",
+    rp.add_argument("--ext-fields", choices=("none", "numeric", "label", "facts", "factsx"), default="none",
                     help="blob-native ext-fields gauntlet arms (plan 2026-11-26): "
                          "numeric = add tape_position scalars; label = add gated "
-                         "short_chase_risk sentence. Requires cohort rows whose "
+                         "short_chase_risk sentence; facts/factsx = facts-only variants "
+                         "(t_ce765165: directive saturates trap_veto; facts drops the clause, "
+                         "factsx also renames key to price_extension). Requires cohort rows whose "
                          "user_message is a {state,questions} JSON blob.")
     rp.add_argument("--strip-ext", action="store_true",
-                    help="strip short_chase_risk/tape_position from blob state to rebuild the "
+                    help="strip short_chase_risk/price_extension/tape_position from blob state to rebuild the "
                          "NO-CLAUSE control prompt over post-knob live accrual (t_8577433e; "
                          "arm tag gains a __stripped suffix).")
     rp.add_argument("--limit", type=int, default=0)
