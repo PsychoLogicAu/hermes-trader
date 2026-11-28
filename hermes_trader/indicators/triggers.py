@@ -84,7 +84,8 @@ def volume_spike(candles: List[Candle], sigma_threshold: float = 3) -> TriggerHi
 
 
 def volume_spike_probe(candles: List[Candle], sigma_threshold: float = 3,
-                       lookback_bars: int = 3) -> dict:
+                       lookback_bars: int = 3, interval: str = "5m",
+                       now_ms: Optional[float] = None) -> dict:
     """Shadow probe for the volume-spike leg (t_c3e7ab77, 2026-11-28).
 
     The live volume_spike z-scores ONLY candles[-1] — which HL's
@@ -101,6 +102,20 @@ def volume_spike_probe(candles: List[Candle], sigma_threshold: float = 3,
     score-summing consumers match, attached to perception under its own key.
     Log-only accrual; decision behavior is byte-identical. Flip decision and
     numbers go to the board (t_c3e7ab77).
+
+    PROD NOTES (independent audit 2026-11-28, feat/volspike-shadow-probe):
+    - LIVE effective sigma is 2.0, not 3 (TRIGGER_CONFIG thresholds.sigmaThreshold,
+      config.py:47; no `thresholds` key exists in either live config, so nothing
+      overrides it). Accrual stats and any later rule decision must be read at
+      2.0 — perception passes the real effective value here.
+    - The pydantic Candle has NO 'T' field, so in production the bar-end time is
+      ALWAYS derived from `interval` (bucket_ms) — callers must pass the scan's
+      candleInterval or arm 2's fraction math silently dies on a 5m assumption.
+    - z_forming mirrors live volume_spike's z only for len(candles)>=22 (probe
+      _z needs idx>=21; live evaluates at len>=21). Unreachable divergence: the
+      scan path early-returns for series shorter than 50 bars.
+    - now_ms is a test seam for deterministic fraction math; production leaves
+      it None.
     """
     vols = [candle_val(c, "v") for c in candles]
     out = {"would_fire": False, "would_fire_scaled": False,
@@ -146,9 +161,11 @@ def volume_spike_probe(candles: List[Candle], sigma_threshold: float = 3,
     tend = (last.get("T") if isinstance(last, dict)
             else getattr(last, "T", None)) if last else None
     if t0:
-        tend = tend or (t0 + 300_000)  # assume 5m bucket when close-time absent
+        mins = float(str(interval).rstrip("m")) if str(interval).endswith("m") else 5.0
+        bucket_ms = mins * 60_000
+        tend = tend or (t0 + bucket_ms)  # Candle lacks 'T': bucket is authoritative in prod
         if tend > t0:
-            frac = (time.time() * 1000 - t0) / (tend - t0)
+            frac = ((now_ms if now_ms is not None else time.time() * 1000) - t0) / (tend - t0)
             if 0.4 <= frac < 1.0:
                 out["frac"] = round(frac, 2)
                 w = vols[-21:-1]

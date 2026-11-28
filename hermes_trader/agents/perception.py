@@ -1042,7 +1042,8 @@ def _scan_single_market(
             # volumeSpike rule, computed log-only; research() reads this key.
             # NOT in hits on purpose — no consumer of triggers/scores sees it.
             "volspike_probe": trigger_mod.volume_spike_probe(
-                candles, thresholds["sigmaThreshold"]),
+                candles, thresholds["sigmaThreshold"],
+                interval=config["scan"]["candleInterval"]),
             "composite_score": score,
             "daily_move_pct": daily_move_pct,
             "chg3_pct": chg3_pct,
