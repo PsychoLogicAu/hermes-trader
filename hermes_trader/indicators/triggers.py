@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import time
 from typing import Any, Dict, List, Optional
 
 from hermes_trader.indicators.math import adx, anchored_vwap, atr, ema, mfi, rsi, sma, candle_val
@@ -80,6 +81,88 @@ def volume_spike(candles: List[Candle], sigma_threshold: float = 3) -> TriggerHi
         "reason": f"{z_score:.1f}σ volume spike" if fired else "flat",
         "fired": fired,
     }
+
+
+def volume_spike_probe(candles: List[Candle], sigma_threshold: float = 3,
+                       lookback_bars: int = 3) -> dict:
+    """Shadow probe for the volume-spike leg (t_c3e7ab77, 2026-11-28).
+
+    The live volume_spike z-scores ONLY candles[-1] — which HL's
+    candleSnapshot returns as the still-FORMING bar — against the prior 20
+    closed bars. Observed failure signature (11-28): breakout fires with
+    bars_beyond>=1 but volumeSpike is flat, because the surge bar aged out of
+    the [-1] position (partial-volume dilution + snapshot-only lookback, vs
+    the breakout's multi-bar window). This probe measures, per scan, what the
+    rule WOULD say using CLOSED bars only: z of the last closed bar and the
+    max over the last `lookback_bars` closed bars (each against its own
+    20-bar window).
+
+    Deliberately NOT a trigger hit: no name/fired/score keys that any() or
+    score-summing consumers match, attached to perception under its own key.
+    Log-only accrual; decision behavior is byte-identical. Flip decision and
+    numbers go to the board (t_c3e7ab77).
+    """
+    vols = [candle_val(c, "v") for c in candles]
+    out = {"would_fire": False, "would_fire_scaled": False,
+           "z_forming": None, "z_closed1": None,
+           "z3max": None, "age_bars": None}
+
+    def _z(idx: int):
+        if idx < 21 or idx >= len(vols):
+            return None
+        w = vols[idx - 20:idx]
+        if sum(1 for v in w if v == 0) > len(w) * 0.5:
+            return None
+        mean = sum(w) / len(w)
+        var = sum((v - mean) ** 2 for v in w) / len(w)
+        std = var ** 0.5
+        if std == 0:
+            return None
+        return abs(vols[idx] - mean) / std
+
+    out["z_forming"] = _z(len(vols) - 1)  # mirrors the live rule's evaluated bar
+    pairs = [(z, k) for z, k in
+             ((_z(len(vols) - 2 - k), k) for k in range(lookback_bars))
+             if z is not None]
+    if pairs:
+        best, age = max(pairs, key=lambda p: p[0])
+        out["z_closed1"] = round(pairs[0][0], 1)
+        out["z3max"] = round(best, 1)
+        out["age_bars"] = age
+        out["would_fire"] = best >= sigma_threshold
+
+    # Arm 3 (owner proposal 2026-11-28): TIME-NORMALIZED forming bar —
+    # v_full_equiv = v_partial / elapsed_fraction, z-scored against the same
+    # 20 closed-bar window the live rule uses, so the forming bar is equally
+    # weighted instead of diluted by partial accumulation. Known caveats the
+    # accrual must price: intra-bar volume is front-loaded (early-bar ratios
+    # overpredict the final total) and the scaled estimator carries extra
+    # variance the full-bar sigma window isn't calibrated to — hence the
+    # fraction >= 0.4 guard and shadow-only status.
+    out["z_forming_scaled"] = None
+    out["frac"] = None
+    last = candles[-1] if candles else None
+    t0 = candle_val(last, "t") if last else 0
+    tend = (last.get("T") if isinstance(last, dict)
+            else getattr(last, "T", None)) if last else None
+    if t0:
+        tend = tend or (t0 + 300_000)  # assume 5m bucket when close-time absent
+        if tend > t0:
+            frac = (time.time() * 1000 - t0) / (tend - t0)
+            if 0.4 <= frac < 1.0:
+                out["frac"] = round(frac, 2)
+                w = vols[-21:-1]
+                if len(vols) >= 21 and sum(1 for v in w if v == 0) <= len(w) * 0.5:
+                    mean = sum(w) / len(w)
+                    var = sum((v - mean) ** 2 for v in w) / len(w)
+                    std = var ** 0.5
+                    if std > 0:
+                        z_sc = abs(vols[-1] / frac - mean) / std
+                        out["z_forming_scaled"] = round(z_sc, 1)
+                        out["would_fire_scaled"] = z_sc >= sigma_threshold
+    if out["z_forming"] is not None:
+        out["z_forming"] = round(out["z_forming"], 1)
+    return out
 
 
 def _range_edges(candles: List[Candle], lookback: int):

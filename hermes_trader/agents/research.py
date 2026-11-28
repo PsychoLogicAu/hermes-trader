@@ -2557,8 +2557,28 @@ def research(coin: str, perception: Dict[str, Any]) -> Dict[str, Any]:
         {},
     )
 
+    # Shadow probe for the volume-spike leg (t_c3e7ab77, 2026-11-28): the live
+    # volumeSpike rule z-scores only the FORMING bar (HL candleSnapshot returns
+    # it as candles[-1]), so a surge bar that closed between two scans of this
+    # coin is invisible while the breakout still fires (11-28: 53/122
+    # shape-blocks were breakout-only). Log the cases where a shadow variant
+    # (closed-bar lookback, or time-scaled forming bar) would fire but the
+    # live rule stayed flat — the counterfactual accrual that decides the
+    # rule change. Nothing downstream consumes it; decisions byte-identical.
+    _vsp = perception.get("volspike_probe") or {}
+    if (_vsp.get("would_fire") or _vsp.get("would_fire_scaled")) and not any(
+            t.get("name") == "volumeSpike" and t.get("fired")
+            for t in (perception.get("triggers") or [])):
+        logger.info(
+            f"[volspike-probe] {coin} closed={'Y' if _vsp.get('would_fire') else 'n'}"
+            f" scaled={'Y' if _vsp.get('would_fire_scaled') else 'n'}"
+            f" z3max={_vsp.get('z3max')} age={_vsp.get('age_bars')}bars "
+            f"z_closed1={_vsp.get('z_closed1')} forming_z={_vsp.get('z_forming')} "
+            f"z_scaled={_vsp.get('z_forming_scaled')}@frac={_vsp.get('frac')} "
+            f"(shadow t_c3e7ab77)")
     analysis = {
         "id": str(uuid.uuid4()),
+        "volspike_probe": _vsp,  # shadow probe (t_c3e7ab77); not consumed by gates
         "perception_id": perception.get("id", "unknown"),
         "coin": coin,
         "verdict": parsed["verdict"],
