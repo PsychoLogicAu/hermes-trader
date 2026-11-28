@@ -3619,6 +3619,50 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
                     logger.warning(f"[gate][TAPE-RECOVERY-SHORT] VETO {_trs_detail}")
                     return "runner_gate_blocked (tape-recovery short veto)"
 
+    # t_c3e7ab77 (2026-11-28, owner GO 'shadow log'): strength-entry SHORT
+    # throttle — the POSITIVE-drift twin of the tape-recovery veto above.
+    # Evidence (board t_c3e7ab77 #14): on the s8 set the deployed 0.46 book
+    # prices BTC24 >= +1% entries NEGATIVE (-$21.8/13d BN2, alpha -3.1,
+    # h2 -44.2) while dip/band entries carry the whole increment; strength
+    # entries are ~10% of admits. SHADOW-FIRST per owner directive: accrue
+    # the counterfactual, do not cut live flow on one era of data.
+    # Rule: SHORT + BTC trail-24h drift >= btc24_min_pct -> throttle.
+    # NO arm condition: positive drift IS the trigger; the knob is a floor,
+    # not a band. btc24_min_pct MUST be > 0 (<=0 would throttle the whole
+    # short book — a misconfig, refused loudly, gate INERT).
+    # Same placement law (above every early-return admission) and the same
+    # fail-safe asymmetry as the tape-recovery twin: drift gap / malformed
+    # keys = INERT. Absent block = ZERO tape fetches, byte-identical.
+    _sth_cfg = config.get("strength_short_throttle_gate") or {}
+    _sth_mode = str(_sth_cfg.get("mode", "off")).strip().lower()
+    _sth_min_raw = _sth_cfg.get("btc24_min_pct")
+    if side == "short" and _sth_mode in ("shadow", "live") and _sth_min_raw is not None:
+        _sth_drift = None
+        _sth_min = None
+        try:
+            _sth_min = float(_sth_min_raw)
+            if _sth_min <= 0:
+                logger.warning("[gate][STRENGTH-THROTTLE] btc24_min_pct "
+                               f"{_sth_min_raw!r} must be > 0 (0 or below "
+                               "throttles the entire short book) — gate INERT")
+            else:
+                _sth_tt = _late_chase_tape_read()
+                if isinstance(_sth_tt, dict) and _sth_tt.get("drift") is not None:
+                    _sth_drift = float(_sth_tt["drift"])
+        except (TypeError, ValueError):
+            _sth_drift = None  # malformed/gap -> inert (twin law)
+        if _sth_min is not None and _sth_drift is not None and _sth_drift >= _sth_min:
+            _sth_detail = (f"{coin} SHORT on BTC trail-24h drift "
+                           f"{_sth_drift:+.2f}% >= {_sth_min:+.1f}% at conf "
+                           f"{conf:.2f}")
+            if _sth_mode == "shadow":
+                logger.warning(
+                    f"[gate][STRENGTH-THROTTLE][SHADOW] WOULD SKIP {_sth_detail}"
+                    " — NOT skipping (shadow mode; kill-switch: mode off)")
+            else:
+                logger.warning(f"[gate][STRENGTH-THROTTLE] SKIP {_sth_detail}")
+                return "runner_gate_blocked (strength short throttle)"
+
     cohort_tag = str(analysis.get("cohort_tag") or "").strip().lower()
     if cohort_tag:
         adm = gate.get("cohort_admissions") or {}
