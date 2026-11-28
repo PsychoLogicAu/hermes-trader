@@ -3633,24 +3633,57 @@ def _runner_entry_block_reason(analysis: Dict[str, Any], config: Dict[str, Any])
     # Same placement law (above every early-return admission) and the same
     # fail-safe asymmetry as the tape-recovery twin: drift gap / malformed
     # keys = INERT. Absent block = ZERO tape fetches, byte-identical.
-    _sth_cfg = config.get("strength_short_throttle_gate") or {}
-    _sth_mode = str(_sth_cfg.get("mode", "off")).strip().lower()
-    _sth_min_raw = _sth_cfg.get("btc24_min_pct")
-    if side == "short" and _sth_mode in ("shadow", "live") and _sth_min_raw is not None:
+    # Hardening per independent audit (deleg_f9116435, 2026-11-28): the
+    # top-level value gets an isinstance(dict) guard BEFORE any .get (a
+    # truthy non-dict hot-config typo must not raise AttributeError out of
+    # the runner gate — no per-gate try upstream; the loop watchdog would
+    # abort the whole scan cycle); casts go through _sd_finite (huge-int
+    # OverflowError + NaN/Inf polarity — the documented fourth-recurrence
+    # class); bool floors are refused explicitly (S1 precedent); an armed
+    # mode with no floor warns instead of silently no-opping.
+    _sth_cfg = config.get("strength_short_throttle_gate")
+    _sth_mode = "off"
+    _sth_min_raw = None
+    if _sth_cfg is None or _sth_cfg is False:
+        pass  # absent / explicit False = off, silent (master-off shorthand)
+    elif not isinstance(_sth_cfg, dict):
+        logger.warning("[gate][STRENGTH-THROTTLE] strength_short_throttle_gate "
+                       f"malformed ({_sth_cfg!r}) — expected an object — INERT")
+    else:
+        _sth_mode = str(_sth_cfg.get("mode", "off")).strip().lower()
+        _sth_min_raw = _sth_cfg.get("btc24_min_pct")
+    if side == "short" and _sth_mode in ("shadow", "live"):
         _sth_drift = None
         _sth_min = None
-        try:
-            _sth_min = float(_sth_min_raw)
-            if _sth_min <= 0:
+        if _sth_min_raw is None:
+            logger.warning("[gate][STRENGTH-THROTTLE] mode "
+                           f"{_sth_mode!r} armed but btc24_min_pct absent "
+                           "— gate INERT")
+        elif isinstance(_sth_min_raw, bool):
+            logger.warning("[gate][STRENGTH-THROTTLE] btc24_min_pct "
+                           f"{_sth_min_raw!r} is a boolean, not a floor "
+                           "(bool shorthand refused per t_fb899217 S1 "
+                           "precedent) — gate INERT")
+        else:
+            _sth_min = _sd_finite(_sth_min_raw)
+            if _sth_min is None:
+                logger.warning("[gate][STRENGTH-THROTTLE] btc24_min_pct "
+                               f"{_sth_min_raw!r} not a finite number — "
+                               "gate INERT")
+            elif _sth_min <= 0:
                 logger.warning("[gate][STRENGTH-THROTTLE] btc24_min_pct "
                                f"{_sth_min_raw!r} must be > 0 (0 or below "
                                "throttles the entire short book) — gate INERT")
+                _sth_min = None
             else:
-                _sth_tt = _late_chase_tape_read()
-                if isinstance(_sth_tt, dict) and _sth_tt.get("drift") is not None:
-                    _sth_drift = float(_sth_tt["drift"])
-        except (TypeError, ValueError):
-            _sth_drift = None  # malformed/gap -> inert (twin law)
+                try:
+                    _sth_tt = _late_chase_tape_read()
+                except Exception:
+                    _sth_tt = None  # sensor raise -> inert (never escapes gate)
+                if isinstance(_sth_tt, dict):
+                    _sth_drift = _sd_finite(_sth_tt.get("drift"))
+                    # None (gap/malformed/non-finite incl. huge int or +inf)
+                    # -> inert; _sd_finite also ends the OverflowError escape.
         if _sth_min is not None and _sth_drift is not None and _sth_drift >= _sth_min:
             _sth_detail = (f"{coin} SHORT on BTC trail-24h drift "
                            f"{_sth_drift:+.2f}% >= {_sth_min:+.1f}% at conf "

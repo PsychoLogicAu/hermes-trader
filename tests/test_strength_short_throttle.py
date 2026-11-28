@@ -31,14 +31,14 @@ from hermes_trader.agents.executor import _runner_entry_block_reason  # noqa: E4
 BLOCK = "runner_gate_blocked (strength short throttle)"
 
 
-def _block(mode, mn=1.0):
+def _block(mode, mn: object = 1.0) -> dict:
     b = {"mode": mode}
     if mn is not None:
         b["btc24_min_pct"] = mn
     return b
 
 
-def _config(mode, sth_min=1.0, **over):
+def _config(mode, sth_min: object = 1.0, **over) -> dict:
     gate = {"enabled": True, "min_confidence": 0.65, "min_composite": 30.0,
             "allow_shorts": True}
     gate.update(over)
@@ -152,3 +152,103 @@ def test_nonpositive_min_refused_not_throttle_all(monkeypatch, caplog):
         r = _runner_entry_block_reason(_analysis(), _config("live", sth_min=0.0))
     assert r == ""
     assert "must be > 0" in caplog.text
+
+
+# ── independent-audit pins (deleg_f9116435, 2026-11-28) ─────────────────────
+# The audit proved two raise surfaces escaped the runner gate (no per-gate
+# try upstream -> trading_loop watchdog aborts the whole scan cycle): a
+# truthy NON-DICT top-level value (.get AttributeError, both sides, before
+# the side guard) and huge-int values (float(10**400) OverflowError past the
+# bare (TypeError, ValueError)). Plus polarity: bool floor silent-arm,
+# +inf drift firing, armed-mode-without-floor silent no-op. All pinned here.
+
+def test_top_level_bool_inert(monkeypatch):
+    tc = _stub_tape(monkeypatch, 5.0)
+    cfg = _config(None)
+    cfg["strength_short_throttle_gate"] = True  # truthy non-dict typo
+    assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    assert tc == []
+
+
+def test_top_level_list_inert(monkeypatch):
+    tc = _stub_tape(monkeypatch, 5.0)
+    cfg = _config(None)
+    cfg["strength_short_throttle_gate"] = [{"mode": "live"}]
+    assert _runner_entry_block_reason(_analysis(side="short"), cfg) == ""
+    assert tc == []
+
+
+def test_top_level_string_inert_long_side_too(monkeypatch):
+    # pre-side-guard raise: the LONG path must be equally protected
+    tc = _stub_tape(monkeypatch, 5.0)
+    cfg = _config(None)
+    cfg["strength_short_throttle_gate"] = "shadow"
+    assert _runner_entry_block_reason(_analysis(side="long"), cfg) != BLOCK
+    assert tc == []
+
+
+def test_top_level_false_silent_off(monkeypatch, caplog):
+    tc = _stub_tape(monkeypatch, 5.0)
+    cfg = _config(None)
+    cfg["strength_short_throttle_gate"] = False
+    with caplog.at_level("WARNING"):
+        assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    assert "STRENGTH-THROTTLE" not in caplog.text
+    assert tc == []
+
+
+def test_huge_int_floor_inert_no_raise(monkeypatch, caplog):
+    # float(10**400) raises OverflowError — the _sd_finite class of defect
+    tc = _stub_tape(monkeypatch, 5.0)
+    cfg = _config(None)
+    cfg["strength_short_throttle_gate"] = {"mode": "live",
+                                          "btc24_min_pct": 10 ** 400}
+    with caplog.at_level("WARNING"):
+        assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    assert "not a finite number" in caplog.text
+    assert tc == []
+
+
+def test_huge_int_drift_inert_no_raise(monkeypatch):
+    tc = _stub_tape(monkeypatch, 10 ** 400)
+    assert _runner_entry_block_reason(_analysis(), _config("live")) == ""
+    assert len(tc) == 1  # consulted, parsed to None, inert
+
+
+def test_inf_drift_does_not_fire(monkeypatch):
+    # polarity vs sibling: garbage +inf sensor value must NOT arm a live
+    # block (pre-fix float('inf') >= 1.0 fired)
+    _stub_tape(monkeypatch, float("inf"))
+    assert _runner_entry_block_reason(_analysis(), _config("live")) == ""
+
+
+def test_bool_floor_refused(monkeypatch, caplog):
+    # S1 precedent (t_fb899217): bool shorthand refused explicitly, never
+    # silently arms at float(True)==1.0
+    tc = _stub_tape(monkeypatch, 5.0)
+    with caplog.at_level("WARNING"):
+        r = _runner_entry_block_reason(_analysis(), _config("live", sth_min=True))
+    assert r == ""
+    assert "boolean" in caplog.text
+    assert tc == []
+
+
+def test_nan_floor_inert(monkeypatch, caplog):
+    tc = _stub_tape(monkeypatch, 5.0)
+    cfg = _config(None)
+    cfg["strength_short_throttle_gate"] = {"mode": "shadow",
+                                          "btc24_min_pct": float("nan")}
+    with caplog.at_level("WARNING"):
+        assert _runner_entry_block_reason(_analysis(), cfg) == ""
+    assert "not a finite number" in caplog.text
+    assert tc == []
+
+
+def test_armed_without_floor_warns(monkeypatch, caplog):
+    # mode live + no floor must NOT be a silent dead gate
+    tc = _stub_tape(monkeypatch, 5.0)
+    with caplog.at_level("WARNING"):
+        r = _runner_entry_block_reason(_analysis(), _config("live", sth_min=None))
+    assert r == ""
+    assert "absent" in caplog.text
+    assert tc == []
